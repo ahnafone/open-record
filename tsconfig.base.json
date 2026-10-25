@@ -1,0 +1,43 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false,
+    "moduleResolution": "bundler",
+    "emitDecoratorMetadata": false,
+    "experimentalDecorators": true,
+    "importHelpers": true,
+    "target": "es2022",
+    "module": "esnext",
+    "lib": ["es2022", "dom"],
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "paths": {
+      "@open-record/models": ["./libs/models/src/index.ts"],
+      "@open-record/metadata": ["./libs/metadata/src/index.ts"],
+      "@open-record/music-source": ["./libs/music-source/src/index.ts"],
+      "@open-record/providers/local": ["./libs/providers/local/src/index.ts"],
+      "@open-record/providers/catalog": [
+        "./libs/providers/catalog/src/index.ts"
+      ],
+      "@open-record/state": ["./libs/state/src/index.ts"],
+      "@open-record/storage": ["./libs/storage/src/index.ts"],
+      "@open-record/player": ["./libs/player/src/index.ts"],
+      "@open-record/ui": ["./libs/ui/src/index.ts"],
+      "@open-record/features/browse": ["./libs/features/browse/src/index.ts"],
+      "@open-record/features/search": ["./libs/features/search/src/index.ts"],
+      "@open-record/features/library": ["./libs/features/library/src/index.ts"],
+      "@open-record/features/playlist": [
+        "./libs/features/playlist/src/index.ts"
+      ],
+      "@open-record/features/now-playing": [
+        "./libs/features/now-playing/src/index.ts"
+      ],
+      "@open-record/features/settings": [
+        "./libs/features/settings/src/index.ts"
+      ]
+    }
+  },
+  "exclude": ["node_modules", "tmp"]
+}

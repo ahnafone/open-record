@@ -1,0 +1,65 @@
+/* Global base styles. Design tokens come from libs/ui/src/styles/tokens.css (see project.json "styles"). */
+:root {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--type-body-font-family);
+  font-size: var(--type-body-font-size);
+  line-height: var(--type-body-line-height);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/*
+ * Routed screens fade in while rising 8px. No fill-mode, so no transform is
+ * left on the screen afterwards (a transformed ancestor would trap a feature's
+ * fixed-position <or-modal> backdrop).
+ */
+.screen-host > router-outlet + * {
+  display: block;
+  animation: or-screen-in var(--duration-base) var(--ease-standard);
+}
+
+@keyframes or-screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-host > router-outlet + * {
+    animation: none;
+  }
+}

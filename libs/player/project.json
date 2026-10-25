@@ -1,0 +1,22 @@
+{
+  "name": "player",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/player/src",
+  "prefix": "or",
+  "projectType": "library",
+  "tags": ["type:player"],
+  "// targets": "to see all targets run: nx show project player --web",
+  "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "{projectRoot}",
+        "commands": [
+          "ngc -p tsconfig.lib.json --noEmit",
+          "tsc -p tsconfig.spec.json --noEmit"
+        ],
+        "parallel": false
+      }
+    }
+  }
+}

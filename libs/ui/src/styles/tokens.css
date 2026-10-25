@@ -1,0 +1,102 @@
+/*
+ * GENERATED FILE - do not edit by hand.
+ * Source: DESIGN.md front matter (Open Record alpha).
+ * Regenerate: npm run tokens
+ */
+:root {
+  /* Colors */
+  --color-primary: #ff8d83;
+  --color-primary-hover: #ffa098;
+  --color-on-primary: #2a1210;
+  --color-background: #171b20;
+  --color-surface: #252c33;
+  --color-surface-raised: #2f383f;
+  --color-text: #f5f0e6;
+  --color-muted: #bcc4cb;
+  --color-border: #56616c;
+  --color-ivory: #efe5cf;
+  --color-ink: #16181c;
+  --color-vinyl: #0b0d10;
+
+  /* Font families */
+  --font-display: Georgia, "Times New Roman", serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Typography */
+  --type-display-font-family: var(--font-display);
+  --type-display-font-size: 32px;
+  --type-display-font-weight: 400;
+  --type-display-line-height: 1.15;
+  --type-display-letter-spacing: 0em;
+  --type-headline-font-family: var(--font-display);
+  --type-headline-font-size: 24px;
+  --type-headline-font-weight: 400;
+  --type-headline-line-height: 1.2;
+  --type-headline-letter-spacing: 0em;
+  --type-title-font-family: var(--font-display);
+  --type-title-font-size: 20px;
+  --type-title-font-weight: 600;
+  --type-title-line-height: 1.25;
+  --type-title-letter-spacing: 0em;
+  --type-section-font-family: var(--font-display);
+  --type-section-font-size: 18px;
+  --type-section-font-weight: 600;
+  --type-section-line-height: 1.25;
+  --type-section-letter-spacing: 0em;
+  --type-body-font-family: var(--font-body);
+  --type-body-font-size: 16px;
+  --type-body-font-weight: 400;
+  --type-body-line-height: 1.5;
+  --type-body-letter-spacing: 0em;
+  --type-button-font-family: var(--font-body);
+  --type-button-font-size: 15px;
+  --type-button-font-weight: 600;
+  --type-button-line-height: 1.3;
+  --type-button-letter-spacing: 0em;
+  --type-row-title-font-family: var(--font-body);
+  --type-row-title-font-size: 15px;
+  --type-row-title-font-weight: 600;
+  --type-row-title-line-height: 1.3;
+  --type-row-title-letter-spacing: 0em;
+  --type-body-sm-font-family: var(--font-body);
+  --type-body-sm-font-size: 14px;
+  --type-body-sm-font-weight: 400;
+  --type-body-sm-line-height: 1.45;
+  --type-body-sm-letter-spacing: 0em;
+  --type-meta-font-family: var(--font-body);
+  --type-meta-font-size: 12px;
+  --type-meta-font-weight: 400;
+  --type-meta-line-height: 1.4;
+  --type-meta-letter-spacing: 0.02em;
+  --type-eyebrow-font-family: var(--font-body);
+  --type-eyebrow-font-size: 11px;
+  --type-eyebrow-font-weight: 400;
+  --type-eyebrow-line-height: 1.4;
+  --type-eyebrow-letter-spacing: 0.16em;
+  --type-tab-label-font-family: var(--font-body);
+  --type-tab-label-font-size: 11px;
+  --type-tab-label-font-weight: 400;
+  --type-tab-label-line-height: 1.3;
+  --type-tab-label-letter-spacing: 0.04em;
+
+  /* Radii */
+  --rounded-none: 0px;
+  --rounded-sleeve: 3px;
+  --rounded-md: 8px;
+  --rounded-full: 999px;
+
+  /* Spacing */
+  --spacing-xxs: 2px;
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-gutter: 16px;
+  --spacing-touch: 44px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  --duration-fast: 140ms;
+  --duration-base: 200ms;
+}

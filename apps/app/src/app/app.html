@@ -1,0 +1,24 @@
+<or-top-bar
+  [root]="screen().data.root"
+  [title]="title()"
+  [backIcon]="screen().data.screen === 'now-playing' ? 'chev-down' : 'back'"
+  [backLabel]="screen().data.screen === 'now-playing' ? 'Close player' : 'Back'"
+  (back)="back()"
+/>
+
+<main
+  #screenHost
+  class="screen-host"
+  [attr.aria-label]="screen().data.title ?? null"
+>
+  <router-outlet />
+</main>
+
+<div #dock class="dock">
+  @if (player.current()) {
+  <or-mini-player (open)="openNowPlaying()" />
+  }
+  <or-tab-bar />
+</div>
+
+<or-toast-host />

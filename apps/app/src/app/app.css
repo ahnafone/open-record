@@ -1,0 +1,27 @@
+/* 3-row shell: top bar, scrolling screen host, dock. Chrome never scrolls. */
+:host {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100dvh;
+  padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+  background: var(--color-background);
+  overflow: hidden;
+}
+
+.screen-host {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  padding: var(--spacing-md) var(--spacing-gutter) var(--spacing-xl);
+}
+.screen-host::-webkit-scrollbar {
+  display: none;
+}
+
+.dock {
+  display: flex;
+  flex-direction: column;
+  background: var(--color-background);
+}

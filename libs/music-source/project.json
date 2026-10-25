@@ -1,0 +1,23 @@
+{
+  "name": "music-source",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/music-source/src",
+  "projectType": "library",
+  "tags": [
+    "type:music-source"
+  ],
+  "// targets": "to see all targets run: nx show project music-source --web",
+  "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "{projectRoot}",
+        "commands": [
+          "tsc -p tsconfig.lib.json --noEmit",
+          "tsc -p tsconfig.spec.json --noEmit"
+        ],
+        "parallel": false
+      }
+    }
+  }
+}
