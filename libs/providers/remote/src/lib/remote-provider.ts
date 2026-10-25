@@ -1,4 +1,4 @@
-import type { DownloadSite, PlayableSource, RemoteSearchResult, Track, TrackSource } from '@open-record/models';
+import type { AudioQuality, DownloadSite, PlayableSource, RemoteSearchResult, Track, TrackSource } from '@open-record/models';
 import { RemoteClient, type RemoteConfig } from './client';
 import { createLinkCache } from './link-cache';
 import { RemoteConfigError, RemoteError } from './errors';
@@ -75,6 +75,8 @@ export interface RemoteProviderOptions {
   saveBlob?: SaveBlob;
   /** Clock for link expiry (default `Date.now`). */
   now?: () => number;
+  /** Streaming quality, read on every resolve (default: server default, highest). */
+  streamQuality?: () => AudioQuality | undefined;
 }
 
 /**
@@ -96,16 +98,20 @@ export class RemoteProvider {
 
   private _client: RemoteClient | null = null;
   private readonly transport: HttpTransport;
-  private readonly links: (trackId: string, signal?: AbortSignal) => Promise<StreamLink>;
+  /** Keyed by `<quality>|<trackId>` so a quality change never reuses an old link. */
+  private readonly links: (key: string, signal?: AbortSignal) => Promise<StreamLink>;
 
   constructor(private readonly options: RemoteProviderOptions = {}) {
     this.transport = options.transport ?? createDefaultTransport();
     this.streams = new RemoteStreamResolver({ client: () => this.client, saveBlob: options.saveBlob });
     this.links = createLinkCache(
-      async (trackId) => {
+      async (key) => {
+        const at = key.indexOf('|');
+        const quality = key.slice(0, at) as AudioQuality | '';
+        const trackId = key.slice(at + 1);
         const url = urlFromRemoteTrackId(trackId);
         if (!url) throw new RemoteError(`"${trackId}" is not a remote track.`);
-        return this.streams.resolve(url);
+        return this.streams.resolve(url, undefined, quality || undefined);
       },
       { now: options.now },
     );
@@ -167,7 +173,8 @@ export class RemoteProvider {
   async resolve(trackId: string, signal?: AbortSignal): Promise<PlayableSource> {
     const saved = await this.resolveSaved(trackId);
     if (saved) return saved;
-    const link = await this.links(trackId, signal);
+    const quality = this.options.streamQuality?.() ?? '';
+    const link = await this.links(`${quality}|${trackId}`, signal);
     return link.mimeType ? { url: link.url, kind: 'remote', mimeType: link.mimeType } : { url: link.url, kind: 'remote' };
   }
 }

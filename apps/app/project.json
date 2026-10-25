@@ -18,6 +18,9 @@
         "outputPath": "dist/apps/app",
         "browser": "apps/app/src/main.ts",
         "tsConfig": "apps/app/tsconfig.app.json",
+        "allowedCommonJsDependencies": [
+          "jsqr"
+        ],
         "assets": [
           {
             "glob": "**/*",

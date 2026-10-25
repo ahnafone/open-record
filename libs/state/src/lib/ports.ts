@@ -1,5 +1,5 @@
 import { InjectionToken } from '@angular/core';
-import type { DownloadSite, Track } from '@open-record/models';
+import type { AudioQuality, DownloadSite, Track } from '@open-record/models';
 import type { MetadataFetch } from '@open-record/metadata-lookup';
 
 /**
@@ -75,6 +75,7 @@ export abstract class StreamResolverPort {
   abstract resolve(
     pageUrl: string,
     signal?: AbortSignal,
+    quality?: AudioQuality,
   ): Promise<{
     url: string;
     mimeType?: string;
@@ -95,6 +96,8 @@ export abstract class StreamResolverPort {
       id: string;
       onProgress?: (fraction: number) => void;
       signal?: AbortSignal;
+      /** Download quality; omitted = highest. */
+      quality?: AudioQuality;
     },
   ): Promise<{ sourceFile: string; sizeBytes: number; mimeType?: string }>;
 }
@@ -121,4 +124,67 @@ export abstract class PairingScannerPort {
    * scanner cannot run (for example, camera permission denied).
    */
   abstract scan(): Promise<string | null>;
+}
+
+/** How the device is connected right now. */
+export interface NetworkState {
+  connected: boolean;
+  /**
+   * `wifi` and `ethernet` count as unmetered; `cellular` as mobile data;
+   * `unknown` when the platform cannot tell (treated as unmetered).
+   */
+  connectionType: 'wifi' | 'ethernet' | 'cellular' | 'none' | 'unknown';
+}
+
+/**
+ * Connection status for background work (auto-download). The app provides
+ * it (Capacitor Network on native, `navigator.connection` on web). Without
+ * it the connection is assumed to be unmetered and online.
+ */
+export abstract class NetworkStatusPort {
+  abstract current(): Promise<NetworkState>;
+  /** Calls `listener` on every change; returns an unsubscribe function. */
+  abstract onChange(listener: (state: NetworkState) => void): () => void;
+}
+
+/** Supabase project the app signs in against (the anon key is public by design). */
+export interface AuthProjectConfig {
+  url: string;
+  anonKey: string;
+}
+
+/** The signed-in account. */
+export interface AuthUser {
+  id: string;
+  email?: string;
+}
+
+/**
+ * Optional accounts (Supabase Auth). The app provides it over
+ * `@supabase/supabase-js`; without it, or with no project configured, the app
+ * runs fully anonymous. Methods reject with an Error whose message is shown
+ * to the user. Session tokens are kept by the adapter (never in settings).
+ */
+export abstract class AuthPort {
+  /** Project baked in at build time, if any (then it cannot be changed in Settings). */
+  abstract readonly buildConfig: AuthProjectConfig | null;
+  /** Project entered in Settings (persisted by the adapter), or null. */
+  abstract loadProjectConfig(): Promise<AuthProjectConfig | null>;
+  /**
+   * Save (or clear with null) the Settings-entered project and switch to it.
+   * Switching signs out of the previous project. Rejects for an invalid URL.
+   */
+  abstract setProjectConfig(config: AuthProjectConfig | null): Promise<void>;
+  /** Start the client for the active project and restore its session. */
+  abstract restore(): Promise<AuthUser | null>;
+  /** Calls `listener` on sign-in, sign-out and token refresh; returns an unsubscribe function. */
+  abstract onChange(listener: (user: AuthUser | null) => void): () => void;
+  /** Resolves `needsConfirmation` when the project requires email confirmation first. */
+  abstract signUp(email: string, password: string): Promise<{ needsConfirmation: boolean }>;
+  abstract signIn(email: string, password: string): Promise<AuthUser>;
+  abstract signOut(): Promise<void>;
+  /** Email a password reset link. */
+  abstract resetPassword(email: string): Promise<void>;
+  /** Current access token (refreshed when needed), or null when signed out. */
+  abstract accessToken(): Promise<string | null>;
 }

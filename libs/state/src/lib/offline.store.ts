@@ -6,9 +6,16 @@ import { LOCAL_PROVIDER_ID, LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
 import { LocalMediaPort, METADATA_FETCH, StreamResolverPort } from './ports';
 import { isAbort, remoteErrorMessage } from './remote-errors';
+import { SettingsStore } from './settings.store';
 
 /** Saves that download at once. */
 export const OFFLINE_CONCURRENCY = 2;
+
+/**
+ * Failure text of an auto-download paused because the connection does not
+ * allow it. Such records are left to the auto-downloader (not retried at launch).
+ */
+export const WAITING_FOR_WIFI = 'Waiting for Wi-Fi.';
 
 /** What the UI shows for a remote track's offline copy. */
 export type OfflineStatus = 'queued' | 'saving' | 'saved' | 'failed';
@@ -37,6 +44,7 @@ export class OfflineStore {
   private readonly resolver = inject(StreamResolverPort, { optional: true });
   private readonly media = inject(LocalMediaPort, { optional: true });
   private readonly metadataFetch = inject(METADATA_FETCH, { optional: true });
+  private readonly settings = inject(SettingsStore);
   // PlaylistsStore injects this store: resolve it lazily.
   private readonly injector = inject(Injector);
 
@@ -118,6 +126,17 @@ export class OfflineStore {
   }
 
   /**
+   * Stop a queued or running save and mark it failed with `message` (used to
+   * pause auto-downloads). Unlike `cancel`, the auto-downloader retries it.
+   */
+  defer(trackId: string, message = WAITING_FOR_WIFI): void {
+    if (!this._jobs().has(trackId)) return;
+    this.dropLive(trackId);
+    void this.fail(trackId, message);
+    this.pump();
+  }
+
+  /**
    * Stop saves for these tracks without writing anything. Used just before
    * their records are deleted.
    */
@@ -173,6 +192,7 @@ export class OfflineStore {
     for (const record of await this.storage.importedTracks.list()) {
       if (record.track.providerId === LOCAL_PROVIDER_ID) continue;
       const status = record.status ?? 'saved';
+      if (status === 'failed' && record.error === WAITING_FOR_WIFI) continue;
       if (status === 'saving' || status === 'failed') {
         await this.ensureSaved(record.track);
       }
@@ -216,9 +236,11 @@ export class OfflineStore {
       const url = record?.track.source?.url;
       if (!record || !url) throw new Error('This track has no download link.');
 
+      await this.settings.ready();
       const out = await resolver.saveToDevice(url, {
         id: trackId,
         signal: abort.signal,
+        quality: this.settings.downloadQuality(),
         onProgress: (fraction) => {
           if (this.running.get(trackId) === abort)
             this.setJob(trackId, { status: 'saving', progress: clamp(fraction) });
@@ -334,7 +356,7 @@ export class OfflineStore {
 }
 
 /** Remote tracks with a page link can be saved; local imports and catalogue tracks cannot. */
-function isSavable(track: Track): boolean {
+export function isSavable(track: Track): boolean {
   return track.providerId !== LOCAL_PROVIDER_ID && !!track.source?.url;
 }
 

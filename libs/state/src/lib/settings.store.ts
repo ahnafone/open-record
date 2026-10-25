@@ -1,6 +1,17 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
-import { parsePairingLink } from '@open-record/models';
-import { SETTINGS_KEYS, StoragePort } from '@open-record/storage';
+import {
+  Injectable,
+  computed,
+  inject,
+  signal,
+  type WritableSignal,
+} from '@angular/core';
+import {
+  DEFAULT_AUDIO_QUALITY,
+  isAudioQuality,
+  parsePairingLink,
+  type AudioQuality,
+} from '@open-record/models';
+import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
 import { RemoteServerPort } from './ports';
 import { isAbort, remoteErrorMessage } from './remote-errors';
 
@@ -21,6 +32,33 @@ export type ConnectionState =
 
 const NO_SERVER: DownloadServerSettings = { url: '', token: '' };
 
+/** Streaming and download quality levels. */
+export interface AudioQualitySettings {
+  stream: AudioQuality;
+  download: AudioQuality;
+  /** Downloads use the streaming level (the `download` value is kept but ignored). */
+  sameForDownloads: boolean;
+}
+
+/** Background download switches. */
+export interface AutoDownloadSettings {
+  /** Keep every bookmarked library track saved on the device. */
+  library: boolean;
+  /** Allow auto-downloads on mobile data (otherwise Wi-Fi/Ethernet only). */
+  mobileData: boolean;
+}
+
+export const DEFAULT_QUALITY_SETTINGS: AudioQualitySettings = {
+  stream: DEFAULT_AUDIO_QUALITY,
+  download: DEFAULT_AUDIO_QUALITY,
+  sameForDownloads: false,
+};
+
+export const DEFAULT_AUTO_DOWNLOAD_SETTINGS: AutoDownloadSettings = {
+  library: false,
+  mobileData: false,
+};
+
 /**
  * App settings. Hydrates from storage on construction; setters persist
  * optimistically and roll back if the write fails.
@@ -39,6 +77,10 @@ export class SettingsStore {
   private readonly _server = signal<DownloadServerSettings>(NO_SERVER);
   private readonly _serverReady = signal(false);
   private readonly _connection = signal<ConnectionState>({ status: 'idle' });
+  private readonly _quality = signal<AudioQualitySettings>(DEFAULT_QUALITY_SETTINGS);
+  private readonly _autoDownload = signal<AutoDownloadSettings>(
+    DEFAULT_AUTO_DOWNLOAD_SETTINGS,
+  );
   private testAbort?: AbortController;
 
   /** True once the stored settings have been read. */
@@ -53,6 +95,23 @@ export class SettingsStore {
   readonly downloadServerConfigured = this._serverReady.asReadonly();
   /** Settings "Test connection" state. */
   readonly connection = this._connection.asReadonly();
+
+  /** Stored quality choices. */
+  readonly audioQuality = this._quality.asReadonly();
+  /** Quality requested when streaming. */
+  readonly streamQuality = computed(() => this._quality().stream);
+  /** Quality requested when saving to the device. */
+  readonly downloadQuality = computed(() => {
+    const q = this._quality();
+    return q.sameForDownloads ? q.stream : q.download;
+  });
+
+  /** Stored auto-download switches. */
+  readonly autoDownload = this._autoDownload.asReadonly();
+  readonly autoDownloadLibrary = computed(() => this._autoDownload().library);
+  readonly autoDownloadOnMobileData = computed(
+    () => this._autoDownload().mobileData,
+  );
 
   private loaded: Promise<void>;
 
@@ -93,6 +152,36 @@ export class SettingsStore {
       else await this.storage.settings.delete(SETTINGS_KEYS.downloadServer);
     } catch (err) {
       this.apply(before, false);
+      throw err;
+    }
+  }
+
+  /** Change quality settings; persists, rolling back if the write fails. */
+  async setAudioQuality(patch: Partial<AudioQualitySettings>): Promise<void> {
+    await this.loaded;
+    await this.persist(this._quality, SETTINGS_KEYS.audioQuality, patch);
+  }
+
+  /** Change auto-download switches; persists, rolling back if the write fails. */
+  async setAutoDownload(patch: Partial<AutoDownloadSettings>): Promise<void> {
+    await this.loaded;
+    await this.persist(this._autoDownload, SETTINGS_KEYS.autoDownload, patch);
+  }
+
+  private async persist<T extends object>(
+    target: WritableSignal<T>,
+    key: string,
+    patch: Partial<T>,
+  ): Promise<void> {
+    const before = target();
+    const next = { ...before, ...patch };
+    if (JSON.stringify(next) === JSON.stringify(before)) return;
+    target.set(next);
+    try {
+      // Settings objects here are plain JSON (strings and booleans).
+      await this.storage.settings.set(key, next as unknown as JsonValue);
+    } catch (err) {
+      target.set(before);
       throw err;
     }
   }
@@ -193,6 +282,41 @@ export class SettingsStore {
       // Unreadable settings fall back to defaults.
     }
     this.apply(stored ?? NO_SERVER, false);
+    this._quality.set(await this.readQuality());
+    this._autoDownload.set(await this.readAutoDownload());
     this._hydrated.set(true);
+  }
+
+  private async readQuality(): Promise<AudioQualitySettings> {
+    try {
+      const raw = await this.storage.settings.get<Partial<AudioQualitySettings>>(
+        SETTINGS_KEYS.audioQuality,
+      );
+      const d = DEFAULT_QUALITY_SETTINGS;
+      return {
+        stream: isAudioQuality(raw?.stream) ? raw.stream : d.stream,
+        download: isAudioQuality(raw?.download) ? raw.download : d.download,
+        sameForDownloads:
+          typeof raw?.sameForDownloads === 'boolean'
+            ? raw.sameForDownloads
+            : d.sameForDownloads,
+      };
+    } catch {
+      return DEFAULT_QUALITY_SETTINGS;
+    }
+  }
+
+  private async readAutoDownload(): Promise<AutoDownloadSettings> {
+    try {
+      const raw = await this.storage.settings.get<Partial<AutoDownloadSettings>>(
+        SETTINGS_KEYS.autoDownload,
+      );
+      return {
+        library: raw?.library === true,
+        mobileData: raw?.mobileData === true,
+      };
+    } catch {
+      return DEFAULT_AUTO_DOWNLOAD_SETTINGS;
+    }
   }
 }

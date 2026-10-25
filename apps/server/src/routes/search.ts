@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { tokenKey } from '../services/stream-cache';
+import { rateLimitKey } from '../plugins/auth';
 import { validateUrl } from '../services/url-guard';
 import { MAX_QUERY_LENGTH, resolveUrl, search, SEARCH_SOURCES, type SearchSource } from '../services/ytdlp';
 import type { RouteOptions } from './index';
@@ -10,7 +10,7 @@ export const searchRoutes: FastifyPluginAsync<RouteOptions> = async (app, { conf
   const rateLimit = {
     max: config.resolveRateLimitMax,
     timeWindow: '1 minute',
-    keyGenerator: (request: { headers: { authorization?: string } }) => tokenKey(request.headers.authorization),
+    keyGenerator: rateLimitKey,
   };
 
   app.get<{ Querystring: { q: string; source?: SearchSource } }>(

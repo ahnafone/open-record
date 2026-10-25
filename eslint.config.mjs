@@ -37,6 +37,7 @@ export default [
                 'type:storage',
                 'type:player',
                 'type:metadata',
+                'type:import',
               ],
             },
             {
@@ -52,12 +53,18 @@ export default [
                 'type:storage',
                 'type:player',
                 'type:metadata',
+                'type:import',
               ],
             },
             {
               // Pure iTunes/Deezer lookup: no workspace dependencies, injected fetch.
               sourceTag: 'type:metadata',
               onlyDependOnLibsWithTags: [],
+            },
+            {
+              // Pure Spotify import parsing + match scoring (libs/spotify-import).
+              sourceTag: 'type:import',
+              onlyDependOnLibsWithTags: ['type:models', 'type:metadata'],
             },
             {
               // Concrete providers depend on shared types only.

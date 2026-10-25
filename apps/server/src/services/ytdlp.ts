@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import type { AudioQuality } from '@open-record/models';
 import { createLimiter } from './resolve-limiter';
 
 /** yt-dlp binary; override with YTDLP_PATH. */
@@ -17,6 +18,31 @@ const QUEUE_WAIT_MS = 20_000;
 const DEFAULT_MAX_QUEUE = 16;
 /** Audio format selector for streams: prefer m4a, which every phone plays natively. */
 export const STREAM_FORMAT = 'bestaudio[ext=m4a]/bestaudio/best';
+
+/** Average-bitrate caps (kbps) for the capped quality levels. */
+export const QUALITY_MAX_ABR: Record<Exclude<AudioQuality, 'highest'>, number> = {
+  high: 160,
+  medium: 128,
+  low: 64,
+};
+
+/**
+ * yt-dlp format selector for a quality level. Capped levels take the best
+ * audio at or under the cap (m4a first); when every format is above it, the
+ * smallest one above the cap (closest); when bitrates are unknown, the plain
+ * `STREAM_FORMAT` choice.
+ */
+export function streamFormatFor(quality: AudioQuality = 'highest'): string {
+  if (quality === 'highest') return STREAM_FORMAT;
+  const cap = QUALITY_MAX_ABR[quality];
+  return [
+    `bestaudio[ext=m4a][abr<=${cap}]`,
+    `bestaudio[abr<=${cap}]`,
+    `worstaudio[ext=m4a][abr>${cap}]`,
+    `worstaudio[abr>${cap}]`,
+    STREAM_FORMAT,
+  ].join('/');
+}
 
 export const SEARCH_SOURCES = ['youtube', 'ytmusic', 'soundcloud', 'bandcamp', 'audiomack', 'mixcloud'] as const;
 export type SearchSource = (typeof SEARCH_SOURCES)[number];
@@ -311,7 +337,7 @@ export function toStreamResponse(info: YtDlpInfo): StreamResponse {
 }
 
 /** Resolves a validated page URL to a direct, playable audio link (nothing is downloaded). */
-export async function resolveStream(url: string): Promise<StreamResponse> {
-  const info = await runYtDlpJson(['-J', '--no-playlist', '-f', STREAM_FORMAT, '--', url]);
+export async function resolveStream(url: string, quality: AudioQuality = 'highest'): Promise<StreamResponse> {
+  const info = await runYtDlpJson(['-J', '--no-playlist', '-f', streamFormatFor(quality), '--', url]);
   return toStreamResponse(info);
 }

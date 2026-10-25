@@ -6,7 +6,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify';
 import type { ServerConfig } from './config';
-import { registerAuth } from './plugins/auth';
+import { createSupabaseVerifier, registerAuth } from './plugins/auth';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
 import { configureResolveLimits } from './services/ytdlp';
 
@@ -37,7 +37,11 @@ export async function buildApp(
     max: config.rateLimitMax,
     timeWindow: '1 minute',
   });
-  registerAuth(app, config.token);
+  registerAuth(
+    app,
+    config.token,
+    config.supabase ? createSupabaseVerifier(config.supabase) : undefined,
+  );
   configureResolveLimits(config.maxConcurrentResolves);
 
   for (const route of options.routes ?? defaultRoutes) {

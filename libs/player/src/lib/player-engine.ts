@@ -53,6 +53,9 @@ export interface SetQueueOptions {
 /** Seconds into a track after which "previous" restarts it instead. */
 export const RESTART_THRESHOLD_SEC = 3;
 
+/** Seconds before the end of a track at which the next one is pre-resolved. */
+export const PRELOAD_LEAD_SEC = 15;
+
 /**
  * Queue and transport logic on top of an AudioEngine. Framework-light: only
  * Angular signals, no DI, so it runs in plain unit tests with a fake engine.
@@ -109,6 +112,8 @@ export class PlayerEngine {
   private playIntent = false;
   /** Load token that already reported a failure (avoid double handling). */
   private failedToken = -1;
+  /** `${loadToken}|${trackId}` of the last preload, so it runs once per track. */
+  private preloadKey = '';
 
   constructor(
     private readonly engine: AudioEngine,
@@ -127,7 +132,10 @@ export class PlayerEngine {
       onPaused: () => {
         if (this._status() === 'playing') this._status.set('paused');
       },
-      onTime: (sec) => this._position.set(sec),
+      onTime: (sec) => {
+        this._position.set(sec);
+        this.maybePreload(sec);
+      },
       onDuration: (sec) => this._duration.set(sec),
       onEnded: () => void this.handleEnded(),
       onError: (err) =>
@@ -467,6 +475,38 @@ export class PlayerEngine {
       safe(next),
     ]);
     return { previous, next: nextMedia };
+  }
+
+  /**
+   * Near the end of the current track, resolve the next one (warming the
+   * resolver's link cache) and hint the engine to buffer it. Skipped in
+   * repeat-one and for native engines, which already get the next item in
+   * their neighbour window. Stale results (queue/track changed) are dropped.
+   */
+  private maybePreload(positionSec: number): void {
+    if (this.engine.wantsNeighbours || this._repeat() === 'one') return;
+    if (this._status() !== 'playing') return;
+    const duration = this._duration();
+    if (!duration || duration - positionSec > PRELOAD_LEAD_SEC) return;
+    const target = this.peek(1);
+    if (target === -1) return;
+    const track = this._queue()[this._order()[target]];
+    if (!track || track.id === this.current()?.id) return;
+    const token = this.loadToken;
+    const key = `${token}|${track.id}`;
+    if (key === this.preloadKey) return;
+    this.preloadKey = key;
+    void (async () => {
+      try {
+        const media = await this.toMedia(track);
+        const stillNext =
+          token === this.loadToken &&
+          this._queue()[this._order()[this.peek(1)]]?.id === track.id;
+        if (stillNext) this.engine.preload?.(media);
+      } catch {
+        // Preload is best effort; the real load reports errors.
+      }
+    })();
   }
 
   /** Re-send the neighbour window after a mode change (native only). */

@@ -12,8 +12,15 @@ import {
   viewChild,
 } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
-import { parsePairingLink, type Track } from '@open-record/models';
 import {
+  AUDIO_QUALITIES,
+  isAudioQuality,
+  parsePairingLink,
+  type AudioQuality,
+  type Track,
+} from '@open-record/models';
+import {
+  AuthStore,
   LibraryStore,
   PairingScannerPort,
   SettingsStore,
@@ -27,20 +34,31 @@ import {
   OrSectionHead,
   OrSleeve,
   OrSpinner,
+  OrSwitch,
   OrToast,
 } from '@open-record/ui';
+import { AccountSection } from './account-section';
 import { MUSIC_DISCLAIMER } from './credits';
 import { EditTrackDialog } from './edit-track-dialog';
 import { formatBytes } from './format-bytes';
 
+const QUALITY_LABELS: Record<AudioQuality, string> = {
+  highest: 'Highest (best available)',
+  high: 'High (about 160 kbps)',
+  medium: 'Medium (about 128 kbps)',
+  low: 'Low (about 64 kbps, data saver)',
+};
+
 /**
- * Settings screen: import audio files, the stream server (URL, token,
- * connection test), manage imported records, on-device storage with clear
+ * Settings screen: import audio files, optional account sign-in, the stream server (URL, token,
+ * connection test), audio quality, auto-download network rule, manage
+ * imported records, on-device storage with clear
  * actions, and the music disclaimer.
  */
 @Component({
   selector: 'or-settings-page',
   imports: [
+    AccountSection,
     EditTrackDialog,
     OrButton,
     OrEmptyState,
@@ -48,6 +66,7 @@ import { formatBytes } from './format-bytes';
     OrSectionHead,
     OrSleeve,
     OrSpinner,
+    OrSwitch,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -68,6 +87,10 @@ import { formatBytes } from './format-bytes';
     </or-button>
     @if (!library.canImport) {
       <p class="note">Importing is not available on this device.</p>
+    }
+
+    @if (auth.available) {
+      <or-account-section />
     }
 
     <or-section-head heading="Stream server" />
@@ -167,6 +190,61 @@ import { formatBytes } from './format-bytes';
     } @else {
       <p class="note">Streaming from a server is not available in this build.</p>
     }
+
+    <or-section-head heading="Audio quality" />
+    <p class="lede">
+      Higher quality sounds better but uses more data and storage. If a record
+      is not available at the chosen level, the closest one is used.
+    </p>
+    <div class="quality">
+      <label class="field-label" for="or-stream-quality">Streaming quality</label>
+      <select
+        id="or-stream-quality"
+        class="input select"
+        [value]="settings.audioQuality().stream"
+        (change)="setQuality($event, 'stream')"
+      >
+        @for (q of qualities; track q.value) {
+          <option [value]="q.value" [selected]="q.value === settings.audioQuality().stream">
+            {{ q.label }}
+          </option>
+        }
+      </select>
+      <or-switch
+        label="Use streaming quality for downloads"
+        description="Saved records use the same level as streaming."
+        [checked]="settings.audioQuality().sameForDownloads"
+        (checkedChange)="setSameQuality($event)"
+      />
+      @if (!settings.audioQuality().sameForDownloads) {
+        <label class="field-label" for="or-download-quality">Download quality</label>
+        <select
+          id="or-download-quality"
+          class="input select"
+          [value]="settings.audioQuality().download"
+          (change)="setQuality($event, 'download')"
+        >
+          @for (q of qualities; track q.value) {
+            <option [value]="q.value" [selected]="q.value === settings.audioQuality().download">
+              {{ q.label }}
+            </option>
+          }
+        </select>
+      }
+    </div>
+
+    <or-section-head heading="Auto-download" />
+    <p class="lede">
+      Turn on auto-download in your Library or on a playlist to keep those
+      records saved on this device. Auto-downloads run on Wi-Fi only unless you
+      allow mobile data.
+    </p>
+    <or-switch
+      label="Allow auto-download on mobile data"
+      description="Saving records over mobile data can use a lot of data."
+      [checked]="settings.autoDownloadOnMobileData()"
+      (checkedChange)="setMobileData($event)"
+    />
 
     <or-section-head heading="Imported records" />
     @if (imported().length) {
@@ -403,6 +481,26 @@ import { formatBytes } from './format-bytes';
     .input[aria-invalid='true'] {
       border-color: var(--color-primary);
     }
+    .quality {
+      display: grid;
+      gap: var(--spacing-xs);
+    }
+    .select {
+      appearance: none;
+      padding-inline-end: 36px;
+      background-image: linear-gradient(45deg, transparent 50%, var(--color-muted) 50%),
+        linear-gradient(135deg, var(--color-muted) 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) 50%,
+        calc(100% - 13px) 50%;
+      background-size: 5px 5px;
+      background-repeat: no-repeat;
+      cursor: pointer;
+    }
+    .select:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
     .server-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -457,12 +555,16 @@ import { formatBytes } from './format-bytes';
 export class SettingsPage {
   protected readonly library = inject(LibraryStore);
   protected readonly settings = inject(SettingsStore);
+  protected readonly auth = inject(AuthStore);
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
   private readonly scanner = inject(PairingScannerPort, { optional: true });
 
   protected readonly disclaimer = MUSIC_DISCLAIMER;
+
+  protected readonly qualities: readonly { value: AudioQuality; label: string }[] =
+    AUDIO_QUALITIES.map((value) => ({ value, label: QUALITY_LABELS[value] }));
 
   protected readonly imported = this.library.importedTracks;
   protected readonly importing = signal(false);
@@ -608,6 +710,30 @@ export class SettingsPage {
       this.scanning.set(false);
     }
     if (text !== null) await this.pairWith(text);
+  }
+
+  protected setQuality(event: Event, which: 'stream' | 'download'): void {
+    const value = (event.target as HTMLSelectElement).value;
+    if (!isAudioQuality(value)) return;
+    void this.saveSetting(() => this.settings.setAudioQuality({ [which]: value }));
+  }
+
+  protected setSameQuality(on: boolean): void {
+    void this.saveSetting(() =>
+      this.settings.setAudioQuality({ sameForDownloads: on }),
+    );
+  }
+
+  protected setMobileData(on: boolean): void {
+    void this.saveSetting(() => this.settings.setAutoDownload({ mobileData: on }));
+  }
+
+  private async saveSetting(action: () => Promise<void>): Promise<void> {
+    try {
+      await action();
+    } catch {
+      this.toast.show('Could not save that setting. Try again.');
+    }
   }
 
   protected async testServer(): Promise<void> {

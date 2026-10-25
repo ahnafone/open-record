@@ -85,6 +85,17 @@ export class PlaylistsStore {
     return this.mutate(id, (p) => ({ ...p, visibility }));
   }
 
+  /** Keep every track of the playlist saved on the device (auto-download). */
+  setAutoDownload(id: string, on: boolean): Promise<Playlist> {
+    return this.mutate(id, (p) => {
+      if (!!p.autoDownload === on) return p;
+      const next: Playlist = { ...p };
+      if (on) next.autoDownload = true;
+      else delete next.autoDownload;
+      return next;
+    });
+  }
+
   /**
    * Append tracks, skipping ids already in the playlist. Full `Track`
    * objects are remembered first; remote tracks are then saved to the device
@@ -118,6 +129,46 @@ export class PlaylistsStore {
       if (track) await this.offline.ensureSaved(track);
     }
     return result;
+  }
+
+  /**
+   * Create a playlist from tracks already in the library index without
+   * saving any of them to the device (imports: tracks stay metadata-only
+   * until matched or downloaded). Repeated ids are dropped.
+   */
+  async createWithTracks(
+    name: string,
+    trackIds: readonly string[],
+  ): Promise<Playlist> {
+    const created = await this.create(name);
+    const ids = [...new Set(trackIds)];
+    if (!ids.length) return created;
+    return this.mutate(created.id, (p) => ({ ...p, trackIds: ids }));
+  }
+
+  /**
+   * Swap a track id for another in every playlist, keeping its position
+   * (a repeat of `newId` is dropped). Never saves to the device.
+   */
+  async replaceTrackEverywhere(oldId: string, newId: string): Promise<void> {
+    await this.loaded;
+    if (oldId === newId) return;
+    const affected = this._playlists().filter((p) =>
+      p.trackIds.includes(oldId),
+    );
+    for (const p of affected) {
+      await this.mutate(
+        p.id,
+        (pl) => {
+          const seen = new Set<string>();
+          const trackIds = pl.trackIds
+            .map((t) => (t === oldId ? newId : t))
+            .filter((t) => !seen.has(t) && !!seen.add(t));
+          return { ...pl, trackIds };
+        },
+        false,
+      );
+    }
   }
 
   removeTrack(id: string, trackId: string): Promise<Playlist> {
@@ -182,6 +233,7 @@ export class PlaylistsStore {
   private async mutate(
     id: string,
     change: (p: Playlist) => Playlist,
+    reconcile = true,
   ): Promise<Playlist> {
     await this.loaded;
     const before = this.playlist(id);
@@ -201,7 +253,7 @@ export class PlaylistsStore {
       throw err;
     }
     const dropped = before.trackIds.some((t) => !after.trackIds.includes(t));
-    if (dropped) await this.offline.reconcile();
+    if (dropped && reconcile) await this.offline.reconcile();
     return after;
   }
 

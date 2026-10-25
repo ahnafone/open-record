@@ -1,5 +1,6 @@
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
+import type { AudioQuality } from '@open-record/models';
 import type { RemoteClient } from './client';
 import { AbortedError, HttpError, NetworkError, RemoteConfigError } from './errors';
 
@@ -30,6 +31,8 @@ export interface SaveToDeviceOptions {
   /** Fraction 0..1. */
   onProgress?: (fraction: number) => void;
   signal?: AbortSignal;
+  /** Download quality; omitted = server default (highest). */
+  quality?: AudioQuality;
 }
 
 export interface SavedFile {
@@ -101,8 +104,9 @@ export class RemoteStreamResolver {
   async resolve(
     pageUrl: string,
     signal?: AbortSignal,
+    quality?: AudioQuality,
   ): Promise<{ url: string; mimeType?: string; expiresAt?: number; headers?: Record<string, string>; meta?: StreamMeta }> {
-    const stream = await this.options.client().streamUrl(pageUrl, signal);
+    const stream = await this.options.client().streamUrl(pageUrl, signal, quality);
     const link: StreamLink = { url: stream.url, meta: { ...stream.track, artworkUrl: stream.track.thumbnailUrl } };
     if (stream.mimeType) link.mimeType = stream.mimeType;
     if (stream.httpHeaders) link.headers = stream.httpHeaders;
@@ -120,7 +124,7 @@ export class RemoteStreamResolver {
    */
   async saveToDevice(pageUrl: string, opts: SaveToDeviceOptions): Promise<SavedFile> {
     if (opts.signal?.aborted) throw new AbortedError();
-    const stream = await this.options.client().streamUrl(pageUrl, opts.signal);
+    const stream = await this.options.client().streamUrl(pageUrl, opts.signal, opts.quality);
     const path = savedFilePath(opts.id, stream.mimeType);
     const result = this.native
       ? await this.downloadNative(stream.url, stream.httpHeaders ?? {}, path, opts)

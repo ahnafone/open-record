@@ -453,8 +453,8 @@ overlays.
 - Don't add new accent hues, gradients on UI controls, or shadows on flat
   cards and rows.
 - Don't use radii other than 8px, pill, circle or 3px sleeve corners.
-- Don't crop or stretch cover art; fit it inside the sleeve
-  (`object-fit: contain`) and use the disc fallback when it is missing.
+- Don't stretch cover art; sleeves are always square and art fills them
+  (`object-fit: cover`). Use the disc fallback when it is missing.
 - Don't animate longer than 200ms for UI transitions or use bouncy easing.
 - Don't convey "now playing" by colour alone; pair it with the spinning disc,
   progress bar or pressed state.

@@ -1,7 +1,12 @@
 import { Injectable, Injector, computed, inject, signal } from '@angular/core';
 import type { EditableTrackField, Track } from '@open-record/models';
 import { MusicSourceRegistry } from '@open-record/music-source';
-import { StoragePort, type ImportedTrack } from '@open-record/storage';
+import {
+  SETTINGS_KEYS,
+  StoragePort,
+  type ImportedTrack,
+  type JsonValue,
+} from '@open-record/storage';
 // Circular with these stores; only used at call time, never at module load.
 import { PlayerStore } from './player.store';
 import { PlaylistsStore } from './playlists.store';
@@ -68,6 +73,8 @@ export class LibraryStore {
   private readonly _savedIds = signal<readonly string[]>([]);
   /** Stored file records by track id: a track is "imported" iff it has one. */
   private readonly _stored = signal<ReadonlyMap<string, ImportedTrack>>(new Map());
+  /** Tracks persisted by metadata only (no file record), e.g. Spotify imports. */
+  private readonly _metadata = signal<ReadonlyMap<string, Track>>(new Map());
   private readonly _status = signal<LoadStatus>('loading');
   private readonly _error = signal<string | null>(null);
 
@@ -217,6 +224,75 @@ export class LibraryStore {
     if (track.artUrl) return track.artUrl;
     if (!track.coverPath || !this.media) return undefined;
     return this.media.artUrl(track);
+  }
+
+  // ---- Metadata-only tracks -------------------------------------------------
+
+  /**
+   * Persist tracks by metadata only: they join the index and survive
+   * restarts, but nothing is saved to the device (e.g. Spotify imports and
+   * their matches). Same-id entries are replaced; a stored file record still
+   * wins in the index.
+   */
+  async addMetadataTracks(tracks: readonly Track[]): Promise<void> {
+    await this.loaded;
+    if (!tracks.length) return;
+    const next = new Map(this._metadata());
+    for (const t of tracks) next.set(t.id, t);
+    await this.writeMetadata(next);
+    for (const t of tracks) if (!this._stored().has(t.id)) this.upsert(t);
+  }
+
+  /** Forget metadata-only tracks (index entries of tracks with a file record stay). */
+  async removeMetadataTracks(ids: readonly string[]): Promise<void> {
+    await this.loaded;
+    const gone = new Set(ids.filter((id) => this._metadata().has(id)));
+    if (!gone.size) return;
+    const next = new Map(this._metadata());
+    for (const id of gone) next.delete(id);
+    await this.writeMetadata(next);
+    const stored = this._stored();
+    this._tracks.update((all) =>
+      all.filter((t) => !gone.has(t.id) || stored.has(t.id)),
+    );
+  }
+
+  /** True when the track is persisted by metadata only. Reactive. */
+  isMetadataOnly(trackId: string): boolean {
+    return this._metadata().has(trackId) && !this._stored().has(trackId);
+  }
+
+  /**
+   * Bookmark tracks without saving them to the device (imports). `savedAt`
+   * (epoch ms) sets their place in the most-recent-first order; ids already
+   * saved are left alone.
+   */
+  async bookmarkWithoutSaving(
+    entries: readonly { id: string; savedAt?: number }[],
+  ): Promise<void> {
+    await this.loaded;
+    const seen = new Set(this._savedIds());
+    const fresh = entries.filter((e) => !seen.has(e.id) && !!seen.add(e.id));
+    if (!fresh.length) return;
+    try {
+      for (const e of fresh)
+        await this.storage.savedRecords.add(e.id, e.savedAt);
+    } finally {
+      this._savedIds.set(await this.storage.savedRecords.list());
+    }
+  }
+
+  /** Move a bookmark to another track id, keeping its position. Never saves to the device. */
+  async replaceSaved(oldId: string, newId: string): Promise<void> {
+    await this.loaded;
+    if (oldId === newId || !this.isSaved(oldId)) return;
+    await this.storage.savedRecords.replace(oldId, newId);
+    this._savedIds.update((ids) => {
+      const seen = new Set<string>();
+      return ids
+        .map((id) => (id === oldId ? newId : id))
+        .filter((id) => !seen.has(id) && !!seen.add(id));
+    });
   }
 
   // ---- Imported files ------------------------------------------------------
@@ -386,6 +462,14 @@ export class LibraryStore {
 
   // ---- Internals -----------------------------------------------------------
 
+  private async writeMetadata(next: ReadonlyMap<string, Track>): Promise<void> {
+    await this.storage.settings.set(
+      SETTINGS_KEYS.metadataTracks,
+      [...next.values()] as unknown as JsonValue,
+    );
+    this._metadata.set(next);
+  }
+
   private replaceTrack(track: Track): void {
     this._tracks.update((all) =>
       all.map((t) => (t.id === track.id ? track : t)),
@@ -465,13 +549,20 @@ export class LibraryStore {
     this._status.set('loading');
     this._error.set(null);
     try {
-      const [listed, imported, savedIds] = await Promise.all([
+      const [listed, imported, savedIds, metadata] = await Promise.all([
         this.registry.listAll(),
         this.storage.importedTracks.list(),
         this.storage.savedRecords.list(),
+        this.storage.settings.get<JsonValue>(SETTINGS_KEYS.metadataTracks),
       ]);
-      this._tracks.set(dedupe([...listed, ...imported.map((i) => i.track)]));
+      const metaTracks = Array.isArray(metadata)
+        ? (metadata as unknown as Track[]).filter((t) => t && t.id)
+        : [];
+      this._tracks.set(
+        dedupe([...listed, ...imported.map((i) => i.track), ...metaTracks]),
+      );
       this._stored.set(new Map(imported.map((i) => [i.track.id, i])));
+      this._metadata.set(new Map(metaTracks.map((t) => [t.id, t])));
       this._savedIds.set(savedIds);
       this._status.set('ready');
     } catch (err) {

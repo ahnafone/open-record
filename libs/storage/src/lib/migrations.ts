@@ -50,6 +50,14 @@ export const COLLECTIONS = {
 export const SETTINGS_KEYS = {
   /** `{ url, token }` of the self-hosted download server (no migration: new key, absent = not set up). */
   downloadServer: 'downloadServer',
+  /** `{ stream, download, sameForDownloads }` audio quality levels (no migration: new key, absent = highest/highest/false). */
+  audioQuality: 'audioQuality',
+  /** `{ library, mobileData }` auto-download switches (no migration: new key, absent = both off). */
+  autoDownload: 'autoDownload',
+  /** Track[] known by metadata only (e.g. unmatched Spotify imports) (no migration: new key, absent = none). */
+  metadataTracks: 'metadataTracks',
+  /** Spotify import matching job (no migration: new key, absent = no job). Holds no raw Spotify payloads. */
+  spotifyImport: 'spotifyImport',
 } as const;
 
 /** Removed setting (online metadata lookups); only migrations reference it. */

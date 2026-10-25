@@ -55,8 +55,11 @@ export interface SavedRecordsRepository {
   /** Bookmarked track ids, most recently saved first. */
   list(): Promise<string[]>;
   has(trackId: string): Promise<boolean>;
-  add(trackId: string): Promise<void>;
+  /** No-op when already saved. `savedAt` (epoch ms) defaults to now. */
+  add(trackId: string, savedAt?: number): Promise<void>;
   remove(trackId: string): Promise<void>;
+  /** Re-keys a bookmark to another track id, keeping its savedAt (no-op when `oldId` is not saved). */
+  replace(oldId: string, newId: string): Promise<void>;
 }
 
 export interface ImportedTracksRepository {

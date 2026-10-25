@@ -25,6 +25,9 @@ services:
       PORT: 8787
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      # Optional Supabase Auth (see .env.example).
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      SUPABASE_URL: ${SUPABASE_URL:-}
     ports:
       # Host address to publish on. Default 127.0.0.1 (this machine only; expose
       # through an HTTPS tunnel, see README). For plain HTTP on a home LAN set

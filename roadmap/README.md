@@ -1,6 +1,6 @@
 # Roadmap
 
-Planning docs for Open Record. Status: v1 app and stream-link server built, not yet tested on a device (device testing pending).
+Planning docs for Open Record. Status: v1 milestones M0 to M3.5 and the stream-link server are implemented; Android device testing is about to start and is still pending. Collaborators is hidden in v1.
 
 | Phase | Scope | Status | Doc |
 |---|---|---|---|

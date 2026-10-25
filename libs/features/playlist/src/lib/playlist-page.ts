@@ -12,6 +12,7 @@ import {
 import { Router } from '@angular/router';
 import type { Track } from '@open-record/models';
 import {
+  AutoDownloadStore,
   LibraryStore,
   OfflineStore,
   PlayerStore,
@@ -28,6 +29,7 @@ import {
   OrSectionHead,
   OrSleeve,
   OrSpinner,
+  OrSwitch,
   OrTag,
   OrToast,
 } from '@open-record/ui';
@@ -52,6 +54,7 @@ import { injectTrackArt } from './track-art';
     OrSectionHead,
     OrSleeve,
     OrSpinner,
+    OrSwitch,
     OrTag,
     RenamePlaylistDialog,
   ],
@@ -92,6 +95,19 @@ import { injectTrackArt } from './track-art';
           <or-icon name="trash" [size]="20" />Delete
         </or-button>
       </div>
+
+      <or-switch
+        class="auto"
+        label="Auto-download"
+        description="Keep every record in this playlist on this device."
+        [checked]="!!pl.autoDownload"
+        (checkedChange)="setAutoDownload($event)"
+      />
+      <p class="auto-note" role="status">
+        @if (pl.autoDownload && autoDownload.waitingForWifi()) {
+          Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+        }
+      </p>
 
       <or-section-head heading="Records" [level]="3" />
       @if (tracks().length) {
@@ -193,6 +209,17 @@ import { injectTrackArt } from './track-art';
     }
   `,
   styles: `
+    .auto {
+      margin-top: var(--spacing-sm);
+    }
+    /* Reserved so the list does not jump when the note appears. */
+    .auto-note {
+      margin: 0;
+      min-block-size: 18px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-muted);
+    }
     :host {
       display: block;
     }
@@ -320,6 +347,7 @@ export class PlaylistPage {
   private readonly playlists = inject(PlaylistsStore);
   protected readonly library = inject(LibraryStore);
   private readonly offline = inject(OfflineStore);
+  protected readonly autoDownload = inject(AutoDownloadStore);
   protected readonly art = injectTrackArt();
   protected readonly player = inject(PlayerStore);
   private readonly dialog = inject(OrDialog);
@@ -343,6 +371,14 @@ export class PlaylistPage {
     const n = this.tracks().length;
     return `${n} record${n === 1 ? '' : 's'}`;
   });
+
+  protected async setAutoDownload(on: boolean): Promise<void> {
+    try {
+      await this.playlists.setAutoDownload(this.id(), on);
+    } catch {
+      this.toast.show('Could not change auto-download. Try again.');
+    }
+  }
 
   protected readonly renameOpen = signal(false);
   protected readonly addOpen = signal(false);

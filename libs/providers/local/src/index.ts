@@ -10,6 +10,7 @@ export {
   type StoredFileEntry,
 } from './lib/file-store';
 export { pickAudioFiles } from './lib/pick-audio';
+export { pickTextFile, type PickedTextFile } from './lib/pick-text';
 export {
   LOCAL_PROVIDER_ID,
   localKeyFromTrackId,

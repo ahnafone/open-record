@@ -74,16 +74,26 @@ export class DocumentStorage extends StoragePort {
     has: async (trackId) =>
       (await (await this.db()).get(COLLECTIONS.savedRecords, trackId)) !==
       undefined,
-    add: async (trackId) => {
+    add: async (trackId, savedAt) => {
       const db = await this.db();
       if ((await db.get(COLLECTIONS.savedRecords, trackId)) !== undefined) {
         return;
       }
-      const record: SavedRecord = { trackId, savedAt: Date.now() };
+      const record: SavedRecord = { trackId, savedAt: savedAt ?? Date.now() };
       await db.put(COLLECTIONS.savedRecords, trackId, record);
     },
     remove: async (trackId) =>
       (await this.db()).delete(COLLECTIONS.savedRecords, trackId),
+    replace: async (oldId, newId) => {
+      const db = await this.db();
+      const old = await db.get<SavedRecord>(COLLECTIONS.savedRecords, oldId);
+      if (!old || oldId === newId) return;
+      await db.delete(COLLECTIONS.savedRecords, oldId);
+      if ((await db.get(COLLECTIONS.savedRecords, newId)) === undefined) {
+        const record: SavedRecord = { trackId: newId, savedAt: old.savedAt };
+        await db.put(COLLECTIONS.savedRecords, newId, record);
+      }
+    },
   };
 
   readonly importedTracks: ImportedTracksRepository = {

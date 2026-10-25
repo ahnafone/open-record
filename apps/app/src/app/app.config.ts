@@ -8,20 +8,27 @@ import { provideRouter, withComponentInputBinding } from '@angular/router';
 import { MusicSourceRegistry } from '@open-record/music-source';
 import { providePlayer } from '@open-record/player';
 import { CatalogProvider } from '@open-record/providers/catalog';
-import { LocalProvider, createDefaultFileStore } from '@open-record/providers/local';
+import { LocalProvider, createDefaultFileStore, pickTextFile } from '@open-record/providers/local';
 import { REMOTE_PROVIDER_ID, RemoteProvider } from '@open-record/providers/remote';
 import {
+  AuthPort,
+  ImportFilePort,
   LocalMediaPort,
   METADATA_FETCH,
+  NetworkStatusPort,
   PairingScannerPort,
   RemoteServerPort,
+  SettingsStore,
   StreamResolverPort,
   provideState,
 } from '@open-record/state';
 import { StoragePort, provideStorage } from '@open-record/storage';
 import { appRoutes } from './app.routes';
 import { metadataFetch } from './metadata-fetch';
-import { BarcodePairingScanner } from './pairing-scanner';
+import { createNetworkStatus } from './network-status';
+import { PlatformPairingScanner } from './pairing-scanner';
+import { SupabaseAuth } from './supabase-auth';
+import { SUPABASE_BUILD_CONFIG } from './supabase.config';
 
 /** Music sources registered at startup; the UI never sees a concrete provider. */
 const sources = new MusicSourceRegistry();
@@ -36,6 +43,8 @@ sources.register(local);
  * provider is built before that, so it reads the saved-file record lazily.
  */
 let storage: StoragePort | undefined;
+/** Read lazily for the streaming quality (set at app start, like `storage`). */
+let settings: SettingsStore | undefined;
 
 /**
  * Stream server client. Playback resolves a saved copy first, else a stream
@@ -50,6 +59,7 @@ const remote = new RemoteProvider({
     return fileStore.url(saved.filePath);
   },
   saveBlob: (path, file) => fileStore.copyIn(path, file),
+  streamQuality: () => settings?.streamQuality(),
 });
 sources.register(remote);
 
@@ -58,15 +68,21 @@ export const appConfig: ApplicationConfig = {
     provideBrowserGlobalErrorListeners(),
     provideAppInitializer(() => {
       storage = inject(StoragePort);
+      settings = inject(SettingsStore);
     }),
     // Route params (e.g. playlist `:id`) bind to component inputs.
     provideRouter(appRoutes, withComponentInputBinding()),
     { provide: MusicSourceRegistry, useValue: sources },
     { provide: LocalMediaPort, useValue: local },
+    // Spotify import: picks an Exportify .csv or data-download .json as text.
+    { provide: ImportFilePort, useValue: { pickTextFile } },
     { provide: METADATA_FETCH, useValue: metadataFetch },
     { provide: RemoteServerPort, useValue: remote },
-    { provide: PairingScannerPort, useValue: new BarcodePairingScanner() },
+    { provide: PairingScannerPort, useValue: new PlatformPairingScanner() },
     { provide: StreamResolverPort, useValue: remote.streams },
+    { provide: NetworkStatusPort, useFactory: createNetworkStatus },
+    // Optional accounts; inert until a Supabase project is set (here or in Settings).
+    { provide: AuthPort, useValue: new SupabaseAuth(SUPABASE_BUILD_CONFIG) },
     provideStorage(),
     // capacitor-plugin-playlist is not installed (iOS 18 target pending), so
     // createAudioEngine() falls back to the HTML5 engine on every platform.

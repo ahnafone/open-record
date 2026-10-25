@@ -1,4 +1,4 @@
-import type { DownloadSite, RemoteSearchResult } from '@open-record/models';
+import type { AudioQuality, DownloadSite, RemoteSearchResult } from '@open-record/models';
 import { AuthError, HttpError, ProtocolError, RemoteBusyError, RemoteConfigError } from './errors';
 import { createFetchTransport, type HttpRequest, type HttpTransport } from './transport';
 
@@ -138,11 +138,15 @@ export class RemoteClient {
   }
 
   /**
-   * `POST /stream {url}`: a direct audio link for a page. Nothing is proxied;
-   * the bytes come from the source. Rejects with {@link RemoteBusyError} on 503.
+   * `POST /stream {url, quality?}`: a direct audio link for a page. Nothing is
+   * proxied; the bytes come from the source. `quality` is omitted when
+   * undefined (the server then picks the highest). Rejects with
+   * {@link RemoteBusyError} on 503.
    */
-  async streamUrl(pageUrl: string, signal?: AbortSignal): Promise<RemoteStream> {
-    return parseStream(await this.call({ method: 'POST', path: '/stream', body: { url: pageUrl.trim() }, signal, timeoutMs: 60_000 }));
+  async streamUrl(pageUrl: string, signal?: AbortSignal, quality?: AudioQuality): Promise<RemoteStream> {
+    const body: { url: string; quality?: AudioQuality } = { url: pageUrl.trim() };
+    if (quality) body.quality = quality;
+    return parseStream(await this.call({ method: 'POST', path: '/stream', body, signal, timeoutMs: 60_000 }));
   }
 
   /** `GET /health` (no auth). Resolves when the server answers `{status:'ok'}`. */

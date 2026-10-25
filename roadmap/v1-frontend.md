@@ -102,15 +102,19 @@ Optional; off until a server URL and token are set. All items untested on device
 - [x] MusicBrainz and Cover Art Archive removed (code, toggle, credits, setting)
 - [x] `libs/providers/remote`: tap an unsaved result streams the link; bookmark or add to a playlist downloads it to the device in the background; removed from the library and all playlists deletes the file
 - [x] Settings > Stream server (URL, token, Test connection via `/ping`); Search > Download sources (planned rename: Find online); Android and iOS both use the server URL
-- [x] One-command start `npm run server:up` (prints LAN URL, token, QR; token persisted in `/data` or `~/.config/open-record`) and QR pairing: Settings > Stream server > Scan QR code reads `openrecord://pair?...` (Android; iOS accepts a pasted link)
-- [ ] iOS QR scanner needs CocoaPods/SPM setup; device test of scan pending
+- [x] One-command start `npm run server:up` (prints LAN URL, token, QR; token persisted in `/data` or `~/.config/open-record`) and QR pairing: Settings > Stream server > Scan QR code reads `openrecord://pair?...` (both platforms scan; a pasted link also works)
+- [x] One-command mobile build scripts: `npm run android` (cap sync, then `cap run android`) and `npm run android:open` (opens Android Studio)
+- [x] LAN address chooser in `server:up`: skips 192.0.2.* and Docker bridges, prompts when several candidates exist in a terminal, `--ip` overrides
+- [x] iOS QR scanner: in-app JS scanner (jsQR); device test pending
 - [x] Token stored in plain text in the settings collection (no secure-storage plugin yet)
 - [x] Server URL over HTTPS (Tailscale / Cloudflare tunnel, recommended) or plain HTTP on the home LAN. Decision: Android network security config allows cleartext (base-config; IP ranges cannot be scoped), iOS `NSAllowsLocalNetworking` + local-network usage string, server compose `BIND_ADDRESS` (default `127.0.0.1`). LAN HTTP exposes the token on the network; documented
+- [x] Audio quality, auto-download and preloading (all untested on device): Settings > Audio quality (streaming and download quality: Highest default, High ~160, Medium ~128, Low ~64 kbps; optional "use streaming quality for downloads"); `POST /stream` accepts optional `quality` (400 if invalid, link cache per quality); Library auto-download switch (off by default) and per-playlist auto-download switch, Wi-Fi only unless Settings > Allow auto-download on mobile data (`@capacitor/network`, needs `npx cap sync`); saved tracks always play from the device file; the player pre-resolves and preloads the next track ~15 s before the current one ends. Device test pending
 - [ ] Device test (pending): stream with the server on the LAN; bookmark, file appears and plays in airplane mode; unbookmark from library and all playlists, file deleted
 - [ ] Keep the downloader out of store builds (decide how before M5)
 
 ### M4 Collaborators (stub)
-- [x] Decision: hide the screen in v1 (4 tabs); role logic is built in `state` for v2
+Note: the Collaborators screen is hidden in v1 (three tabs plus Settings from the top bar); it stays in the mockup and screenshots only.
+- [x] Decision: hide the screen in v1 (3 tabs); role logic is built in `state` for v2
 - [ ] If kept: Private/Public visibility and "Viewing as" role preview with sample members, clearly labelled "sample, no real people" as in the mockup
 - [ ] Role-permission logic lives in `state` so v2 reuses it unchanged
 - [ ] No sharing/invite UI that implies a working network feature

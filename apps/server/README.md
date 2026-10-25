@@ -108,7 +108,7 @@ StreamResponse = {
 | `GET /ping` | | `{ status: "ok" }`; the app's "Test connection" uses it to check the token |
 | `GET /search?q=&source=` | `source`: `youtube` (default), `ytmusic`, `soundcloud`, `bandcamp`, `audiomack`, `mixcloud`; `q` max 200 chars | `{ results: SearchResult[] }` (max 15) |
 | `POST /resolve` | `{ url }` | `SearchResult` (metadata only, `yt-dlp -J --no-playlist`) |
-| `POST /stream` | `{ url }` | `StreamResponse` (`yt-dlp -J --no-playlist -f bestaudio[ext=m4a]/bestaudio/best`) |
+| `POST /stream` | `{ url, quality? }` | `StreamResponse` (`yt-dlp -J --no-playlist -f bestaudio[ext=m4a]/bestaudio/best` by default). Optional `quality` picks a lower-bitrate format (Highest, High ~160, Medium ~128, Low ~64 kbps); an invalid value returns `400`. Untested on device. |
 
 - **`/stream` links are tied to this server.** The source issues them for the
   server's public IP and they expire (usually within hours; `expiresAt` says
@@ -136,7 +136,7 @@ Each request is one short yt-dlp run, so the server bounds how many run at once:
   per minute per token (`429` beyond that), on top of the general
   `RATE_LIMIT_MAX` per IP.
 - **Link cache.** `/stream` results are cached in memory for `STREAM_CACHE_TTL`
-  seconds, keyed by the URL, and dropped a minute before the link's `expiresAt`.
+  seconds, keyed by the URL and requested quality, and dropped a minute before the link's `expiresAt`.
   Identical requests that arrive while one is being resolved share that single
   yt-dlp run.
 
@@ -167,7 +167,7 @@ server there. To choose the address yourself, pass it with `--ip`
 (`npm run server:up -- --ip 192.168.1.20`), or start compose manually with
 `BIND_ADDRESS=192.168.1.20 PUBLIC_URL=http://192.168.1.20:8787`.
 
-Then scan the QR code in the app under Settings, Download server (or paste the
+Then scan the QR code in the app under Settings, Stream server (or paste the
 pairing link, or enter `http://192.168.1.20:8787` and the token by hand).
 
 Caveats:
@@ -203,7 +203,7 @@ request, so it must be encrypted. Put the server behind an HTTPS tunnel:
 
 Set `TRUST_PROXY=true` and `PUBLIC_URL` to the HTTPS URL when running behind
 either, so the banner and QR code show it. Scan the QR code (or enter the URL
-and token) in the app under Settings, Download server.
+and token) in the app under Settings, Stream server.
 
 ## Updating yt-dlp
 

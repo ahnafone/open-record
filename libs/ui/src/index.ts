@@ -16,6 +16,7 @@ export {
   type IconButtonVariant,
 } from './lib/icon-button/icon-button';
 export { OrChip } from './lib/chip/chip';
+export { OrSwitch } from './lib/switch/switch';
 export { OrTag } from './lib/tag/tag';
 export { OrDisc } from './lib/disc/disc';
 export { OrSleeve, type SleeveSize, type SleeveSrc } from './lib/sleeve/sleeve';

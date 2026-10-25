@@ -31,6 +31,10 @@ export interface Track {
   userEdited?: EditableTrackField[];
   /** Where the audio came from when it was downloaded through the download server. */
   source?: TrackSource;
+  /** International Standard Recording Code, when known (e.g. from a Spotify import). */
+  isrc?: string;
+  /** Ids of the same recording on other services (kept from imports for re-matching). */
+  external?: { spotifyId?: string };
 }
 
 /** Origin of a downloaded track: the site and page URL it was fetched from. */
@@ -51,6 +55,19 @@ export interface TrackSource {
 /** Sites the download server can search. Any supported URL can still be pasted. */
 export const DOWNLOAD_SITES = ['youtube', 'ytmusic', 'soundcloud', 'bandcamp', 'audiomack', 'mixcloud'] as const;
 export type DownloadSite = (typeof DOWNLOAD_SITES)[number];
+
+/**
+ * Audio quality levels for `POST /stream` (`quality`, optional, default
+ * `highest`). Each level other than `highest` caps the average bitrate; the
+ * server falls back to the closest available format.
+ */
+export const AUDIO_QUALITIES = ['highest', 'high', 'medium', 'low'] as const;
+export type AudioQuality = (typeof AUDIO_QUALITIES)[number];
+export const DEFAULT_AUDIO_QUALITY: AudioQuality = 'highest';
+
+export function isAudioQuality(value: unknown): value is AudioQuality {
+  return typeof value === 'string' && (AUDIO_QUALITIES as readonly string[]).includes(value);
+}
 
 /** One `GET /search` hit, or the `POST /resolve` result. */
 export interface RemoteSearchResult {
@@ -82,6 +99,8 @@ export interface Playlist {
   createdAt: number;
   /** Epoch milliseconds. */
   updatedAt: number;
+  /** Keep every track of this playlist saved on the device. Absent = off. */
+  autoDownload?: boolean;
 }
 
 export type Role = 'owner' | 'editor' | 'viewer';

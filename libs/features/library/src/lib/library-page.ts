@@ -10,7 +10,13 @@ import {
 import { NgTemplateOutlet } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import type { Playlist, Track } from '@open-record/models';
-import { LibraryStore, PlayerStore, PlaylistsStore } from '@open-record/state';
+import {
+  AutoDownloadStore,
+  LibraryStore,
+  PlayerStore,
+  PlaylistsStore,
+  SettingsStore,
+} from '@open-record/state';
 import {
   OrButton,
   OrEmptyState,
@@ -18,6 +24,7 @@ import {
   OrIconButton,
   OrSectionHead,
   OrSleeve,
+  OrSwitch,
   OrTag,
   OrToast,
 } from '@open-record/ui';
@@ -40,6 +47,7 @@ import { injectTrackArt } from './track-art';
     OrIconButton,
     OrSectionHead,
     OrSleeve,
+    OrSwitch,
     OrTag,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -51,6 +59,17 @@ import { injectTrackArt } from './track-art';
     </header>
 
     <or-section-head heading="Saved records" />
+    <or-switch
+      label="Auto-download"
+      description="Keep every saved record on this device for offline play."
+      [checked]="settings.autoDownloadLibrary()"
+      (checkedChange)="setAutoDownload($event)"
+    />
+    <p class="auto-note" role="status">
+      @if (settings.autoDownloadLibrary() && autoDownload.waitingForWifi()) {
+        Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+      }
+    </p>
     @switch (library.status()) {
       @case ('loading') {
         <p class="status">Loading your records…</p>
@@ -229,6 +248,14 @@ import { injectTrackArt } from './track-art';
       margin: 0;
       padding: 0;
     }
+    /* Reserved so the list does not jump when the note appears. */
+    .auto-note {
+      margin: 0 0 var(--spacing-xs);
+      min-block-size: 18px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-muted);
+    }
     .status {
       margin: var(--spacing-sm) 0 0;
       min-block-size: 1.45em;
@@ -378,6 +405,8 @@ export class LibraryPage {
   protected readonly library = inject(LibraryStore);
   protected readonly playlists = inject(PlaylistsStore);
   protected readonly player = inject(PlayerStore);
+  protected readonly settings = inject(SettingsStore);
+  protected readonly autoDownload = inject(AutoDownloadStore);
   private readonly toast = inject(OrToast);
   private readonly router = inject(Router);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
@@ -393,6 +422,14 @@ export class LibraryPage {
   protected meta(pl: Playlist): string {
     const n = pl.trackIds.length;
     return `${n} record${n === 1 ? '' : 's'}`;
+  }
+
+  protected async setAutoDownload(on: boolean): Promise<void> {
+    try {
+      await this.settings.setAutoDownload({ library: on });
+    } catch {
+      this.toast.show('Could not change auto-download. Try again.');
+    }
   }
 
   protected play(track: Track, context: readonly Track[]): void {

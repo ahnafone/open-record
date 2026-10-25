@@ -27,8 +27,7 @@ function isPromiseLike(
 
 /**
  * A record shown as a physical object: an ivory-bordered sleeve with a disc
- * peeking out behind it. Cover art is fitted (`object-fit: contain`), never
- * cropped. Missing or failed art becomes a designed grooved-disc fallback with
+ * peeking out behind it. Cover art fills a square sleeve (`object-fit: cover`). Missing or failed art becomes a designed grooved-disc fallback with
  * an ivory centre label.
  *
  * Sizes: `thumb` (60px row sleeve), `mini` (44px mini-player frame, no disc),
@@ -90,7 +89,7 @@ function isPromiseLike(
       display: block;
       inline-size: 100%;
       block-size: 100%;
-      object-fit: contain;
+      object-fit: cover;
       background: var(--color-surface);
     }
     .fallback {
@@ -183,7 +182,7 @@ function isPromiseLike(
         color-mix(in srgb, var(--color-vinyl) 55%, transparent);
     }
 
-    /* large: Now Playing, art keeps its own ratio */
+    /* large: Now Playing, square sleeve */
     :host(.size-large) {
       inline-size: 100%;
       padding-right: 14%;
@@ -197,20 +196,10 @@ function isPromiseLike(
     :host(.size-large) .art {
       z-index: 1;
       inline-size: 86%;
+      aspect-ratio: 1;
       padding: 6px;
       box-shadow: 0 18px 34px
         color-mix(in srgb, var(--color-vinyl) 55%, transparent);
-    }
-    :host(.size-large) img {
-      inline-size: auto;
-      max-inline-size: 100%;
-      block-size: auto;
-      max-block-size: 44vh;
-      margin: 0 auto;
-    }
-    :host(.size-large) .fallback {
-      block-size: auto;
-      aspect-ratio: 3 / 4;
     }
   `,
 })
