@@ -1,9 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { ServerConfig } from '../config';
-import { healthRoutes } from './health';
-import { metadataRoutes } from './metadata';
-import { downloadRoutes } from './downloads';
+import { healthRoutes, pingRoutes } from './health';
 import { searchRoutes } from './search';
+import { streamRoutes } from './stream';
 
 /** Options every route plugin receives. */
 export interface RouteOptions {
@@ -16,4 +15,4 @@ export interface RouteOptions {
  * the plugin here. All routes require the bearer token unless they set
  * `config: { public: true }`.
  */
-export const routes: FastifyPluginAsync<RouteOptions>[] = [healthRoutes, metadataRoutes, searchRoutes, downloadRoutes];
+export const routes: FastifyPluginAsync<RouteOptions>[] = [healthRoutes, pingRoutes, searchRoutes, streamRoutes];

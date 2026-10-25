@@ -53,13 +53,13 @@ Everything that needs a server: accounts, sync, realtime collaboration, hardenin
 
 ## Downloader server: what v2 adds
 
-v1 ships `apps/server` (Fastify + yt-dlp + ffmpeg, Docker): single user, one shared bearer token, in-memory jobs. It runs only on a server since yt-dlp needs a native process. v2 work:
+v1 ships `apps/server` (Fastify + yt-dlp, Docker): single user, one shared bearer token. It only searches and returns direct stream links (no downloads, tags or file serving); the device downloads saved songs. It runs only on a server since yt-dlp needs a native process. v2 work:
 
 - [ ] Accounts and auth: replace `OPEN_RECORD_TOKEN` with per-user credentials (tokens or sessions), revocable
-- [ ] Multi-user: per-user download folders, quotas and job lists; no cross-user file access
+- [ ] Multi-user: per-user quotas and resolve limits; no cross-user cache sharing
 - [ ] Secure token storage in the app (Keychain / Keystore plugin) instead of plain text in the settings collection
-- [ ] Persisted download queue (app and server) that survives restarts and resumes
-- [ ] Rate and abuse controls: per-user limits, concurrency and disk quotas, size caps, audit log
+- [ ] Optional server-side proxy so links work off the home network (reintroduces bandwidth load; needs quotas)
+- [ ] Rate and abuse controls: per-user limits, concurrency quotas, audit log
 - [ ] Hardening against DNS rebinding: the URL guard checks the resolved address, but yt-dlp resolves again and follows redirects; pin resolved IPs or run yt-dlp in an egress-restricted network namespace/container
 - [ ] Optional plain-HTTP LAN support decision (Android cleartext / iOS ATS), otherwise keep HTTPS-only
 

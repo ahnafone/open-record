@@ -17,10 +17,8 @@ export function remoteErrorMessage(error: unknown): string {
     case 'AbortedError':
     case 'AbortError':
       return 'Cancelled.';
-    case 'DownloadFailedError':
-      return message
-        ? `Download failed: ${message}`
-        : 'The server could not download this.';
+    case 'busy':
+      return 'Server busy, try again.';
     case 'HttpError':
       return message
         ? `Server error: ${message}`

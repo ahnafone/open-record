@@ -1,22 +1,18 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import { UrlRejectedError, validateUrl } from '../services/url-guard';
-import {
-  MAX_QUERY_LENGTH,
-  resolveUrl,
-  search,
-  SEARCH_SOURCES,
-  YtDlpError,
-  type SearchSource,
-} from '../services/ytdlp';
-
-function sendError(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof UrlRejectedError) return reply.code(400).send({ error: err.message });
-  if (err instanceof YtDlpError) return reply.code(err.status).send({ error: err.message });
-  throw err;
-}
+import type { FastifyPluginAsync } from 'fastify';
+import { tokenKey } from '../services/stream-cache';
+import { validateUrl } from '../services/url-guard';
+import { MAX_QUERY_LENGTH, resolveUrl, search, SEARCH_SOURCES, type SearchSource } from '../services/ytdlp';
+import type { RouteOptions } from './index';
+import { sendError } from './errors';
 
 /** GET /search and POST /resolve (metadata only, nothing is downloaded). */
-export const searchRoutes: FastifyPluginAsync = async (app) => {
+export const searchRoutes: FastifyPluginAsync<RouteOptions> = async (app, { config }) => {
+  const rateLimit = {
+    max: config.resolveRateLimitMax,
+    timeWindow: '1 minute',
+    keyGenerator: (request: { headers: { authorization?: string } }) => tokenKey(request.headers.authorization),
+  };
+
   app.get<{ Querystring: { q: string; source?: SearchSource } }>(
     '/search',
     {
@@ -30,6 +26,7 @@ export const searchRoutes: FastifyPluginAsync = async (app) => {
           },
         },
       },
+      config: { rateLimit },
     },
     async (request, reply) => {
       const q = request.query.q.trim();

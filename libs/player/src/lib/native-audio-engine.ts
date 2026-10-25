@@ -193,7 +193,7 @@ export class NativeAudioEngine implements AudioEngine {
       album: media.album ?? '',
       albumArt: media.artUrl && nativeArtUrlFor(media.artUrl, this.platform),
       mimeType: media.source.mimeType,
-      isStream: false,
+      isStream: media.source.kind === 'remote',
     };
   }
 

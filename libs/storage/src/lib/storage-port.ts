@@ -18,13 +18,29 @@ export interface SavedRecord {
   savedAt: number;
 }
 
-/** A user-imported file: its metadata plus where the audio lives on device. */
+/**
+ * Lifecycle of a track's on-device audio copy.
+ * - `saving`: record persisted, file download in progress or queued.
+ * - `saved`: audio file is on device and playable offline.
+ * - `failed`: the download failed; `error` says why.
+ * Records written before schema v4 have no status and are treated as `saved`.
+ */
+export type ImportedTrackStatus = 'saving' | 'saved' | 'failed';
+
+/** A user-imported or saved file: its metadata plus where the audio lives on device. */
 export interface ImportedTrack {
   track: Track;
-  /** Filesystem path / URI of the copied audio file. */
+  /**
+   * Filesystem path / URI of the copied audio file. Empty string while the
+   * file is not yet downloaded (`status` `saving` or `failed`).
+   */
   filePath: string;
   /** Epoch milliseconds. */
   importedAt: number;
+  /** Absent on records written before schema v4; treat absent as `saved`. */
+  status?: ImportedTrackStatus;
+  /** Human-readable reason, set when `status` is `failed`. */
+  error?: string;
 }
 
 export interface PlaylistRepository {

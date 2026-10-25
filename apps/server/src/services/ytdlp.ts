@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createLimiter } from './resolve-limiter';
 
 /** yt-dlp binary; override with YTDLP_PATH. */
 export const YTDLP_BIN = process.env['YTDLP_PATH']?.trim() || 'yt-dlp';
@@ -10,6 +11,12 @@ export const SEARCH_LIMIT = 15;
 export const MAX_QUERY_LENGTH = 200;
 const INFO_TIMEOUT_MS = 45_000;
 const INFO_MAX_BUFFER = 32 * 1024 * 1024;
+/** Queued yt-dlp calls give up waiting for a slot after this long. */
+const QUEUE_WAIT_MS = 20_000;
+/** Default number of yt-dlp calls allowed to wait for a slot. */
+const DEFAULT_MAX_QUEUE = 16;
+/** Audio format selector for streams: prefer m4a, which every phone plays natively. */
+export const STREAM_FORMAT = 'bestaudio[ext=m4a]/bestaudio/best';
 
 export const SEARCH_SOURCES = ['youtube', 'ytmusic', 'soundcloud', 'bandcamp', 'audiomack', 'mixcloud'] as const;
 export type SearchSource = (typeof SEARCH_SOURCES)[number];
@@ -53,6 +60,9 @@ export interface YtDlpInfo {
   thumbnail?: string;
   thumbnails?: { url?: string }[];
   url?: string;
+  protocol?: string;
+  ext?: string;
+  http_headers?: Record<string, string>;
   webpage_url?: string;
   original_url?: string;
   extractor_key?: string;
@@ -135,8 +145,20 @@ export function toSearchResult(info: YtDlpInfo, site?: string): SearchResult | n
   return result;
 }
 
-/** Runs yt-dlp (argument array, never a shell) and parses its single JSON document. */
+/** Global cap on concurrent yt-dlp processes; replaced by `configureResolveLimits`. */
+let limiter = createLimiter({ max: 2, maxQueue: DEFAULT_MAX_QUEUE, waitMs: QUEUE_WAIT_MS });
+
+/** Sets the yt-dlp concurrency cap and wait-queue length (called from buildApp). */
+export function configureResolveLimits(max: number, maxQueue = DEFAULT_MAX_QUEUE): void {
+  limiter = createLimiter({ max, maxQueue, waitMs: QUEUE_WAIT_MS });
+}
+
+/** Runs yt-dlp under the global concurrency cap (503 when the queue is full). */
 export function runYtDlpJson(args: string[]): Promise<YtDlpInfo> {
+  return limiter.run(() => execYtDlpJson(args));
+}
+
+function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
   return new Promise((resolve, reject) => {
     execFile(
       YTDLP_BIN,
@@ -202,4 +224,94 @@ export async function resolveUrl(url: string): Promise<SearchResult> {
   const result = toSearchResult(info, siteFromUrl(clean(info.webpage_url) ?? url));
   if (!result) throw new YtDlpError('yt-dlp returned no usable metadata');
   return result;
+}
+
+/** A link for the phone to play directly from the source CDN. */
+export interface StreamResponse {
+  url: string;
+  mimeType?: string;
+  /** ISO time after which the link stops working (from the URL's `expire` parameter). */
+  expiresAt?: string;
+  /** Only the headers the native player may need (User-Agent, Referer, Origin). */
+  httpHeaders?: Record<string, string>;
+  track: {
+    title: string;
+    artist: string;
+    album?: string;
+    durationSec?: number;
+    thumbnailUrl?: string;
+  };
+}
+
+const STREAM_HEADERS = ['user-agent', 'referer', 'origin'] as const;
+const MIME_BY_EXT: Record<string, string> = {
+  m4a: 'audio/mp4',
+  mp4: 'audio/mp4',
+  aac: 'audio/aac',
+  mp3: 'audio/mpeg',
+  opus: 'audio/ogg',
+  ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  flac: 'audio/flac',
+  wav: 'audio/wav',
+};
+
+/** `expire` query parameter of a media URL (unix seconds) as ISO, when present and valid. */
+export function expiresAtOf(mediaUrl: string): string | undefined {
+  const raw = new URL(mediaUrl).searchParams.get('expire');
+  if (!raw || !/^\d{9,11}$/.test(raw)) return undefined;
+  return new Date(Number(raw) * 1000).toISOString();
+}
+
+/**
+ * Maps the yt-dlp info dict for a single `STREAM_FORMAT` selection to the
+ * stream response. Pure: no I/O. Segmented (HLS/DASH) or non-HTTP formats
+ * are refused with 422 because the phone's native player cannot take them here.
+ */
+export function toStreamResponse(info: YtDlpInfo): StreamResponse {
+  if (info._type === 'playlist') {
+    throw new YtDlpError('playlists are not supported; use a single track link', 400);
+  }
+  const mediaUrl = clean(info.url);
+  if (!mediaUrl || !/^https?:\/\//.test(mediaUrl)) {
+    throw new YtDlpError('no direct audio link for this page', 422);
+  }
+  if (!/^https?$/.test(info.protocol ?? '') || /\.m3u8?(\?|$)/i.test(mediaUrl)) {
+    throw new YtDlpError('this source only offers segmented streams, which are not supported', 422);
+  }
+
+  const response: StreamResponse = {
+    url: mediaUrl,
+    track: { title: clean(info.track) ?? clean(info.title) ?? 'Untitled', artist: artistOf(info) },
+  };
+  const ext = clean(info.ext)?.toLowerCase();
+  if (ext && MIME_BY_EXT[ext]) response.mimeType = MIME_BY_EXT[ext];
+  try {
+    const expiresAt = expiresAtOf(mediaUrl);
+    if (expiresAt) response.expiresAt = expiresAt;
+  } catch {
+    // Unparseable media URL: no expiry known.
+  }
+
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(info.http_headers ?? {})) {
+    if ((STREAM_HEADERS as readonly string[]).includes(name.toLowerCase()) && typeof value === 'string') {
+      headers[name] = value;
+    }
+  }
+  if (Object.keys(headers).length) response.httpHeaders = headers;
+
+  const album = clean(info.album);
+  if (album) response.track.album = album;
+  const durationSec = durationOf(info);
+  if (durationSec !== undefined) response.track.durationSec = durationSec;
+  const thumbnailUrl = thumbnailOf(info);
+  if (thumbnailUrl) response.track.thumbnailUrl = thumbnailUrl;
+  return response;
+}
+
+/** Resolves a validated page URL to a direct, playable audio link (nothing is downloaded). */
+export async function resolveStream(url: string): Promise<StreamResponse> {
+  const info = await runYtDlpJson(['-J', '--no-playlist', '-f', STREAM_FORMAT, '--', url]);
+  return toStreamResponse(info);
 }

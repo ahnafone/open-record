@@ -74,6 +74,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Open Record uses the camera to scan the pairing QR code from your self-hosted server.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Open Record connects to your own downloader server on your home network to search for and download music.</string>
 	<key>UIBackgroundModes</key>

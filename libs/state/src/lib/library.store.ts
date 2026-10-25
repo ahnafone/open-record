@@ -7,11 +7,14 @@ import { PlayerStore } from './player.store';
 import { PlaylistsStore } from './playlists.store';
 import { LocalMediaPort, type LocalImportFailure } from './ports';
 import { SettingsStore } from './settings.store';
+import { OfflineStore } from './offline.store';
 
 export type LoadStatus = 'loading' | 'ready' | 'error';
 
 /** Provider id of user-imported tracks (track ids are `local:<key>`). */
 export const LOCAL_PROVIDER_ID = 'local';
+/** Provider id of server-backed (stream server) tracks. */
+export const REMOTE_PROVIDER_ID = 'remote';
 
 /**
  * Hand edits to an imported track. Only provided keys are considered; a
@@ -63,6 +66,8 @@ export class LibraryStore {
 
   private readonly _tracks = signal<readonly Track[]>([]);
   private readonly _savedIds = signal<readonly string[]>([]);
+  /** Stored file records by track id: a track is "imported" iff it has one. */
+  private readonly _stored = signal<ReadonlyMap<string, ImportedTrack>>(new Map());
   private readonly _status = signal<LoadStatus>('loading');
   private readonly _error = signal<string | null>(null);
 
@@ -79,8 +84,14 @@ export class LibraryStore {
   private readonly savedSet = computed(() => new Set(this._savedIds()));
   /** Saved records that resolve to a known track, most recent first. */
   readonly savedRecords = computed(() => this.resolveIds(this._savedIds()));
-  /** User-imported tracks, oldest import first. */
-  readonly importedTracks = computed(() => this._tracks().filter(isLocal));
+  /**
+   * Tracks that have a stored file record (user imports, and remote tracks
+   * that are saving, saved or failed to save), in index order.
+   */
+  readonly importedTracks = computed(() => {
+    const stored = this._stored();
+    return this._tracks().filter((t) => stored.has(t.id));
+  });
   /** Importing is possible (a LocalMediaPort is provided). */
   readonly canImport = !!this.media;
 
@@ -121,9 +132,14 @@ export class LibraryStore {
     return this.savedSet().has(trackId);
   }
 
-  /** True for user-imported tracks (editable, removable). */
-  isImported(track: Pick<Track, 'providerId'>): boolean {
-    return track.providerId === LOCAL_PROVIDER_ID;
+  /** True when the track has a stored file record (editable, removable). Reactive. */
+  isImported(track: Pick<Track, 'id'>): boolean {
+    return this._stored().has(track.id);
+  }
+
+  /** The stored file record for a track, if any. Reactive. */
+  storedRecord(trackId: string): ImportedTrack | undefined {
+    return this._stored().get(trackId);
   }
 
   /** Bookmark or un-bookmark a record. Resolves to the new saved state. */
@@ -134,6 +150,11 @@ export class LibraryStore {
     return save;
   }
 
+  /**
+   * Bookmark or un-bookmark a record. Bookmarking a remote track persists it
+   * and starts saving it to the device (see `OfflineStore.ensureSaved`);
+   * un-bookmarking reconciles stored files.
+   */
   async setSaved(trackId: string, saved: boolean): Promise<void> {
     // Hydration would otherwise overwrite an early optimistic change.
     await this.loaded;
@@ -151,6 +172,12 @@ export class LibraryStore {
     } catch (err) {
       apply(!saved);
       throw err;
+    }
+    if (saved) {
+      const track = this.track(trackId);
+      if (track) await this.offline().ensureSaved(track);
+    } else {
+      await this.offline().reconcile();
     }
   }
 
@@ -172,7 +199,10 @@ export class LibraryStore {
     return results;
   }
 
-  /** Add tracks to the known-track index (first occurrence of an id wins). */
+  /**
+   * Add tracks to the known-track index (first occurrence of an id wins).
+   * In-memory only: streamed tracks are never persisted by this call.
+   */
   remember(tracks: readonly Track[]): void {
     const map = this.trackMap();
     const fresh = tracks.filter((t) => !map.has(t.id));
@@ -205,41 +235,41 @@ export class LibraryStore {
     const importedAt = Date.now();
     for (const track of result.tracks) {
       try {
-        await this.storage.importedTracks.save({
+        await this.storeRecord({
           track,
           filePath: track.sourceFile ?? '',
           importedAt,
         });
         imported.push(track);
       } catch (error) {
-        await this.media.remove(track.id).catch(() => 0);
+        await this.media.remove(track).catch(() => 0);
         failures.push({ fileName: track.sourceFile ?? track.title, error });
       }
     }
-    if (imported.length)
-      this._tracks.update((all) => dedupe([...all, ...imported]));
     return { imported, failures };
   }
 
   /**
-   * Persist a track the download server fetched and the local provider
-   * imported (see `DownloadsStore`), exactly like `importFiles`. On a failed
-   * write the stored file is deleted and the error rethrown.
+   * Persist a stored file record (creates or replaces it) and update the
+   * index and record map. Throws if the write fails; nothing changes then.
    */
-  async addDownloaded(track: Track): Promise<Track> {
-    await this.loaded;
-    try {
-      await this.storage.importedTracks.save({
-        track,
-        filePath: track.sourceFile ?? '',
-        importedAt: Date.now(),
-      });
-    } catch (error) {
-      await this.media?.remove(track.id).catch(() => 0);
-      throw error;
-    }
-    this._tracks.update((all) => dedupe([...all, track]));
-    return track;
+  async storeRecord(record: ImportedTrack): Promise<void> {
+    await this.storage.importedTracks.save(record);
+    this._stored.update((m) => new Map(m).set(record.track.id, record));
+    this.upsert(record.track);
+  }
+
+  /**
+   * Delete a stored file record. Does not touch files, the index, saved
+   * records or playlists: callers decide what else goes.
+   */
+  async dropRecord(trackId: string): Promise<void> {
+    await this.storage.importedTracks.delete(trackId);
+    this._stored.update((m) => {
+      const next = new Map(m);
+      next.delete(trackId);
+      return next;
+    });
   }
 
   /**
@@ -278,7 +308,7 @@ export class LibraryStore {
 
     this.replaceTrack(next);
     try {
-      await this.storage.importedTracks.save({ ...record, track: next });
+      await this.storeRecord({ ...record, track: next });
     } catch (err) {
       this.replaceTrack(before);
       throw err;
@@ -294,10 +324,11 @@ export class LibraryStore {
     await this.loaded;
     const track = this.track(id);
     if (!track || !this.isImported(track)) return;
+    this.offline().forget([id]);
     await this.detach([id]);
-    await this.storage.importedTracks.delete(id);
+    await this.dropRecord(id);
     this._tracks.update((all) => all.filter((t) => t.id !== id));
-    await this.media?.remove(id).catch(() => 0);
+    await this.media?.remove(track).catch(() => 0);
   }
 
   /** Delete every imported track (records, files and references). */
@@ -307,11 +338,11 @@ export class LibraryStore {
       ...this.importedTracks().map((t) => t.id),
       ...(await this.storage.importedTracks.list()).map((i) => i.track.id),
     ]);
+    this.offline().forget([...ids]);
     await this.detach([...ids]);
     await this.storage.importedTracks.clear();
-    this._tracks.update((all) =>
-      all.filter((t) => !ids.has(t.id) && !isLocal(t)),
-    );
+    this._stored.set(new Map());
+    this._tracks.update((all) => all.filter((t) => !ids.has(t.id)));
     await this.media?.cleanup([]).catch(() => 0);
   }
 
@@ -323,6 +354,7 @@ export class LibraryStore {
   async clearAll(): Promise<void> {
     await this.loaded;
     await this.player()?.clear();
+    this.offline().forgetAll();
     await this.media?.cleanup([]).catch(() => 0);
     await this.storage.clearAll();
     await this.reload();
@@ -360,6 +392,15 @@ export class LibraryStore {
     );
   }
 
+  /** Replace the index entry for a track, or add it. */
+  private upsert(track: Track): void {
+    this._tracks.update((all) =>
+      all.some((t) => t.id === track.id)
+        ? all.map((t) => (t.id === track.id ? track : t))
+        : [...all, track],
+    );
+  }
+
   /** Remove tracks from the queue, playlists and saved records. */
   private async detach(ids: readonly string[]): Promise<void> {
     if (!ids.length) return;
@@ -374,6 +415,10 @@ export class LibraryStore {
     return this.injector.get(PlaylistsStore);
   }
 
+  private offline() {
+    return this.injector.get(OfflineStore);
+  }
+
   private player() {
     try {
       return this.injector.get(PlayerStore);
@@ -385,7 +430,7 @@ export class LibraryStore {
   /** Best-effort size of bundled (read-only) provider assets via HEAD requests. */
   private async measureCatalog(): Promise<number | null> {
     if (typeof fetch !== 'function') return null;
-    const bundled = this._tracks().filter((t) => !isLocal(t));
+    const bundled = this._tracks().filter((t) => !this.isImported(t) && !t.source);
     const urls = new Set<string>();
     for (const t of bundled) {
       if (t.artUrl) urls.add(t.artUrl);
@@ -426,6 +471,7 @@ export class LibraryStore {
         this.storage.savedRecords.list(),
       ]);
       this._tracks.set(dedupe([...listed, ...imported.map((i) => i.track)]));
+      this._stored.set(new Map(imported.map((i) => [i.track.id, i])));
       this._savedIds.set(savedIds);
       this._status.set('ready');
     } catch (err) {
@@ -435,10 +481,6 @@ export class LibraryStore {
       this._status.set('error');
     }
   }
-}
-
-function isLocal(track: Pick<Track, 'providerId'>): boolean {
-  return track.providerId === LOCAL_PROVIDER_ID;
 }
 
 function matches(query: string): (t: Track) => boolean {

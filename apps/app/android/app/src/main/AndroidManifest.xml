@@ -33,6 +33,8 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- QR pairing with the download server (Settings > Scan QR code). -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <!-- Background playback notification (Android 13+); request at runtime. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>

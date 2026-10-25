@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app';
 import { loadConfig } from '../config';
-import { downloadRoutes } from '../routes/downloads';
 import { searchRoutes } from '../routes/search';
+import { streamRoutes } from '../routes/stream';
 import { isBlockedAddress, validateUrl, type LookupFn } from './url-guard';
-import { search } from './ytdlp';
+import { search, toStreamResponse } from './ytdlp';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 
@@ -96,8 +96,8 @@ describe('yt-dlp routes auth', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
-    const config = loadConfig({ OPEN_RECORD_TOKEN: 'test-token-0123456789abcdef', DATA_DIR: '/tmp/unused' });
-    app = await buildApp(config, { routes: [searchRoutes, downloadRoutes] });
+    const config = loadConfig({ OPEN_RECORD_TOKEN: 'test-token-0123456789abcdef' });
+    app = await buildApp(config, { routes: [searchRoutes, streamRoutes] });
   });
 
   afterAll(() => app.close());
@@ -105,11 +105,58 @@ describe('yt-dlp routes auth', () => {
   it.each([
     ['GET', '/search?q=test'],
     ['POST', '/resolve'],
-    ['POST', '/downloads'],
-    ['GET', '/downloads/00000000-0000-4000-8000-000000000000'],
-    ['GET', '/downloads/00000000-0000-4000-8000-000000000000/file'],
+    ['POST', '/stream'],
   ] as const)('%s %s requires the token', async (method, url) => {
     const res = await app.inject({ method, url, payload: method === 'POST' ? { url: 'https://example.com' } : undefined });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('stream response mapping', () => {
+  const media =
+    'https://rr1.googlevideo.com/videoplayback?itag=140&expire=1900000000&sig=abc';
+
+  it('maps a direct m4a link, keeps only allow-listed headers and reads expire', () => {
+    const res = toStreamResponse({
+      id: 'abc',
+      title: 'Video title',
+      track: 'Real Track',
+      artist: 'Band',
+      album: 'Album',
+      ext: 'm4a',
+      protocol: 'https',
+      url: media,
+      duration: 200.4,
+      thumbnail: 'https://i.ytimg.com/t.jpg',
+      http_headers: { 'User-Agent': 'UA', Referer: 'https://www.youtube.com/', Cookie: 'secret', 'X-Foo': 'bar' },
+    });
+    expect(res).toEqual({
+      url: media,
+      mimeType: 'audio/mp4',
+      expiresAt: new Date(1900000000 * 1000).toISOString(),
+      httpHeaders: { 'User-Agent': 'UA', Referer: 'https://www.youtube.com/' },
+      track: {
+        title: 'Real Track',
+        artist: 'Band',
+        album: 'Album',
+        durationSec: 200,
+        thumbnailUrl: 'https://i.ytimg.com/t.jpg',
+      },
+    });
+  });
+
+  it.each([
+    ['segmented protocol', { protocol: 'm3u8_native', url: media }],
+    ['dash protocol', { protocol: 'http_dash_segments', url: media }],
+    ['manifest url', { protocol: 'https', url: 'https://cdn.example.com/a/index.m3u8' }],
+    ['no url', { protocol: 'https' }],
+  ])('refuses %s with 422', (_name, extra) => {
+    let caught: unknown;
+    try {
+      toStreamResponse({ id: 'x', title: 't', ...extra });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ status: 422 });
   });
 });

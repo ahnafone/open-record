@@ -12,9 +12,10 @@ import {
   viewChild,
 } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
-import type { Track } from '@open-record/models';
+import { parsePairingLink, type Track } from '@open-record/models';
 import {
   LibraryStore,
+  PairingScannerPort,
   SettingsStore,
   type StorageUsage,
 } from '@open-record/state';
@@ -33,7 +34,7 @@ import { EditTrackDialog } from './edit-track-dialog';
 import { formatBytes } from './format-bytes';
 
 /**
- * Settings screen: import audio files, the download server (URL, token,
+ * Settings screen: import audio files, the stream server (URL, token,
  * connection test), manage imported records, on-device storage with clear
  * actions, and the music disclaimer.
  */
@@ -69,13 +70,23 @@ import { formatBytes } from './format-bytes';
       <p class="note">Importing is not available on this device.</p>
     }
 
-    <or-section-head heading="Download server" />
+    <or-section-head heading="Stream server" />
     <p class="lede">
-      Connect your self-hosted Open Record server to search sites and download
-      records to this device.
+      Connect your self-hosted Open Record server to search sites and stream
+      records. Saved songs live on this device; unsaved songs are streamed.
+      Scan the pairing QR code from the server, or paste its pairing link into
+      the server URL.
     </p>
-    @if (settings.downloadsAvailable) {
+    @if (settings.serverAvailable) {
       <form class="server" (submit)="saveServer($event)">
+        @if (canScan()) {
+          <or-button
+            block
+            [disabled]="scanning() || savingServer() || testing()"
+            (click)="scanQr()"
+            >Scan QR code</or-button
+          >
+        }
         <label class="field-label" for="or-server-url">Server URL</label>
         <input
           id="or-server-url"
@@ -122,13 +133,15 @@ import { formatBytes } from './format-bytes';
             <span class="status-bad"
               ><or-icon name="alert" [size]="14" />{{ e }}</span
             >
+          } @else if (scanning()) {
+            <span class="status-muted">Scanning…</span>
           } @else if (testing()) {
             <span class="status-muted"
               ><or-spinner [size]="14" />Testing connection…</span
             >
           } @else if (connection().status === 'ok') {
             <span class="status-ok"
-              ><or-icon name="check" [size]="14" />Connected. Downloads are
+              ><or-icon name="check" [size]="14" />Connected. Streaming is
               ready.</span
             >
           } @else if (connectionError(); as e) {
@@ -145,14 +158,14 @@ import { formatBytes } from './format-bytes';
         </p>
       </form>
       <p class="note">
-        You are responsible for what you download. Only download music you have
-        the rights to.
+        You are responsible for what you stream and save. Only use music you
+        have the rights to.
       </p>
       <button type="button" class="text-link" (click)="showDisclaimer()">
         Read the music disclaimer
       </button>
     } @else {
-      <p class="note">Downloading is not available in this build.</p>
+      <p class="note">Streaming from a server is not available in this build.</p>
     }
 
     <or-section-head heading="Imported records" />
@@ -447,6 +460,7 @@ export class SettingsPage {
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
+  private readonly scanner = inject(PairingScannerPort, { optional: true });
 
   protected readonly disclaimer = MUSIC_DISCLAIMER;
 
@@ -468,6 +482,9 @@ export class SettingsPage {
       this.serverToken().trim() !== this.settings.downloadServerToken(),
   );
   protected readonly savingServer = signal(false);
+  /** QR scanning is offered only where the app provides a pairing scanner. */
+  protected readonly canScan = signal(false);
+  protected readonly scanning = signal(false);
   protected readonly serverError = signal<string | null>(null);
   protected readonly connection = this.settings.connection;
   protected readonly testing = computed(
@@ -510,6 +527,8 @@ export class SettingsPage {
       const tracks = this.imported();
       untracked(() => void this.resolveArt(tracks));
     });
+    if (this.scanner)
+      void this.scanner.available().then((ok) => this.canScan.set(ok));
     // Re-measure storage when imports change.
     effect(() => {
       this.imported();
@@ -519,6 +538,11 @@ export class SettingsPage {
 
   protected onServerInput(event: Event, field: 'url' | 'token'): void {
     const value = (event.target as HTMLInputElement).value;
+    // A pasted pairing link fills in both fields and connects at once.
+    if (field === 'url' && parsePairingLink(value)) {
+      void this.pairWith(value);
+      return;
+    }
     (field === 'url' ? this.serverUrl : this.serverToken).set(value);
     this.serverError.set(null);
   }
@@ -536,8 +560,8 @@ export class SettingsPage {
       if (event)
         this.toast.show(
           this.serverUrl().trim()
-            ? 'Download server saved'
-            : 'Download server removed',
+            ? 'Stream server saved'
+            : 'Stream server removed',
         );
       return true;
     } catch (err) {
@@ -550,6 +574,40 @@ export class SettingsPage {
     } finally {
       this.savingServer.set(false);
     }
+  }
+
+  /** Pair from a pairing link, then show its outcome on the status line. */
+  private async pairWith(text: string): Promise<void> {
+    if (this.savingServer()) return;
+    this.savingServer.set(true);
+    this.serverError.set(null);
+    try {
+      const result = await this.settings.pairFromLink(text);
+      // Show the saved values (the pasted link text is not a URL).
+      this.serverUrl.set(this.settings.downloadServerUrl());
+      this.serverToken.set(this.settings.downloadServerToken());
+      if (result.ok) this.toast.show('Paired with your server');
+      else this.serverError.set(result.message);
+    } finally {
+      this.savingServer.set(false);
+    }
+  }
+
+  protected async scanQr(): Promise<void> {
+    if (!this.scanner || this.scanning() || this.savingServer()) return;
+    this.scanning.set(true);
+    this.serverError.set(null);
+    let text: string | null = null;
+    try {
+      text = await this.scanner.scan();
+    } catch (err) {
+      this.serverError.set(
+        err instanceof Error ? err.message : 'Scanning failed. Try again.',
+      );
+    } finally {
+      this.scanning.set(false);
+    }
+    if (text !== null) await this.pairWith(text);
   }
 
   protected async testServer(): Promise<void> {

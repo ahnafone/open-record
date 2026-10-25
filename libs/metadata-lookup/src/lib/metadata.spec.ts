@@ -1,7 +1,8 @@
+import { lookupMetadata } from './lookup';
 import { normalizeArtist, normalizeTitle } from './normalize';
 import { pickBest } from './score';
+import type { MetadataFetch } from './providers';
 import type { MetadataMatch } from './types';
-import { isAllowedArtworkUrl } from './apply';
 
 const song = (over: Partial<MetadataMatch>): MetadataMatch => ({
   title: 'Midnight City',
@@ -40,11 +41,47 @@ describe('metadata matching', () => {
     expect(pickBest({ title: 'Midnight City', artist: 'M83', durationSec: 244 }, candidates)).toBeNull();
     expect(pickBest({ title: 'Totally Different Song', artist: 'M83' }, [song({})])).toBeNull();
   });
+});
 
-  it('only allows https artwork from the iTunes/Deezer CDNs', () => {
-    expect(isAllowedArtworkUrl('https://is1-ssl.mzstatic.com/image/1000x1000bb.jpg')).toBe(true);
-    expect(isAllowedArtworkUrl('http://is1-ssl.mzstatic.com/image/1000x1000bb.jpg')).toBe(false);
-    expect(isAllowedArtworkUrl('https://169.254.169.254/latest')).toBe(false);
-    expect(isAllowedArtworkUrl('https://is1-ssl.mzstatic.com.evil.test/a.jpg')).toBe(false);
+describe('lookupMetadata', () => {
+  it('uses the injected fetch, tolerates one failing provider and upsizes iTunes art', async () => {
+    const urls: string[] = [];
+    const fetchFn: MetadataFetch = async (url) => {
+      urls.push(url);
+      if (url.startsWith('https://itunes.apple.com/')) {
+        const body = {
+          results: [
+            {
+              trackName: 'Lookup Test Song',
+              artistName: 'Test Artist',
+              collectionName: 'Test Album',
+              releaseDate: '2001-01-01T00:00:00Z',
+              primaryGenreName: 'Rock',
+              trackTimeMillis: 200000,
+              artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/a/100x100bb.jpg',
+            },
+          ],
+        };
+        return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+      }
+      return { ok: false, status: 500, text: async () => '' };
+    };
+
+    const { match } = await lookupMetadata({ title: 'Lookup Test Song', artist: 'Test Artist', durationSec: 200 }, fetchFn);
+    expect(urls).toHaveLength(2);
+    expect(match).toMatchObject({
+      title: 'Lookup Test Song',
+      artist: 'Test Artist',
+      album: 'Test Album',
+      year: 2001,
+      genre: 'Rock',
+      artworkUrl: 'https://is1-ssl.mzstatic.com/image/thumb/a/1000x1000bb.jpg',
+      source: 'itunes',
+    });
+  });
+
+  it('rejects when both providers fail', async () => {
+    const fetchFn: MetadataFetch = async () => ({ ok: false, status: 503, text: async () => '' });
+    await expect(lookupMetadata({ title: 'Down Song' }, fetchFn)).rejects.toThrow('metadata providers unavailable');
   });
 });

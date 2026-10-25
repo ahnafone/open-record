@@ -8,7 +8,7 @@ describe('server auth', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
-    const config = loadConfig({ OPEN_RECORD_TOKEN: TOKEN, DATA_DIR: '/tmp/unused' });
+    const config = loadConfig({ OPEN_RECORD_TOKEN: TOKEN });
     app = await buildApp(config, {
       routes: [
         async (a) => {

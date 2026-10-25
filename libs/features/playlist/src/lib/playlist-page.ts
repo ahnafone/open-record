@@ -11,7 +11,13 @@ import {
 } from '@angular/core';
 import { Router } from '@angular/router';
 import type { Track } from '@open-record/models';
-import { LibraryStore, PlayerStore, PlaylistsStore } from '@open-record/state';
+import {
+  LibraryStore,
+  OfflineStore,
+  PlayerStore,
+  PlaylistsStore,
+  REMOTE_PROVIDER_ID,
+} from '@open-record/state';
 import {
   OrButton,
   OrDialog,
@@ -108,10 +114,14 @@ import { injectTrackArt } from './track-art';
                   <span class="title">{{ track.title }}</span>
                   <span class="artist">{{ track.artist }}</span>
                   @let imported = library.isImported(track);
-                  @if (imported || track.year || track.genre) {
+                  @let streamOnly = isStreamingOnly(track);
+                  @if (imported || streamOnly || track.year || track.genre) {
                     <span class="tags">
                       @if (imported) {
                         <or-tag ivory>Imported</or-tag>
+                      }
+                      @if (streamOnly) {
+                        <or-tag>Streaming only</or-tag>
                       }
                       @if (track.year) {
                         <or-tag>{{ track.year }}</or-tag>
@@ -309,6 +319,7 @@ import { injectTrackArt } from './track-art';
 export class PlaylistPage {
   private readonly playlists = inject(PlaylistsStore);
   protected readonly library = inject(LibraryStore);
+  private readonly offline = inject(OfflineStore);
   protected readonly art = injectTrackArt();
   protected readonly player = inject(PlayerStore);
   private readonly dialog = inject(OrDialog);
@@ -341,6 +352,14 @@ export class PlaylistPage {
     const t = this.optionsFor();
     return t ? this.tracks().findIndex((x) => x.id === t.id) : -1;
   });
+
+  /** A server track that is not saved on this device (it streams). */
+  protected isStreamingOnly(track: Track): boolean {
+    return (
+      track.providerId === REMOTE_PROVIDER_ID &&
+      this.offline.status(track.id) === undefined
+    );
+  }
 
   protected playLabel(track: Track): string {
     const now = this.player.isCurrent(track.id) ? ', now playing' : '';

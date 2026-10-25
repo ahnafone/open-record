@@ -7,7 +7,12 @@ import {
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import type { Track } from '@open-record/models';
-import { LibraryStore, PlayerStore } from '@open-record/state';
+import {
+  LibraryStore,
+  OfflineStore,
+  PlayerStore,
+  REMOTE_PROVIDER_ID,
+} from '@open-record/state';
 import {
   OrEmptyState,
   OrIcon,
@@ -80,6 +85,9 @@ export function formatTime(totalSec: number): string {
         <div class="tags">
           @if (isImported(track)) {
             <or-tag ivory>Imported</or-tag>
+          }
+          @if (isStreamingOnly(track)) {
+            <or-tag>Streaming only</or-tag>
           }
           @if (track.license) {
             <or-tag ivory>{{ track.license }}</or-tag>
@@ -392,6 +400,7 @@ export function formatTime(totalSec: number): string {
 export class NowPlayingPage {
   protected readonly player = inject(PlayerStore);
   private readonly library = inject(LibraryStore);
+  private readonly offline = inject(OfflineStore);
   private readonly toast = inject(OrToast);
 
   /** Slider value while the user drags; null follows playback. */
@@ -443,6 +452,14 @@ export class NowPlayingPage {
 
   protected isImported(track: Track): boolean {
     return this.library.isImported(track);
+  }
+
+  /** A server track that is not saved on this device (it streams). */
+  protected isStreamingOnly(track: Track): boolean {
+    return (
+      track.providerId === REMOTE_PROVIDER_ID &&
+      this.offline.status(track.id) === undefined
+    );
   }
 
   /** Album title for the line under the artist (year and genre are tags). */

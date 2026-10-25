@@ -1,6 +1,17 @@
 import type { MetadataMatch, MetadataQuery } from './types';
 
-export type FetchFn = typeof fetch;
+/** Minimal request init the lookup uses; a global `fetch` or an injected native transport both fit. */
+export interface MetadataFetchInit {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  redirect?: 'error' | 'follow' | 'manual';
+}
+
+/** Injected HTTP client. Must resolve to a response-like object (`ok`, `status`, `text()`). */
+export type MetadataFetch = (
+  url: string,
+  init?: MetadataFetchInit,
+) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 export const USER_AGENT = 'OpenRecordServer/1.0 (self-hosted personal music library tagger)';
 const TIMEOUT_MS = 6000;
@@ -11,7 +22,7 @@ type Json = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
-async function getJson(fetchFn: FetchFn, url: string): Promise<Json> {
+async function getJson(fetchFn: MetadataFetch, url: string): Promise<Json> {
   const res = await fetchFn(url, {
     headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -81,7 +92,7 @@ export function parseDeezer(body: Json): MetadataMatch[] {
   return out;
 }
 
-export async function searchItunes(q: MetadataQuery, fetchFn: FetchFn = fetch): Promise<MetadataMatch[]> {
+export async function searchItunes(q: MetadataQuery, fetchFn: MetadataFetch): Promise<MetadataMatch[]> {
   const url = new URL('https://itunes.apple.com/search');
   url.searchParams.set('term', searchTerm(q));
   url.searchParams.set('media', 'music');
@@ -90,7 +101,7 @@ export async function searchItunes(q: MetadataQuery, fetchFn: FetchFn = fetch): 
   return parseItunes(await getJson(fetchFn, url.toString()));
 }
 
-export async function searchDeezer(q: MetadataQuery, fetchFn: FetchFn = fetch): Promise<MetadataMatch[]> {
+export async function searchDeezer(q: MetadataQuery, fetchFn: MetadataFetch): Promise<MetadataMatch[]> {
   const url = new URL('https://api.deezer.com/search');
   url.searchParams.set('q', searchTerm(q));
   url.searchParams.set('limit', '10');

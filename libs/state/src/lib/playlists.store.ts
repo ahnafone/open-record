@@ -2,6 +2,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import type { Playlist, Track } from '@open-record/models';
 import { StoragePort } from '@open-record/storage';
 import { LibraryStore, type LoadStatus } from './library.store';
+import { OfflineStore } from './offline.store';
 
 export type PlaylistVisibility = Playlist['visibility'];
 
@@ -16,6 +17,7 @@ export const PLAYLIST_NAME_MAX = 80;
 export class PlaylistsStore {
   private readonly storage = inject(StoragePort);
   private readonly library = inject(LibraryStore);
+  private readonly offline = inject(OfflineStore);
 
   private readonly _playlists = signal<readonly Playlist[]>([]);
   private readonly _status = signal<LoadStatus>('loading');
@@ -83,12 +85,24 @@ export class PlaylistsStore {
     return this.mutate(id, (p) => ({ ...p, visibility }));
   }
 
-  /** Append tracks, skipping ids already in the playlist. */
-  addTracks(id: string, trackIds: readonly string[]): Promise<Playlist> {
-    return this.mutate(id, (p) => {
+  /**
+   * Append tracks, skipping ids already in the playlist. Full `Track`
+   * objects are remembered first; remote tracks are then saved to the device
+   * in the background (adding never waits for the download).
+   */
+  async addTracks(
+    id: string,
+    tracks: readonly (string | Track)[],
+  ): Promise<Playlist> {
+    const ids = tracks.map((t) => {
+      if (typeof t !== 'string') this.library.remember([t]);
+      return typeof t === 'string' ? t : t.id;
+    });
+    const before = this.playlist(id);
+    const result = await this.mutate(id, (p) => {
       const have = new Set(p.trackIds);
       const added: string[] = [];
-      for (const t of trackIds) {
+      for (const t of ids) {
         if (have.has(t)) continue;
         have.add(t);
         added.push(t);
@@ -96,6 +110,14 @@ export class PlaylistsStore {
       if (!added.length) return p;
       return { ...p, trackIds: [...p.trackIds, ...added] };
     });
+    const newlyAdded = result.trackIds.filter(
+      (t) => !before?.trackIds.includes(t),
+    );
+    for (const trackId of newlyAdded) {
+      const track = this.library.track(trackId);
+      if (track) await this.offline.ensureSaved(track);
+    }
+    return result;
   }
 
   removeTrack(id: string, trackId: string): Promise<Playlist> {
@@ -154,6 +176,7 @@ export class PlaylistsStore {
       });
       throw err;
     }
+    await this.offline.reconcile();
   }
 
   private async mutate(
@@ -177,6 +200,8 @@ export class PlaylistsStore {
       replace(before);
       throw err;
     }
+    const dropped = before.trackIds.some((t) => !after.trackIds.includes(t));
+    if (dropped) await this.offline.reconcile();
     return after;
   }
 

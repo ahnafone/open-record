@@ -35,6 +35,12 @@ export interface PlayerEngineOptions {
    * covers). Default: `track.artUrl` only.
    */
   resolveArt?: ArtResolver;
+  /**
+   * Source for the neighbour window (native prefetch). Return `undefined` to
+   * leave that neighbour out (no pre-resolve, e.g. an unsaved remote track).
+   * Default: the same resolver as the current track.
+   */
+  resolveNeighbour?: (track: Track) => Promise<PlayableSource | undefined>;
 }
 
 export interface SetQueueOptions {
@@ -94,6 +100,7 @@ export class PlayerEngine {
 
   private readonly random: () => number;
   private readonly artResolver?: ArtResolver;
+  private readonly neighbourResolver?: (track: Track) => Promise<PlayableSource | undefined>;
   /** Bumped on every load; stale async work compares against it. */
   private loadToken = 0;
   /** Consecutive failures, so skip-on-error cannot loop forever. */
@@ -110,6 +117,7 @@ export class PlayerEngine {
   ) {
     this.random = options.random ?? Math.random;
     this.artResolver = options.resolveArt;
+    this.neighbourResolver = options.resolveNeighbour;
     this._skipOnError.set(options.skipOnError ?? true);
     engine.setListener({
       onPlaying: () => {
@@ -415,7 +423,10 @@ export class PlayerEngine {
   }
 
   private async toMedia(track: Track): Promise<EngineMedia> {
-    const source = await this.resolve(track);
+    return this.mediaFor(track, await this.resolve(track));
+  }
+
+  private async mediaFor(track: Track, source: PlayableSource): Promise<EngineMedia> {
     return {
       id: track.id,
       source,
@@ -442,7 +453,9 @@ export class PlayerEngine {
     const safe = async (t?: Track) => {
       if (!t) return undefined;
       try {
-        return await this.toMedia(t);
+        const neighbour = this.neighbourResolver ?? ((x: Track) => this.resolve(x));
+        const source = await neighbour(t);
+        return source ? await this.mediaFor(t, source) : undefined;
       } catch {
         return undefined;
       }

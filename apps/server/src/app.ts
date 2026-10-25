@@ -8,6 +8,7 @@ import Fastify, {
 import type { ServerConfig } from './config';
 import { registerAuth } from './plugins/auth';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
+import { configureResolveLimits } from './services/ytdlp';
 
 export interface BuildAppOptions {
   logger?: FastifyServerOptions['logger'];
@@ -37,6 +38,7 @@ export async function buildApp(
     timeWindow: '1 minute',
   });
   registerAuth(app, config.token);
+  configureResolveLimits(config.maxConcurrentResolves);
 
   for (const route of options.routes ?? defaultRoutes) {
     await app.register(route, { config });

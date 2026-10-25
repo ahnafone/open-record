@@ -40,7 +40,7 @@ import { injectTrackArt } from './track-art';
  * debounced; chips and "Clear search" apply at once. Tapping a row plays it
  * with the results as the queue; the bookmark saves it to the library.
  * Imported records are matched locally and tagged "Imported". Below, the
- * "Download sources" section searches the user's download server.
+ * "Find online" section searches the stream server.
  */
 @Component({
   selector: 'or-search-page',

@@ -1,6 +1,6 @@
 export type MetadataSource = 'itunes' | 'deezer';
 
-/** A catalogue entry chosen for a track. Returned by `GET /metadata`. */
+/** A catalogue entry chosen for a track. */
 export interface MetadataMatch {
   title: string;
   artist: string;

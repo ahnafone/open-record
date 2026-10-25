@@ -36,6 +36,7 @@ export default [
                 'type:models',
                 'type:storage',
                 'type:player',
+                'type:metadata',
               ],
             },
             {
@@ -50,7 +51,13 @@ export default [
                 'type:music-source',
                 'type:storage',
                 'type:player',
+                'type:metadata',
               ],
+            },
+            {
+              // Pure iTunes/Deezer lookup: no workspace dependencies, injected fetch.
+              sourceTag: 'type:metadata',
+              onlyDependOnLibsWithTags: [],
             },
             {
               // Concrete providers depend on shared types only.

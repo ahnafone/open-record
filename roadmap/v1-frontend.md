@@ -1,6 +1,6 @@
 # v1: Frontend app
 
-Fully working client app, with an optional self-hosted downloader server (see [downloader-server.md](downloader-server.md)). No accounts or cloud backend. Installable on Android and iOS, also runs in a browser.
+Fully working client app, with an optional self-hosted stream-link server (see [downloader-server.md](downloader-server.md)). No accounts or cloud backend. Installable on Android and iOS, also runs in a browser.
 
 ## Goals
 
@@ -11,7 +11,7 @@ Fully working client app, with an optional self-hosted downloader server (see [d
 
 ## Non-goals
 
-- Hosted backend of any kind: accounts, sync, cloud storage, realtime anything (v2). The only network calls allowed go to the user's own optional download server (search, metadata, audio download); the app talks to no other service directly and nothing runs unless the user enters a server URL and token in Settings.
+- Hosted backend of any kind: accounts, sync, cloud storage, realtime anything (v2). The only network calls allowed are to the user's own optional stream-link server (search, resolve, stream link) and, once a server is configured, the iTunes and Deezer metadata APIs (called by the app via `libs/metadata-lookup`); audio bytes come from the source CDN via the link the server returns. Nothing runs unless the user enters a server URL and token in Settings. Stream links are tied to the server's public IP and expire, so streaming and saving work only on the server's network (e.g. home Wi-Fi), not on mobile data elsewhere; a server-side proxy is deliberately out of scope.
 - Hosting a downloader for others, multi-user access, and a secure token store (v2, see [v2-backend.md](v2-backend.md)).
 - Real collaborators (v2).
 
@@ -27,13 +27,14 @@ libs/models/              Track, Playlist, Member, Role types (no deps)
 libs/music-source/        MusicSourceProvider interface + registry
 libs/providers/local/     user-imported files provider
 libs/providers/catalog/   bundled public-domain catalog provider
-libs/providers/remote/    client + provider for the download server
+libs/providers/remote/    client + provider for the stream-link server (stream resolver, save to device)
+libs/metadata-lookup/     iTunes + Deezer lookup, scoring (pure; fetch injected)
 libs/state/               player, library, playlists, settings stores (signals)
 libs/storage/             persistence port + SQLite/IndexedDB adapters
 libs/player/              audio engine + media-session wrapper
 libs/ui/                  tokens.css, buttons, chips, sleeve/disc, modal, toast
 libs/features/<screen>/   browse, search, library, playlist, collab, now-playing, settings
-apps/server/              self-hosted downloader (Fastify + yt-dlp + ffmpeg, Docker)
+apps/server/              self-hosted stream-link server (Fastify + yt-dlp, Docker)
 ```
 
 Enforce boundaries with Nx module-boundary lint tags (features -> state/ui; providers -> models only).
@@ -50,10 +51,10 @@ interface MusicSourceProvider {
 }
 ```
 
-- v1 providers: `remote` (download server, optional, see M3.5), `local` (file picker import, metadata via tags) and `catalog` (mockup's 5 Wikimedia Commons items with licences/credits from `mockup/ATTRIBUTION.md`).
+- v1 providers: `remote` (stream-link server, optional, see M3.5), `local` (file picker import, metadata via tags) and `catalog` (mockup's 5 Wikimedia Commons items with licences/credits from `mockup/ATTRIBUTION.md`).
 - Providers are registered at startup; UI never references a concrete provider.
 
-**Capacitor plugins:** Filesystem (imported files, offline copies), a media-session / background-audio plugin (lock-screen controls, metadata, artwork), File Picker (import), `music-metadata` (tag and embedded-art parsing, not a plugin), SQLite (native) with IndexedDB fallback on web behind the storage port, Preferences for small settings. Download-server calls use native HTTP (CapacitorHttp) on device and `fetch` on web, via `libs/providers/remote`.
+**Capacitor plugins:** Filesystem (imported files, offline copies), a media-session / background-audio plugin (lock-screen controls, metadata, artwork), File Picker (import), `music-metadata` (tag and embedded-art parsing, not a plugin), SQLite (native) with IndexedDB fallback on web behind the storage port, Preferences for small settings. Stream-link server and metadata calls use native HTTP (CapacitorHttp) on device and `fetch` on web, via `libs/providers/remote`.
 
 **Persistence:** playlists, saved records (bookmarks), imported track metadata, queue/last position, settings. Versioned schema with migrations.
 
@@ -91,19 +92,21 @@ M3 extras (all untested on device):
 - [x] MusicBrainz / Cover Art Archive enrichment was built, then removed in M3.5 (storage migration v3 deletes its setting and fields)
 - [x] App icon and splash screen (`apps/app/resources`)
 
-### M3.5 Downloader
+### M3.5 Stream-first downloader
 
 Optional; off until a server URL and token are set. All items untested on device. Details in [downloader-server.md](downloader-server.md).
 
-- [x] `apps/server`: Fastify + yt-dlp + ffmpeg, Docker, single-user bearer token
+- [x] `apps/server`: Fastify + yt-dlp, Docker, single-user bearer token; returns stream links only (`POST /stream`, `/search`, `/resolve`, `/ping`), never downloads, tags or serves files; load safeguards (concurrency cap, queue, 503 Retry-After, rate limits, link cache)
 - [x] Search (YouTube, YouTube Music, SoundCloud) and pasted links (Bandcamp, Audiomack, Mixcloud, any yt-dlp site)
-- [x] Metadata from iTunes Search + Deezer (hi-res art), embedded into downloaded files
+- [x] Metadata from iTunes Search + Deezer (hi-res art) looked up by the app (`libs/metadata-lookup`) and saved with the track; the server has no `/metadata`
 - [x] MusicBrainz and Cover Art Archive removed (code, toggle, credits, setting)
-- [x] `libs/providers/remote`: downloads become normal `local:` tracks
-- [x] Settings > Download server (URL, token, Test connection); Search > Download sources; downloads queue (not persisted across restarts)
+- [x] `libs/providers/remote`: tap an unsaved result streams the link; bookmark or add to a playlist downloads it to the device in the background; removed from the library and all playlists deletes the file
+- [x] Settings > Stream server (URL, token, Test connection via `/ping`); Search > Download sources (planned rename: Find online); Android and iOS both use the server URL
+- [x] One-command start `npm run server:up` (prints LAN URL, token, QR; token persisted in `/data` or `~/.config/open-record`) and QR pairing: Settings > Stream server > Scan QR code reads `openrecord://pair?...` (Android; iOS accepts a pasted link)
+- [ ] iOS QR scanner needs CocoaPods/SPM setup; device test of scan pending
 - [x] Token stored in plain text in the settings collection (no secure-storage plugin yet)
 - [x] Server URL over HTTPS (Tailscale / Cloudflare tunnel, recommended) or plain HTTP on the home LAN. Decision: Android network security config allows cleartext (base-config; IP ranges cannot be scoped), iOS `NSAllowsLocalNetworking` + local-network usage string, server compose `BIND_ADDRESS` (default `127.0.0.1`). LAN HTTP exposes the token on the network; documented
-- [ ] Device test: download over Wi-Fi, play offline in airplane mode
+- [ ] Device test (pending): stream with the server on the LAN; bookmark, file appears and plays in airplane mode; unbookmark from library and all playlists, file deleted
 - [ ] Keep the downloader out of store builds (decide how before M5)
 
 ### M4 Collaborators (stub)
@@ -134,7 +137,7 @@ Optional; off until a server URL and token are set. All items untested on device
 - [ ] Lock-screen play/pause/next/seek work
 - [ ] Data survives app restart; works in airplane mode
 - [ ] Nx lint, type check, build all pass; small test suite green (queue/persistence/permission logic)
-- [ ] Without a configured server the app makes no network calls; downloads work only against the user's own server (device-tested over HTTPS, offline playback afterwards)
+- [ ] Without a configured server the app makes no network calls; streaming and saving work only against the user's own server on its network (device test pending; offline playback of saved songs afterwards)
 - [ ] Downloader kept out of store builds (or store policy reviewed)
 
 ## Risks
@@ -144,7 +147,8 @@ Optional; off until a server URL and token are set. All items untested on device
 | iOS background audio limits, interruptions, route changes | Enable audio background mode; test on device early (M1); handle interruptions in engine |
 | Webview audio quirks (WKWebView/Android) | Spike native-backed audio plugin in M1 before building UI on top |
 | Storage limits (IndexedDB eviction, device space) | Prefer native filesystem + SQLite on device; show usage; request persistent storage on web |
-| App Store/Play policy on downloaders | Server is separate and self-hosted; the app's download UI stays out of store builds until reviewed |
+| App Store/Play policy on downloaders | Server is separate and self-hosted; the app's download UI stays out of store builds until reviewed (sideload / TestFlight only) |
+| Stream links tied to the server's public IP and expiring | Works on the server's network only; a proxy would bring back server bandwidth load, so out of scope |
 | Token stored in plain text on device | Documented; secure storage plugin in v2 |
 | Source ToS, art terms (iTunes, Deezer), yt-dlp breakage | See [downloader-server.md](downloader-server.md) |
 | Imported files carry unknown rights | README disclaimer in About; local-only, never uploaded |

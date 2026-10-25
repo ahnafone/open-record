@@ -1,13 +1,22 @@
-import { mkdir } from 'node:fs/promises';
+import { networkInterfaces } from 'node:os';
 import { buildApp } from './app';
 import { ConfigError, loadConfig } from './config';
-import { createMetadataPostProcess } from './services/download-metadata';
-import { setPostProcess } from './services/downloads';
+import { formatBanner } from './services/banner';
+import { pickLanUrl } from './services/network';
+import { defaultDataDir, resolveToken } from './services/token-store';
 
 async function main(): Promise<void> {
+  let token;
+  try {
+    token = resolveToken({ env: process.env, dataDir: defaultDataDir(process.env) });
+  } catch (err) {
+    console.error(`open-record-server: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
   let config;
   try {
-    config = loadConfig();
+    config = loadConfig({ ...process.env, OPEN_RECORD_TOKEN: token.token });
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`open-record-server: ${err.message}`);
@@ -16,11 +25,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  await mkdir(config.dataDir, { recursive: true });
-
   const app = await buildApp(config, { logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
-  // Registered here (not in buildApp) so tests keep the no-op hook.
-  setPostProcess(createMetadataPostProcess({ log: app.log }));
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
@@ -31,6 +36,22 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
 
   await app.listen({ port: config.port, host: config.host });
+
+  // Console, not the logger: the token must not reach request or app logs.
+  const publicUrl = process.env['PUBLIC_URL']?.trim() || undefined;
+  const picked = pickLanUrl({
+    publicUrl,
+    host: config.host,
+    port: config.port,
+    interfaces: networkInterfaces(),
+  });
+  console.log(
+    await formatBanner({
+      ...picked,
+      fromPublicUrl: !!publicUrl,
+      token,
+    }),
+  );
 }
 
 main().catch((err) => {

@@ -11,11 +11,14 @@ import { NgTemplateOutlet } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import type { DownloadSite, Track } from '@open-record/models';
 import {
-  DownloadsStore,
+  LibraryStore,
+  OfflineStore,
+  PlayerStore,
+  REMOTE_PROVIDER_ID,
+  RemoteServerPort,
   SettingsStore,
   isAbort,
   remoteErrorMessage,
-  type DownloadItem,
 } from '@open-record/state';
 import {
   OrButton,
@@ -28,7 +31,9 @@ import {
   OrSleeve,
   OrSpinner,
   OrTag,
+  OrToast,
 } from '@open-record/ui';
+import { PlaylistPickerDialog } from './playlist-picker-dialog';
 
 /** Sites with server search, as chips. Other sites work through a pasted link. */
 export const SEARCHABLE_SOURCES: readonly {
@@ -48,9 +53,9 @@ export function formatDuration(sec: number | undefined): string {
 }
 
 /**
- * "Download sources" on the Search screen: search a site on the user's
- * download server, paste a link, and download records into the library.
- * Shows a compact list of running and failed downloads with retry.
+ * "Find online" on the Search screen: search a site on the stream server or
+ * paste a link. Tapping a record plays it (streamed unless saved); the
+ * bookmark saves it to the device for offline play.
  */
 @Component({
   selector: 'or-download-sources',
@@ -66,30 +71,29 @@ export function formatDuration(sec: number | undefined): string {
     OrSleeve,
     OrSpinner,
     OrTag,
+    PlaylistPickerDialog,
     RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <or-section-head heading="Download sources" />
+    <or-section-head heading="Find online" />
 
     @if (!settings.hydrated()) {
       <p class="status" role="status">
         <span class="status-load"><or-spinner [size]="14" />Loading…</span>
       </p>
-    } @else if (
-      !settings.downloadsAvailable || !settings.downloadServerConfigured()
-    ) {
+    } @else if (!settings.serverAvailable || !settings.downloadServerConfigured()) {
       <or-empty-state class="setup">
-        @if (settings.downloadsAvailable) {
-          Set up your download server to find and download records from YouTube,
-          SoundCloud and more.
+        @if (settings.serverAvailable) {
+          Set up your stream server to find records on YouTube, SoundCloud and
+          more.
           <a class="link-btn" routerLink="/settings">Open Settings</a>
         } @else {
-          Downloading is not available in this build.
+          Online search is not available in this build.
         }
       </or-empty-state>
     } @else {
-      <div class="chips" role="group" aria-label="Download source">
+      <div class="chips" role="group" aria-label="Search source">
         @for (s of sources; track s.site) {
           <or-chip
             [toggleable]="false"
@@ -100,7 +104,7 @@ export function formatDuration(sec: number | undefined): string {
         }
       </div>
 
-      <p id="or-dl-status" class="status" role="status">
+      <p id="or-find-status" class="status" role="status">
         @if (!query()) {
           <span class="status-idle"
             >Search above to look on {{ siteLabel() }}.</span
@@ -124,26 +128,28 @@ export function formatDuration(sec: number | undefined): string {
         <ul
           class="rows"
           [class.is-stale]="results.isLoading()"
-          aria-describedby="or-dl-status"
+          aria-describedby="or-find-status"
         >
           @for (t of found(); track t.id) {
-            <ng-container *ngTemplateOutlet="row; context: { $implicit: t }" />
+            <ng-container
+              *ngTemplateOutlet="row; context: { $implicit: t, list: found() }"
+            />
           }
         </ul>
       }
 
       <form class="paste" (submit)="resolveLink($event)">
-        <label class="eyebrow" for="or-dl-link">Paste a link</label>
+        <label class="eyebrow" for="or-find-link">Paste a link</label>
         <div class="paste-row">
           <span class="field" [class.is-bad]="!!linkError()">
             <or-icon class="field-ic" name="link" />
             <input
-              id="or-dl-link"
+              id="or-find-link"
               type="url"
               inputmode="url"
               autocomplete="off"
               placeholder="https://…"
-              aria-describedby="or-dl-link-status"
+              aria-describedby="or-find-link-status"
               [attr.aria-invalid]="linkError() ? 'true' : null"
               [value]="link()"
               (input)="onLink($event)"
@@ -153,7 +159,7 @@ export function formatDuration(sec: number | undefined): string {
             {{ resolving() ? 'Finding…' : 'Find' }}
           </or-button>
         </div>
-        <p id="or-dl-link-status" class="status" role="status">
+        <p id="or-find-link-status" class="status" role="status">
           @if (linkError(); as e) {
             <span class="status-bad"
               ><or-icon name="alert" [size]="14" />{{ e }}</span
@@ -167,119 +173,100 @@ export function formatDuration(sec: number | undefined): string {
       </form>
       @if (resolved(); as r) {
         <ul class="rows" aria-label="Pasted link">
-          <ng-container *ngTemplateOutlet="row; context: { $implicit: r }" />
+          <ng-container
+            *ngTemplateOutlet="row; context: { $implicit: r, list: [r] }"
+          />
         </ul>
       }
 
-      @if (downloads.visible().length) {
-        <h3 class="eyebrow queue-head">Downloads</h3>
-        <ul class="queue" aria-label="Downloads">
-          @for (d of downloads.visible(); track d.id) {
-            <li class="queue-item">
-              <span class="q-text">
-                <span class="q-title">{{ d.title }}</span>
-                <span class="q-status" [class.is-bad]="d.phase === 'failed'">
-                  {{ d.phase === 'failed' ? d.error : statusText(d) }}
-                </span>
-              </span>
-              @if (d.phase === 'failed') {
-                <or-button
-                  size="sm"
-                  [ariaLabel]="'Retry ' + d.title"
-                  (click)="downloads.retry(d.id)"
-                >
-                  Retry
-                </or-button>
-              }
-              <or-icon-button
-                icon="close"
-                [iconSize]="20"
-                [label]="
-                  (d.phase === 'failed' ? 'Dismiss ' : 'Cancel ') + d.title
-                "
-                (click)="downloads.dismiss(d.id)"
-              />
-              @if (isActive(d)) {
-                <or-progress-line
-                  class="q-progress"
-                  [value]="d.progress"
-                  [max]="100"
-                />
-              }
-            </li>
-          }
-        </ul>
-      }
-      <p class="sr-only" aria-live="polite">
-        @if (downloads.lastSaved(); as s) {
-          Saved {{ s.title }} to your library.
-        }
-      </p>
       <p class="note">
-        You are responsible for what you download. See the
+        Saved records are copied to this device. Other records stream from the
+        server. You are responsible for what you use. See the
         <a routerLink="/settings" fragment="music-disclaimer"
           >music disclaimer</a
         >.
       </p>
     }
 
-    <ng-template #row let-t>
-      @let item = downloads.itemFor(t.source?.url);
+    <ng-template #row let-t let-list="list">
+      @let st = offline.status(t.id);
       <li class="row">
-        <or-sleeve
-          size="thumb"
-          [src]="t.artUrl"
-          [label]="t.title"
-          fallbackLabel="No artwork"
-        />
-        <span class="info">
-          <span class="title">{{ t.title }}</span>
-          <span class="artist">{{ t.artist }}</span>
-          <span class="detail" [class.is-bad]="item?.phase === 'failed'">
-            {{ rowDetail(t, item) }}
+        <button type="button" class="main" (click)="play(t, list)">
+          <or-sleeve
+            size="thumb"
+            [src]="t.artUrl"
+            [label]="t.title"
+            fallbackLabel="No artwork"
+          />
+          <span class="info">
+            <span class="title" [class.is-current]="player.isCurrent(t.id)">{{
+              t.title
+            }}</span>
+            <span class="artist">{{ t.artist }}</span>
+            <span class="tags">
+              @if (st === 'saved') {
+                <or-tag ivory icon="check">Saved offline</or-tag>
+              } @else if (t.providerId === REMOTE && !st) {
+                <or-tag>Streaming only</or-tag>
+              }
+              @if (t.durationSec) {
+                <span class="detail">{{ duration(t.durationSec) }}</span>
+              }
+            </span>
           </span>
+        </button>
+        <span class="actions">
+          <or-icon-button
+            icon="bookmark"
+            [iconSize]="20"
+            [pressed]="library.isSaved(t.id)"
+            [label]="
+              (library.isSaved(t.id) ? 'Remove bookmark for ' : 'Bookmark ') +
+              t.title
+            "
+            (click)="toggleSaved(t)"
+          />
+          <or-icon-button
+            icon="plus"
+            [iconSize]="20"
+            [label]="'Add ' + t.title + ' to a playlist'"
+            (click)="openPicker(t)"
+          />
         </span>
-        <span class="action">
-          @if (item?.phase === 'done') {
-            <or-tag ivory icon="check">Saved</or-tag>
-          } @else if (item?.phase === 'saving') {
-            <or-spinner [size]="18" label="Saving" />
-          } @else if (item && item.phase !== 'failed') {
-            <or-icon-button
-              icon="close"
-              [iconSize]="20"
-              [label]="'Cancel ' + t.title"
-              (click)="downloads.dismiss(item.id)"
+        @if (st === 'queued' || st === 'saving') {
+          <span class="line">
+            <span class="status-load">
+              {{ st === 'queued' ? 'Waiting to save…' : 'Saving offline…' }}
+            </span>
+            <or-progress-line
+              [value]="offline.progress(t.id) * 100"
+              [max]="100"
             />
-          } @else {
+          </span>
+        } @else if (st === 'failed') {
+          <span class="line">
+            <span class="status-bad">
+              <or-icon name="alert" [size]="14" />{{
+                offline.error(t.id) ?? 'Could not save offline.'
+              }}
+            </span>
             <or-button
               size="sm"
-              [ariaLabel]="(item ? 'Retry ' : 'Download ') + t.title"
-              (click)="download(t)"
+              [ariaLabel]="'Retry saving ' + t.title"
+              (click)="offline.retry(t.id)"
             >
-              <or-icon name="download" [size]="18" />{{
-                item ? 'Retry' : 'Download'
-              }}
+              Retry
             </or-button>
-          }
-        </span>
+          </span>
+        }
       </li>
     </ng-template>
+
+    <or-playlist-picker-dialog [(open)]="pickerOpen" [track]="pickerTrack()" />
   `,
   styles: `
     :host {
       display: block;
-    }
-    .sr-only {
-      position: absolute;
-      inline-size: 1px;
-      block-size: 1px;
-      margin: -1px;
-      padding: 0;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-      border: 0;
     }
     .setup {
       display: grid;
@@ -299,7 +286,8 @@ export function formatDuration(sec: number | undefined): string {
       border: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
       border-radius: var(--rounded-md);
     }
-    a:focus-visible {
+    a:focus-visible,
+    button:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
     }
@@ -328,13 +316,11 @@ export function formatDuration(sec: number | undefined): string {
       gap: 6px;
       color: var(--color-muted);
     }
-    .status-bad,
-    .is-bad {
+    .status-bad {
       color: var(--color-primary);
     }
 
-    .rows,
-    .queue {
+    .rows {
       display: grid;
       margin: 0;
       padding: 0;
@@ -346,9 +332,9 @@ export function formatDuration(sec: number | undefined): string {
     }
     .row {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      gap: 10px;
+      gap: 4px 6px;
       min-block-size: 72px;
       padding: var(--spacing-xs) 0;
       border-block-start: 1px solid
@@ -356,6 +342,21 @@ export function formatDuration(sec: number | undefined): string {
     }
     .row:first-child {
       border-block-start: 0;
+    }
+    .main {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      min-inline-size: 0;
+      min-block-size: var(--spacing-touch);
+      padding: 0;
+      text-align: start;
+      color: inherit;
+      font: inherit;
+      background: none;
+      border: 0;
+      cursor: pointer;
     }
     .info {
       display: grid;
@@ -368,6 +369,9 @@ export function formatDuration(sec: number | undefined): string {
       line-height: var(--type-row-title-line-height);
       overflow-wrap: anywhere;
     }
+    .title.is-current {
+      color: var(--color-primary);
+    }
     .artist {
       font-size: 13px;
       line-height: 1.35;
@@ -376,24 +380,35 @@ export function formatDuration(sec: number | undefined): string {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--spacing-xxs) 6px;
+    }
     .detail {
+      font-size: var(--type-meta-font-size);
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .actions {
+      display: inline-flex;
+      align-items: center;
+    }
+    .line {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--spacing-xxs) 10px;
       min-block-size: calc(
         var(--type-meta-font-size) * var(--type-meta-line-height)
       );
       font-size: var(--type-meta-font-size);
       line-height: var(--type-meta-line-height);
-      color: var(--color-muted);
-      font-variant-numeric: tabular-nums;
     }
-    .detail.is-bad {
-      color: var(--color-primary);
-    }
-    .action {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-inline-size: var(--spacing-touch);
-      min-block-size: var(--spacing-touch);
+    .line or-progress-line {
+      flex: 1 1 100%;
     }
 
     .paste {
@@ -446,47 +461,6 @@ export function formatDuration(sec: number | undefined): string {
     .field input::placeholder {
       color: var(--color-muted);
     }
-
-    .queue-head {
-      margin-block-start: var(--spacing-md);
-    }
-    .queue-item {
-      position: relative;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      align-items: center;
-      gap: var(--spacing-xs);
-      min-block-size: 60px;
-      border-block-start: 1px solid
-        color-mix(in srgb, var(--color-border) 32%, transparent);
-    }
-    .queue-item:first-child {
-      border-block-start: 0;
-    }
-    .q-text {
-      display: grid;
-      min-inline-size: 0;
-    }
-    .q-title {
-      font-size: 14px;
-      font-weight: 600;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .q-status {
-      font-size: 12px;
-      color: var(--color-muted);
-      font-variant-numeric: tabular-nums;
-    }
-    .q-status.is-bad {
-      color: var(--color-primary);
-    }
-    .q-progress {
-      position: absolute;
-      inset-inline: 0;
-      inset-block-end: 0;
-    }
     .note {
       margin: var(--spacing-md) 0 0;
       font-size: 12px;
@@ -507,7 +481,14 @@ export function formatDuration(sec: number | undefined): string {
 })
 export class DownloadSources {
   protected readonly settings = inject(SettingsStore);
-  protected readonly downloads = inject(DownloadsStore);
+  protected readonly library = inject(LibraryStore);
+  protected readonly player = inject(PlayerStore);
+  protected readonly offline = inject(OfflineStore);
+  private readonly server = inject(RemoteServerPort, { optional: true });
+  private readonly toast = inject(OrToast);
+
+  protected readonly REMOTE = REMOTE_PROVIDER_ID;
+  protected readonly duration = formatDuration;
 
   /** Settled, valid search text from the Search screen ('' for none). */
   readonly query = input('');
@@ -521,11 +502,16 @@ export class DownloadSources {
   /** Server search; a new query or site aborts the stale request. */
   protected readonly results = resource({
     params: () =>
-      this.settings.downloadServerConfigured() && this.query()
+      this.settings.downloadServerConfigured() && this.query() && this.server
         ? { q: this.query(), site: this.site() }
         : undefined,
-    loader: ({ params, abortSignal }) =>
-      this.downloads.search(params.q, params.site, abortSignal),
+    loader: async ({ params, abortSignal }) => {
+      const server = this.server;
+      if (!server) return [];
+      const tracks = await server.searchSite(params.q, params.site, abortSignal);
+      this.library.remember(tracks);
+      return tracks;
+    },
   });
 
   protected readonly found = computed(() =>
@@ -542,47 +528,32 @@ export class DownloadSources {
   protected readonly resolved = signal<Track | null>(null);
   private linkAbort?: AbortController;
 
+  protected readonly pickerOpen = signal(false);
+  protected readonly pickerTrack = signal<Track | null>(null);
+
   protected message(err: unknown): string {
     return remoteErrorMessage(err);
   }
 
-  protected isActive(d: DownloadItem): boolean {
-    return (
-      d.phase === 'downloading' ||
-      d.phase === 'processing' ||
-      d.phase === 'saving'
-    );
+  protected play(track: Track, list: readonly Track[]): void {
+    this.library.remember([track]);
+    void this.player.playTrack(track, list);
   }
 
-  protected statusText(d: DownloadItem): string {
-    switch (d.phase) {
-      case 'queued':
-        return 'Waiting…';
-      case 'downloading':
-        return `Downloading ${d.progress}%`;
-      case 'processing':
-        return 'Processing…';
-      case 'saving':
-        return 'Saving to your library…';
-      case 'done':
-        return 'In your library';
-      default:
-        return '';
-    }
-  }
-
-  protected rowDetail(t: Track, item: DownloadItem | undefined): string {
-    if (item?.phase === 'failed') return item.error ?? 'Download failed.';
-    if (item) return this.statusText(item);
-    return formatDuration(t.durationSec);
-  }
-
-  protected download(t: Track): void {
+  /** Bookmark (save offline) or un-bookmark; OfflineStore reports progress. */
+  protected async toggleSaved(track: Track): Promise<void> {
+    this.library.remember([track]);
     try {
-      this.downloads.enqueue(t);
+      await this.library.toggleSaved(track.id);
     } catch (err) {
-      this.linkError.set(remoteErrorMessage(err));
+      this.toast.show(remoteErrorMessage(err));
     }
+  }
+
+  protected openPicker(track: Track): void {
+    this.library.remember([track]);
+    this.pickerTrack.set(track);
+    this.pickerOpen.set(true);
   }
 
   protected onLink(event: Event): void {
@@ -593,7 +564,7 @@ export class DownloadSources {
   protected async resolveLink(event: Event): Promise<void> {
     event.preventDefault();
     const url = this.link().trim();
-    if (!url || this.resolving()) return;
+    if (!url || this.resolving() || !this.server) return;
     if (!/^https?:\/\/\S+$/i.test(url)) {
       this.linkError.set('Paste a full http:// or https:// link.');
       return;
@@ -603,8 +574,11 @@ export class DownloadSources {
     this.resolving.set(true);
     this.linkError.set(null);
     try {
-      const track = await this.downloads.resolve(url, abort.signal);
-      if (!abort.signal.aborted) this.resolved.set(track);
+      const track = await this.server.resolveUrl(url, abort.signal);
+      if (!abort.signal.aborted) {
+        this.library.remember([track]);
+        this.resolved.set(track);
+      }
     } catch (err) {
       if (!abort.signal.aborted && !isAbort(err)) {
         this.resolved.set(null);

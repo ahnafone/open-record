@@ -116,6 +116,23 @@ export const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 4,
+    description:
+      'Imported track status: backfill status "saved" on existing records (absent status means saved)',
+    async up(ctx) {
+      for (const [key, value] of await ctx.entries(
+        COLLECTIONS.importedTracks,
+      )) {
+        const record = value as { status?: string } | null;
+        if (!record || record.status !== undefined) continue;
+        await ctx.put(COLLECTIONS.importedTracks, key, {
+          ...record,
+          status: 'saved',
+        });
+      }
+    },
+  },
 ];
 
 export function latestVersion(

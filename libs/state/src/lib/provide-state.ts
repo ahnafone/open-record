@@ -4,6 +4,7 @@ import {
   makeEnvironmentProviders,
   provideAppInitializer,
 } from '@angular/core';
+import { OfflineStore } from './offline.store';
 import { PlayerStore } from './player.store';
 import { SettingsStore } from './settings.store';
 
@@ -18,6 +19,7 @@ export function provideState(): EnvironmentProviders {
       // Hydrating settings also configures the download server.
       inject(SettingsStore);
       void inject(PlayerStore).restore();
+      void inject(OfflineStore).start();
     }),
   ]);
 }

@@ -1,6 +1,7 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
+import { parsePairingLink } from '@open-record/models';
 import { SETTINGS_KEYS, StoragePort } from '@open-record/storage';
-import { RemoteDownloadPort } from './ports';
+import { RemoteServerPort } from './ports';
 import { isAbort, remoteErrorMessage } from './remote-errors';
 
 /** The self-hosted download server the app talks to. */
@@ -8,6 +9,9 @@ export interface DownloadServerSettings {
   url: string;
   token: string;
 }
+
+/** Outcome of pairing from a pasted or scanned link. */
+export type PairResult = { ok: true } | { ok: false; message: string };
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -22,14 +26,14 @@ const NO_SERVER: DownloadServerSettings = { url: '', token: '' };
  * optimistically and roll back if the write fails.
  *
  * The download server URL + token live in the `settings` collection (the
- * repo has no secure-storage plugin) and are pushed to `RemoteDownloadPort`
+ * repo has no secure-storage plugin) and are pushed to `RemoteServerPort`
  * at startup and whenever they change.
  */
 @Injectable({ providedIn: 'root' })
 export class SettingsStore {
   // Settings are read from and written to `storage.settings`.
   protected readonly storage = inject(StoragePort);
-  private readonly remote = inject(RemoteDownloadPort, { optional: true });
+  private readonly remote = inject(RemoteServerPort, { optional: true });
 
   private readonly _hydrated = signal(false);
   private readonly _server = signal<DownloadServerSettings>(NO_SERVER);
@@ -39,8 +43,8 @@ export class SettingsStore {
 
   /** True once the stored settings have been read. */
   readonly hydrated = this._hydrated.asReadonly();
-  /** Downloading is wired in this build (a RemoteDownloadPort is provided). */
-  readonly downloadsAvailable = !!this.remote;
+  /** The stream server is wired in this build (a RemoteServerPort is provided). */
+  readonly serverAvailable = !!this.remote;
   /** Saved download server (empty strings when not set up). */
   readonly downloadServer = this._server.asReadonly();
   readonly downloadServerUrl = computed(() => this._server().url);
@@ -91,6 +95,39 @@ export class SettingsStore {
       this.apply(before, false);
       throw err;
     }
+  }
+
+  /**
+   * Pair with a server from an `openrecord://pair` link: save its URL and token,
+   * then run the connection test. The settings stay saved even when the test
+   * fails, so the message can be fixed in place.
+   */
+  async pairFromLink(text: string): Promise<PairResult> {
+    await this.loaded;
+    const link = parsePairingLink(text);
+    if (!link)
+      return { ok: false, message: 'That is not an Open Record pairing link.' };
+    try {
+      await this.setDownloadServer(link);
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error && err.message.startsWith('Enter')
+            ? err.message
+            : 'Could not save the server. Try again.',
+      };
+    }
+    await this.testConnection();
+    const state = this.connection();
+    if (state.status === 'ok') return { ok: true };
+    return {
+      ok: false,
+      message:
+        state.status === 'error'
+          ? state.message
+          : 'Connection test did not finish. Try again.',
+    };
   }
 
   /** Check the saved server is reachable and accepts the token. */

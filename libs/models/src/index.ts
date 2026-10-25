@@ -63,29 +63,6 @@ export interface RemoteSearchResult {
   site: string;
 }
 
-export type DownloadJobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'failed';
-
-/** Tags the server settled on for a finished download. */
-export interface DownloadJobTrack {
-  title: string;
-  artist: string;
-  album?: string;
-  year?: number;
-  genre?: string;
-  durationSec?: number;
-  artworkUrl?: string;
-}
-
-/** `GET /downloads/:id`. */
-export interface DownloadJob {
-  id: string;
-  status: DownloadJobStatus;
-  /** 0-100. */
-  progress: number;
-  error?: string;
-  track?: DownloadJobTrack;
-}
-
 /** Track fields the user may edit on imported tracks. */
 export type EditableTrackField = 'title' | 'artist' | 'album' | 'year' | 'genre';
 
@@ -114,3 +91,5 @@ export interface Member {
   name: string;
   role: Role;
 }
+
+export * from './lib/pairing';

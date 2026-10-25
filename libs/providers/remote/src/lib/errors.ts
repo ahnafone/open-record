@@ -48,23 +48,23 @@ export class ProtocolError extends RemoteError {
   override name = 'ProtocolError';
 }
 
-/** The server finished a download job with `status: 'failed'`. */
-export class DownloadFailedError extends RemoteError {
-  override name = 'DownloadFailedError';
-
-  constructor(
-    readonly jobId: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 /** The caller aborted (AbortSignal). */
 export class AbortedError extends RemoteError {
   override name = 'AbortedError';
 
   constructor() {
     super('Cancelled');
+  }
+}
+
+/** Error name of {@link RemoteBusyError}: the server's resolve queue is full (HTTP 503). */
+export const BUSY_ERROR_NAME = 'busy';
+
+/** The server is busy (HTTP 503 + Retry-After). Retry later; `retryAfterSec` is the server's hint. */
+export class RemoteBusyError extends RemoteError {
+  override name = BUSY_ERROR_NAME;
+
+  constructor(readonly retryAfterSec?: number) {
+    super('The server is busy. Try again in a moment.');
   }
 }

@@ -147,4 +147,18 @@ describe('runMigrations', () => {
     expect(await backend.get(COLLECTIONS.settings, 'onlineMetadata')).toBeUndefined();
     expect(await backend.get(COLLECTIONS.settings, 'theme')).toBe('dark');
   });
+
+  it('v4 backfills status "saved" on existing imported tracks and keeps explicit status', async () => {
+    const backend = new InMemoryBackend();
+    await runMigrations(backend, MIGRATIONS.slice(0, 3));
+    const base = { track: { id: 'local:1', providerId: 'local', title: 'T', artist: 'A' }, filePath: 'imported/1.audio.mp3', importedAt: 1 };
+    await backend.put(COLLECTIONS.importedTracks, 'local:1', base);
+    await backend.put(COLLECTIONS.importedTracks, 'remote:2', { ...base, status: 'saving', filePath: '' });
+
+    const result = await runMigrations(backend, MIGRATIONS);
+
+    expect(result.applied).toEqual([4]);
+    expect(await backend.get(COLLECTIONS.importedTracks, 'local:1')).toMatchObject({ status: 'saved', filePath: 'imported/1.audio.mp3' });
+    expect(await backend.get(COLLECTIONS.importedTracks, 'remote:2')).toMatchObject({ status: 'saving', filePath: '' });
+  });
 });

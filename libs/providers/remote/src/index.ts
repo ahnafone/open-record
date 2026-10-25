@@ -1,31 +1,37 @@
 // Public API for @open-record/providers/remote (download server client + provider).
 export {
   normalizeBaseUrl,
-  parseFileHeaders,
-  parseJob,
   parseSearchResult,
+  parseStream,
   RemoteClient,
-  type AuthorizedRequest,
   type RemoteConfig,
-  type WaitOptions,
+  type RemoteStream,
 } from './lib/client';
 export {
-  BlobDownloadTarget,
-  buildFileName,
-  createDefaultDownloadTarget,
-  DOWNLOAD_CACHE_DIR,
-  NativeDownloadTarget,
-  type DownloadedFile,
-  type DownloadTarget,
-  type DownloadTargetRequest,
-} from './lib/download-target';
+  createLinkCache,
+  LINK_EXPIRY_MARGIN_MS,
+  type ExpiringLink,
+  type LinkCacheOptions,
+} from './lib/link-cache';
+export {
+  RemoteStreamResolver,
+  SAVED_DIR,
+  savedFilePath,
+  type RemoteStreamResolverOptions,
+  type SaveBlob,
+  type SaveToDeviceOptions,
+  type SavedFile,
+  type StreamLink,
+  type StreamMeta,
+} from './lib/stream-resolver';
 export {
   AbortedError,
   AuthError,
-  DownloadFailedError,
+  BUSY_ERROR_NAME,
   HttpError,
   NetworkError,
   ProtocolError,
+  RemoteBusyError,
   RemoteConfigError,
   RemoteError,
 } from './lib/errors';
@@ -35,10 +41,6 @@ export {
   remoteTrackId,
   toRemoteTrack,
   urlFromRemoteTrackId,
-  type DownloadImporter,
-  type DownloadPhase,
-  type DownloadProgress,
-  type DownloadToLibraryOptions,
   type RemoteProviderOptions,
 } from './lib/remote-provider';
 export {

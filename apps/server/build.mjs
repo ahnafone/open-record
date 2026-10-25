@@ -12,7 +12,8 @@ const outdir = resolve(root, 'dist/apps/server');
 const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 
 /** Runtime npm packages the server imports. Add new server deps here. */
-const runtimeDeps = ['fastify', '@fastify/cors', '@fastify/rate-limit'];
+// qrcode stays external: esbuild cannot bundle its Node entry (dynamic require of "fs").
+const runtimeDeps = ['fastify', '@fastify/cors', '@fastify/rate-limit', 'qrcode'];
 
 const missing = runtimeDeps.filter((d) => !rootPkg.dependencies?.[d]);
 if (missing.length) {

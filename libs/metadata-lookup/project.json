@@ -1,0 +1,23 @@
+{
+  "name": "metadata-lookup",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/metadata-lookup/src",
+  "projectType": "library",
+  "tags": [
+    "type:metadata"
+  ],
+  "// targets": "to see all targets run: nx show project metadata-lookup --web",
+  "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "{projectRoot}",
+        "commands": [
+          "tsc -p tsconfig.lib.json --noEmit",
+          "tsc -p tsconfig.spec.json --noEmit"
+        ],
+        "parallel": false
+      }
+    }
+  }
+}

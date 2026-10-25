@@ -14,8 +14,6 @@ function fakeTransport(status: number, data: unknown): HttpTransport & { urls: s
   };
 }
 
-const target = { fetch: async () => ({ name: 'x.mp3', size: 1 }), release: async () => undefined };
-
 describe('remote provider', () => {
   it('maps /search results to Tracks and sends the bearer token', async () => {
     const transport = fakeTransport(200, {
@@ -24,7 +22,7 @@ describe('remote provider', () => {
         { id: 'broken', artist: 'No title or url' },
       ],
     });
-    const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example/', token: 'secret' }, transport, target });
+    const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example/', token: 'secret' }, transport });
 
     const tracks = await provider.searchSite('nina simone', 'ytmusic');
 

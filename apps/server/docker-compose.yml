@@ -1,6 +1,11 @@
-# Run from the repository root:
-#   OPEN_RECORD_TOKEN=$(openssl rand -hex 32) docker compose -f apps/server/docker-compose.yml up -d --build
-# or put OPEN_RECORD_TOKEN in apps/server/.env (see .env.example).
+# Normally started with the helper, from the repository root:
+#   npm run server:up
+# It detects your LAN IP, starts this compose file, and prints the URL, access
+# token and a QR code to scan in the app (Settings, Download server).
+#
+# Manual start (set BIND_ADDRESS to the LAN IP and PUBLIC_URL to the URL phones use):
+#   BIND_ADDRESS=192.168.1.20 PUBLIC_URL=http://192.168.1.20:8787 \
+#     docker compose -f apps/server/docker-compose.yml up -d --build
 services:
   server:
     build:
@@ -11,9 +16,13 @@ services:
     image: open-record-server
     restart: unless-stopped
     environment:
-      OPEN_RECORD_TOKEN: ${OPEN_RECORD_TOKEN:?set OPEN_RECORD_TOKEN (min 16 chars)}
+      # Optional. When unset, the token is generated once and kept in the
+      # server-data volume (/data/token), so it survives restarts.
+      OPEN_RECORD_TOKEN: ${OPEN_RECORD_TOKEN:-}
+      OPEN_RECORD_DATA_DIR: /data
+      # URL phones use, printed in the startup banner and QR code.
+      PUBLIC_URL: ${PUBLIC_URL:-}
       PORT: 8787
-      DATA_DIR: /data
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       TRUST_PROXY: ${TRUST_PROXY:-false}
     ports:
@@ -23,7 +32,7 @@ services:
       # LAN traffic is unencrypted: anyone on the network can read the token.
       - '${BIND_ADDRESS:-127.0.0.1}:${PORT:-8787}:8787'
     volumes:
-      - open-record-data:/data
+      - server-data:/data
     read_only: true
     tmpfs:
       - /tmp
@@ -33,4 +42,4 @@ services:
       - ALL
 
 volumes:
-  open-record-data:
+  server-data:

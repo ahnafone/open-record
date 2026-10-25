@@ -1,5 +1,5 @@
-import type { DownloadJob, DownloadJobStatus, DownloadJobTrack, DownloadSite, RemoteSearchResult } from '@open-record/models';
-import { AbortedError, AuthError, DownloadFailedError, HttpError, NetworkError, ProtocolError, RemoteConfigError } from './errors';
+import type { DownloadSite, RemoteSearchResult } from '@open-record/models';
+import { AuthError, HttpError, ProtocolError, RemoteBusyError, RemoteConfigError } from './errors';
 import { createFetchTransport, type HttpRequest, type HttpTransport } from './transport';
 
 /** Where the download server lives and the shared bearer token. */
@@ -8,24 +8,6 @@ export interface RemoteConfig {
   baseUrl: string;
   token: string;
 }
-
-/** A GET request the platform download target performs itself (native `downloadFile`, web `fetch`). */
-export interface AuthorizedRequest {
-  url: string;
-  headers: Record<string, string>;
-}
-
-export interface WaitOptions {
-  /** Poll interval in ms (default 1000). */
-  intervalMs?: number;
-  /** Give up after this many ms (default 15 minutes). */
-  timeoutMs?: number;
-  signal?: AbortSignal;
-  /** Called after every poll. */
-  onUpdate?(job: DownloadJob): void;
-}
-
-const JOB_STATUSES: readonly DownloadJobStatus[] = ['queued', 'downloading', 'processing', 'done', 'failed'];
 
 /** Normalised base URL (no trailing slash). Throws {@link RemoteConfigError} for anything but http(s). */
 export function normalizeBaseUrl(raw: string): string {
@@ -40,6 +22,15 @@ export function normalizeBaseUrl(raw: string): string {
     throw new RemoteConfigError('The server URL must start with http:// or https://');
   }
   return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
+}
+
+/** Direct audio link for one page (`POST /stream`). `expiresAt` is an ISO time. */
+export interface RemoteStream {
+  url: string;
+  mimeType?: string;
+  expiresAt?: string;
+  httpHeaders?: Record<string, string>;
+  track: { title: string; artist: string; album?: string; durationSec?: number; thumbnailUrl?: string };
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
@@ -66,38 +57,33 @@ export function parseSearchResult(raw: unknown): RemoteSearchResult | null {
   return result;
 }
 
-function parseJobTrack(raw: unknown): DownloadJobTrack | undefined {
-  if (!isObj(raw)) return undefined;
-  const title = str(raw['title']);
-  if (!title) return undefined;
-  const track: DownloadJobTrack = { title, artist: str(raw['artist']) ?? '' };
-  const album = str(raw['album']);
-  if (album) track.album = album;
-  const year = num(raw['year']);
-  if (year) track.year = year;
-  const genre = str(raw['genre']);
-  if (genre) track.genre = genre;
-  const duration = num(raw['durationSec']);
-  if (duration) track.durationSec = duration;
-  const art = str(raw['artworkUrl']);
-  if (art) track.artworkUrl = art;
-  return track;
-}
-
-export function parseJob(raw: unknown): DownloadJob {
-  if (!isObj(raw) || !str(raw['id']) || !JOB_STATUSES.includes(raw['status'] as DownloadJobStatus)) {
-    throw new ProtocolError('Unexpected download job response from the server.');
-  }
-  const job: DownloadJob = {
-    id: str(raw['id']) as string,
-    status: raw['status'] as DownloadJobStatus,
-    progress: Math.min(100, Math.max(0, num(raw['progress']) ?? 0)),
+export function parseStream(raw: unknown): RemoteStream {
+  if (!isObj(raw)) throw new ProtocolError('Unexpected stream response from the server.');
+  const url = str(raw['url']);
+  if (!url || !/^https?:\/\//i.test(url)) throw new ProtocolError('The server returned no playable link.');
+  const meta = isObj(raw['track']) ? raw['track'] : {};
+  const stream: RemoteStream = {
+    url,
+    track: { title: str(meta['title']) ?? 'Untitled', artist: str(meta['artist']) ?? '' },
   };
-  const error = str(raw['error']);
-  if (error) job.error = error;
-  const track = parseJobTrack(raw['track']);
-  if (track) job.track = track;
-  return job;
+  const mimeType = str(raw['mimeType']);
+  if (mimeType) stream.mimeType = mimeType;
+  const expiresAt = str(raw['expiresAt']);
+  if (expiresAt) stream.expiresAt = expiresAt;
+  if (isObj(raw['httpHeaders'])) {
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(raw['httpHeaders'])) {
+      if (typeof value === 'string') headers[name] = value;
+    }
+    if (Object.keys(headers).length) stream.httpHeaders = headers;
+  }
+  const album = str(meta['album']);
+  if (album) stream.track.album = album;
+  const duration = num(meta['durationSec']);
+  if (duration && duration > 0) stream.track.durationSec = duration;
+  const thumb = str(meta['thumbnailUrl']);
+  if (thumb && /^https?:\/\//i.test(thumb)) stream.track.thumbnailUrl = thumb;
+  return stream;
 }
 
 function serverMessage(data: unknown, status: number): string {
@@ -107,21 +93,6 @@ function serverMessage(data: unknown, status: number): string {
   }
   if (typeof data === 'string' && data.trim() && data.length < 300) return data.trim();
   return `The download server returned HTTP ${status}.`;
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new AbortedError());
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new AbortedError());
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 /**
@@ -166,67 +137,12 @@ export class RemoteClient {
     return result;
   }
 
-  /** `POST /downloads {url}` -> the queued job. */
-  async startDownload(url: string, signal?: AbortSignal): Promise<Pick<DownloadJob, 'id' | 'status'>> {
-    const data = await this.call({ method: 'POST', path: '/downloads', body: { url: url.trim() }, signal });
-    const job = parseJob({ progress: 0, ...(isObj(data) ? data : {}) });
-    return { id: job.id, status: job.status };
-  }
-
-  /** `GET /downloads/:id`. */
-  async getDownload(id: string, signal?: AbortSignal): Promise<DownloadJob> {
-    return parseJob(await this.call({ method: 'GET', path: `/downloads/${encodeURIComponent(id)}`, signal }));
-  }
-
   /**
-   * Poll a job until it is `done` (resolves with it) or `failed` (rejects with
-   * {@link DownloadFailedError}). Transient network errors are retried.
+   * `POST /stream {url}`: a direct audio link for a page. Nothing is proxied;
+   * the bytes come from the source. Rejects with {@link RemoteBusyError} on 503.
    */
-  async waitForDownload(id: string, options: WaitOptions = {}): Promise<DownloadJob> {
-    const interval = options.intervalMs ?? 1000;
-    const deadline = Date.now() + (options.timeoutMs ?? 15 * 60_000);
-    let networkFailures = 0;
-    for (;;) {
-      let job: DownloadJob | undefined;
-      try {
-        job = await this.getDownload(id, options.signal);
-        networkFailures = 0;
-      } catch (err) {
-        // Phones drop Wi-Fi briefly; only give up after several misses in a row.
-        if (!(err instanceof NetworkError) || ++networkFailures > 5) throw err;
-      }
-      if (job) {
-        options.onUpdate?.(job);
-        if (job.status === 'done') return job;
-        if (job.status === 'failed') throw new DownloadFailedError(id, job.error ?? 'The download failed on the server.');
-      }
-      if (Date.now() > deadline) throw new DownloadFailedError(id, 'The download took too long.');
-      await sleep(interval, options.signal);
-    }
-  }
-
-  /** URL of a finished job's audio. It needs {@link authHeaders}; use {@link fileRequest}. */
-  fileUrl(id: string): string {
-    return `${this.baseUrl}/downloads/${encodeURIComponent(id)}/file`;
-  }
-
-  /** Everything needed to GET the finished file with auth. */
-  fileRequest(id: string): AuthorizedRequest {
-    return { url: this.fileUrl(id), headers: this.authHeaders() };
-  }
-
-  /**
-   * `HEAD /downloads/:id/file`: content type, size and suggested file name
-   * without the body. Best effort: resolves to `{}` when unavailable.
-   */
-  async fileInfo(id: string, signal?: AbortSignal): Promise<{ mimeType?: string; sizeBytes?: number; fileName?: string }> {
-    try {
-      const res = await this.transport.request({ method: 'HEAD', url: this.fileUrl(id), headers: this.authHeaders(), signal });
-      if (res.status < 200 || res.status >= 300) return {};
-      return parseFileHeaders(res.headers);
-    } catch {
-      return {};
-    }
+  async streamUrl(pageUrl: string, signal?: AbortSignal): Promise<RemoteStream> {
+    return parseStream(await this.call({ method: 'POST', path: '/stream', body: { url: pageUrl.trim() }, signal, timeoutMs: 60_000 }));
   }
 
   /** `GET /health` (no auth). Resolves when the server answers `{status:'ok'}`. */
@@ -237,17 +153,13 @@ export class RemoteClient {
 
   /**
    * Settings "Test connection": `health()` then an authenticated probe
-   * (`GET /downloads/<unknown id>`; 404 means the token was accepted).
+   * (`GET /ping`, an authenticated route).
    * Rejects with {@link AuthError} for a bad token.
    */
   async testConnection(signal?: AbortSignal): Promise<void> {
     await this.health(signal);
-    try {
-      await this.call({ method: 'GET', path: '/downloads/connection-test', signal, timeoutMs: 10_000 });
-    } catch (err) {
-      if (err instanceof HttpError && err.status === 404) return;
-      throw err;
-    }
+    // Authenticated: call() throws AuthError on a bad token.
+    await this.call({ method: 'GET', path: '/ping', signal, timeoutMs: 10_000 });
   }
 
   private async call(opts: {
@@ -268,27 +180,14 @@ export class RemoteClient {
       timeoutMs: opts.timeoutMs,
     });
     if (res.status === 401 || res.status === 403) throw new AuthError(res.status);
+    if (res.status === 503) throw new RemoteBusyError(retryAfterSec(res.headers['retry-after']));
     if (res.status < 200 || res.status >= 300) throw new HttpError(res.status, serverMessage(res.data, res.status));
     return res.data;
   }
 }
 
-/** Content type / length / file name from response headers (lower-cased keys). */
-export function parseFileHeaders(headers: Record<string, string>): { mimeType?: string; sizeBytes?: number; fileName?: string } {
-  const out: { mimeType?: string; sizeBytes?: number; fileName?: string } = {};
-  const type = headers['content-type']?.split(';')[0]?.trim().toLowerCase();
-  if (type && type !== 'application/octet-stream') out.mimeType = type;
-  const size = Number(headers['content-length']);
-  if (Number.isFinite(size) && size > 0) out.sizeBytes = size;
-  const disposition = headers['content-disposition'] ?? '';
-  const star = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(disposition);
-  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
-  let name: string | undefined;
-  try {
-    name = star?.[1] ? decodeURIComponent(star[1].trim().replace(/^"|"$/g, '')) : plain?.[1]?.trim();
-  } catch {
-    name = plain?.[1]?.trim();
-  }
-  if (name) out.fileName = name.split(/[\\/]/).pop();
-  return out;
+function retryAfterSec(raw: string | undefined): number | undefined {
+  const sec = Number(raw);
+  return Number.isFinite(sec) && sec >= 0 ? sec : undefined;
 }
+

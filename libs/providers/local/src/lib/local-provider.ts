@@ -1,4 +1,4 @@
-import type { PlayableSource, Track, TrackSource } from '@open-record/models';
+import type { PlayableSource, Track } from '@open-record/models';
 import { createDefaultFileStore, IMPORT_DIR, type LocalFileStore, type PickedAudio } from './file-store';
 import {
   audioExtension,
@@ -6,9 +6,7 @@ import {
   LOCAL_PROVIDER_ID,
   localKeyFromTrackId,
   mimeFromName,
-  parseFileName,
   toLocalTrack,
-  UNKNOWN_ARTIST,
   type LocalTagInfo,
 } from './local-tracks';
 import { pickAudioFiles } from './pick-audio';
@@ -90,34 +88,17 @@ export class LocalProvider {
   }
 
   /**
-   * Import one file fetched from the download server (or any other origin).
-   * Same pipeline as `importFiles` (copy, tags, embedded cover) and the result
-   * is a normal `local:` track; `source` is recorded on it and `fallback`
-   * fills fields the file's tags did not provide. Rejects on failure.
+   * Delete a track's stored audio and cover. Resolves to the bytes freed.
+   * Tracks whose id is not a `local:` id (e.g. saved `remote:` tracks) are
+   * found through their `sourceFile`.
    */
-  async importDownloaded(
-    file: PickedAudio,
-    extras: { source?: TrackSource; fallback?: Partial<Pick<Track, 'title' | 'artist' | 'album' | 'year' | 'genre' | 'durationSec'>> } = {},
-  ): Promise<Track> {
-    const track = await this.importOne(file);
-    const fb = extras.fallback ?? {};
-    const parsed = parseFileName(file.name);
-    // The file-name guess only wins when it is all we had; server metadata is better.
-    if (fb.title && track.title === parsed.title) track.title = fb.title;
-    if (fb.artist && (track.artist === UNKNOWN_ARTIST || track.artist === parsed.artist)) track.artist = fb.artist;
-    if (fb.album && !track.album) track.album = fb.album;
-    if (fb.year && !track.year) track.year = fb.year;
-    if (fb.genre && !track.genre) track.genre = fb.genre;
-    if (fb.durationSec && !track.durationSec) track.durationSec = fb.durationSec;
-    if (extras.source) track.source = { ...extras.source };
-    return track;
-  }
-
-  /** Delete a track's stored audio and cover. Resolves to the bytes freed. */
-  async remove(trackOrId: string | Pick<Track, 'id'>): Promise<number> {
-    const key = localKeyFromTrackId(typeof trackOrId === 'string' ? trackOrId : trackOrId.id);
-    if (!key) return 0;
-    return this.removeWhere((path) => path.startsWith(keyPrefix(key)));
+  async remove(trackOrId: string | Pick<Track, 'id' | 'sourceFile'>): Promise<number> {
+    const track = typeof trackOrId === 'string' ? { id: trackOrId } : trackOrId;
+    const key = localKeyFromTrackId(track.id) ?? (track.sourceFile ? keyOfPath(track.sourceFile) : null);
+    if (!key && !track.sourceFile) return 0;
+    return this.removeWhere(
+      (path) => (key !== null && path.startsWith(keyPrefix(key))) || (!!track.sourceFile && path === track.sourceFile),
+    );
   }
 
   /** Delete stored files that belong to none of `keepTrackIds` (orphans). Resolves to the bytes freed. */
