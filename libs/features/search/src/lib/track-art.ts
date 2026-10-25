@@ -9,7 +9,9 @@ import type { SleeveSrc } from '@open-record/ui';
  * object so templates can call it freely). No art gives the disc fallback.
  * Call in an injection context.
  */
-export function injectTrackArt(): (track: Track | null | undefined) => SleeveSrc {
+export function injectTrackArt(): (
+  track: Track | null | undefined,
+) => SleeveSrc {
   const library = inject(LibraryStore);
   const cache = new WeakMap<Track, Promise<string | undefined>>();
   return (track) => {

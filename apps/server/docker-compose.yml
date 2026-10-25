@@ -1,0 +1,36 @@
+# Run from the repository root:
+#   OPEN_RECORD_TOKEN=$(openssl rand -hex 32) docker compose -f apps/server/docker-compose.yml up -d --build
+# or put OPEN_RECORD_TOKEN in apps/server/.env (see .env.example).
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
+      args:
+        YTDLP_VERSION: ${YTDLP_VERSION:-2026.10.21}
+    image: open-record-server
+    restart: unless-stopped
+    environment:
+      OPEN_RECORD_TOKEN: ${OPEN_RECORD_TOKEN:?set OPEN_RECORD_TOKEN (min 16 chars)}
+      PORT: 8787
+      DATA_DIR: /data
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+    ports:
+      # Host address to publish on. Default 127.0.0.1 (this machine only; expose
+      # through an HTTPS tunnel, see README). For plain HTTP on a home LAN set
+      # BIND_ADDRESS to the machine's LAN IP (e.g. 192.168.1.20) or 0.0.0.0.
+      # LAN traffic is unencrypted: anyone on the network can read the token.
+      - '${BIND_ADDRESS:-127.0.0.1}:${PORT:-8787}:8787'
+    volumes:
+      - open-record-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  open-record-data:

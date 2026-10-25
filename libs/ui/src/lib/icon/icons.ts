@@ -91,6 +91,15 @@ export const OR_ICONS = {
   ],
   alert: [c(12, 12, 8.6), p('M12 7.6v5.2'), p('M12 16.4h.01')],
   spinner: [p('M12 3.6a8.4 8.4 0 1 1-8.4 8.4')],
+  download: [
+    p('M12 4.5v10.5'),
+    p('m7.5 10.5 4.5 4.5 4.5-4.5'),
+    p('M5 19.5h14'),
+  ],
+  link: [
+    p('M10.2 13.8a3.6 3.6 0 0 0 5.1 0l3-3a3.6 3.6 0 0 0-5.1-5.1l-1.2 1.2'),
+    p('M13.8 10.2a3.6 3.6 0 0 0-5.1 0l-3 3a3.6 3.6 0 0 0 5.1 5.1l1.2-1.2'),
+  ],
 } as const satisfies Record<string, readonly IconShape[]>;
 
 export type IconName = keyof typeof OR_ICONS;

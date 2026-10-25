@@ -51,19 +51,27 @@ export const MIN_ROLE: Readonly<Record<PlaylistAction, Role>> = {
 };
 
 /** True when `role` is `min` or higher. Unknown roles get nothing. */
-export function hasRoleAtLeast(role: Role | null | undefined, min: Role): boolean {
+export function hasRoleAtLeast(
+  role: Role | null | undefined,
+  min: Role,
+): boolean {
   if (!role || !(role in ROLE_RANK)) return false;
   return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
 /** Whether a member with `role` may perform `action`. No role means no access. */
-export function can(role: Role | null | undefined, action: PlaylistAction): boolean {
+export function can(
+  role: Role | null | undefined,
+  action: PlaylistAction,
+): boolean {
   const min = MIN_ROLE[action];
   return min !== undefined && hasRoleAtLeast(role, min);
 }
 
 /** Every action `role` may perform, in `PLAYLIST_ACTIONS` order. */
-export function allowedActions(role: Role | null | undefined): PlaylistAction[] {
+export function allowedActions(
+  role: Role | null | undefined,
+): PlaylistAction[] {
   return PLAYLIST_ACTIONS.filter((action) => can(role, action));
 }
 
@@ -71,6 +79,9 @@ export function allowedActions(role: Role | null | undefined): PlaylistAction[] 
  * Whether `actor` may give a member the role `next`. Only the owner manages
  * membership, and ownership itself is not assignable through a role change.
  */
-export function canAssignRole(actor: Role | null | undefined, next: Role): boolean {
+export function canAssignRole(
+  actor: Role | null | undefined,
+  next: Role,
+): boolean {
   return can(actor, 'manageMembers') && next !== 'owner';
 }

@@ -18,8 +18,6 @@ export interface Track {
   license?: string;
   credit?: string;
   album?: string;
-  /** MusicBrainz identifiers, when known (from file tags or a lookup). */
-  mbids?: TrackMbids;
   /** Provider-relative key of the stored audio file (e.g. `imported/<id>.audio.mp3`). */
   sourceFile?: string;
   /** Size of the stored audio file in bytes. */
@@ -29,23 +27,67 @@ export interface Track {
    * across launches; the owning provider turns it into a loadable URL.
    */
   coverPath?: string;
-  /** Online metadata enrichment state (imported tracks only). */
-  enrichment?: EnrichmentStatus;
-  /** Fields the user edited by hand; enrichment never touches these. */
+  /** Fields the user edited by hand. */
   userEdited?: EditableTrackField[];
+  /** Where the audio came from when it was downloaded through the download server. */
+  source?: TrackSource;
 }
 
-/** `none`: not queued; `pending`: waiting for a lookup; `done`/`failed`: looked up. */
-export type EnrichmentStatus = 'none' | 'pending' | 'done' | 'failed';
+/** Origin of a downloaded track: the site and page URL it was fetched from. */
+export interface TrackSource {
+  /** Site key, e.g. `youtube`, `soundcloud`, or the server's extractor name for pasted links. */
+  site: string;
+  /** Page URL the audio was downloaded from. */
+  url: string;
+  /** The site's own id for the item, when known. */
+  id?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Download server wire types (JSON over HTTP, bearer auth). Shared by the
+// server (apps/server) and the remote provider (libs/providers/remote).
+// ---------------------------------------------------------------------------
+
+/** Sites the download server can search. Any supported URL can still be pasted. */
+export const DOWNLOAD_SITES = ['youtube', 'ytmusic', 'soundcloud', 'bandcamp', 'audiomack', 'mixcloud'] as const;
+export type DownloadSite = (typeof DOWNLOAD_SITES)[number];
+
+/** One `GET /search` hit, or the `POST /resolve` result. */
+export interface RemoteSearchResult {
+  id: string;
+  title: string;
+  artist: string;
+  durationSec?: number;
+  thumbnailUrl?: string;
+  url: string;
+  site: string;
+}
+
+export type DownloadJobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'failed';
+
+/** Tags the server settled on for a finished download. */
+export interface DownloadJobTrack {
+  title: string;
+  artist: string;
+  album?: string;
+  year?: number;
+  genre?: string;
+  durationSec?: number;
+  artworkUrl?: string;
+}
+
+/** `GET /downloads/:id`. */
+export interface DownloadJob {
+  id: string;
+  status: DownloadJobStatus;
+  /** 0-100. */
+  progress: number;
+  error?: string;
+  track?: DownloadJobTrack;
+}
 
 /** Track fields the user may edit on imported tracks. */
 export type EditableTrackField = 'title' | 'artist' | 'album' | 'year' | 'genre';
-
-export interface TrackMbids {
-  recording?: string;
-  release?: string;
-  artist?: string;
-}
 
 /** Where the audio for a track can be loaded from. */
 export interface PlayableSource {

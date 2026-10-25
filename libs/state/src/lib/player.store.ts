@@ -93,7 +93,11 @@ export class PlayerStore {
   // ---- Starting playback ----------------------------------------------
 
   /** Play `track`, using `context` (e.g. the list it was tapped in) as the queue. */
-  playTrack(track: Track, context: readonly Track[] = [track], opts: PlayOptions = {}): Promise<void> {
+  playTrack(
+    track: Track,
+    context: readonly Track[] = [track],
+    opts: PlayOptions = {},
+  ): Promise<void> {
     const index = context.findIndex((t) => t.id === track.id);
     return index < 0
       ? this.playTracks([track], 0, opts)
@@ -101,14 +105,24 @@ export class PlayerStore {
   }
 
   /** Replace the queue with `tracks` and start at `startIndex`. */
-  async playTracks(tracks: readonly Track[], startIndex = 0, opts: PlayOptions = {}): Promise<void> {
+  async playTracks(
+    tracks: readonly Track[],
+    startIndex = 0,
+    opts: PlayOptions = {},
+  ): Promise<void> {
     this.library.remember(tracks);
     if (opts.shuffle !== undefined) this.engine.setShuffle(opts.shuffle);
-    await this.engine.setQueue(tracks, { startIndex, autoplay: opts.autoplay ?? true });
+    await this.engine.setQueue(tracks, {
+      startIndex,
+      autoplay: opts.autoplay ?? true,
+    });
   }
 
   /** Play a playlist from the top (or `startIndex`). No-op for empty playlists. */
-  async playPlaylist(playlistId: string, opts: PlayOptions & { startIndex?: number } = {}): Promise<void> {
+  async playPlaylist(
+    playlistId: string,
+    opts: PlayOptions & { startIndex?: number } = {},
+  ): Promise<void> {
     await this.playlists.ready();
     await this.library.ready();
     const tracks = this.playlists.tracksOf(playlistId);
@@ -189,10 +203,15 @@ export class PlayerStore {
     let startIndex = kept ? remaining.findIndex((t) => t.id === current.id) : 0;
     if (!kept) {
       // First survivor after the removed current track, in queue order.
-      const after = queue.slice(this.engine.currentIndex() + 1).find((t) => !gone.has(t.id));
+      const after = queue
+        .slice(this.engine.currentIndex() + 1)
+        .find((t) => !gone.has(t.id));
       startIndex = after ? remaining.indexOf(after) : 0;
     }
-    await this.engine.setQueue(remaining, { startIndex, autoplay: kept && wasPlaying });
+    await this.engine.setQueue(remaining, {
+      startIndex,
+      autoplay: kept && wasPlaying,
+    });
     if (kept && position > 0) await this.engine.seek(position);
   }
 
@@ -228,7 +247,10 @@ export class PlayerStore {
 
   private async doRestore(): Promise<void> {
     try {
-      const [saved] = await Promise.all([this.storage.queueState.get(), this.library.ready()]);
+      const [saved] = await Promise.all([
+        this.storage.queueState.get(),
+        this.library.ready(),
+      ]);
       // Ignore a saved queue if the user already started something.
       if (saved && !this.engine.queue().length) await this.apply(saved);
     } catch {
@@ -250,7 +272,8 @@ export class PlayerStore {
     this.engine.setRepeat(saved.repeat);
     this.engine.setShuffle(saved.shuffle);
     await this.engine.setQueue(tracks, { startIndex: index, autoplay: false });
-    if (position > 0 && this.engine.status() === 'paused') await this.engine.seek(position);
+    if (position > 0 && this.engine.status() === 'paused')
+      await this.engine.seek(position);
   }
 
   /** Reads the persisted signals (tracked when called inside the effect). */

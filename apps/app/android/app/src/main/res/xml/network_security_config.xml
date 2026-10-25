@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security config for Open Record.
+
+  Why cleartext is allowed: the self-hosted downloader server (apps/server)
+  is commonly reached on the home LAN over plain HTTP, e.g.
+  http://192.168.1.20:8787. Server requests go through CapacitorHttp and
+  Filesystem.downloadFile, which use the Android system HTTP stack and so
+  are governed by this file (not by the WebView's mixed-content rules).
+
+  Why it is not narrower: <domain-config> only matches host names or exact
+  IP literals; it cannot express private ranges (10/8, 172.16/12,
+  192.168/16) and the user's server address is only known at runtime.
+  Cleartext is therefore permitted in base-config. HTTPS remains the
+  recommended setup for anything reachable outside the home network.
+
+  Trust anchors stay at the platform default (system CAs only; user-added
+  CAs are not trusted).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

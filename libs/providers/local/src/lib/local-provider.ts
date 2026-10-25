@@ -1,4 +1,4 @@
-import type { PlayableSource, Track } from '@open-record/models';
+import type { PlayableSource, Track, TrackSource } from '@open-record/models';
 import { createDefaultFileStore, IMPORT_DIR, type LocalFileStore, type PickedAudio } from './file-store';
 import {
   audioExtension,
@@ -6,7 +6,9 @@ import {
   LOCAL_PROVIDER_ID,
   localKeyFromTrackId,
   mimeFromName,
+  parseFileName,
   toLocalTrack,
+  UNKNOWN_ARTIST,
   type LocalTagInfo,
 } from './local-tracks';
 import { pickAudioFiles } from './pick-audio';
@@ -52,7 +54,7 @@ export class LocalProvider {
 
   constructor(private readonly store: LocalFileStore = createDefaultFileStore()) {}
 
-  async search(_query: string): Promise<Track[]> {
+  async search(): Promise<Track[]> {
     return [];
   }
 
@@ -87,6 +89,30 @@ export class LocalProvider {
     return result;
   }
 
+  /**
+   * Import one file fetched from the download server (or any other origin).
+   * Same pipeline as `importFiles` (copy, tags, embedded cover) and the result
+   * is a normal `local:` track; `source` is recorded on it and `fallback`
+   * fills fields the file's tags did not provide. Rejects on failure.
+   */
+  async importDownloaded(
+    file: PickedAudio,
+    extras: { source?: TrackSource; fallback?: Partial<Pick<Track, 'title' | 'artist' | 'album' | 'year' | 'genre' | 'durationSec'>> } = {},
+  ): Promise<Track> {
+    const track = await this.importOne(file);
+    const fb = extras.fallback ?? {};
+    const parsed = parseFileName(file.name);
+    // The file-name guess only wins when it is all we had; server metadata is better.
+    if (fb.title && track.title === parsed.title) track.title = fb.title;
+    if (fb.artist && (track.artist === UNKNOWN_ARTIST || track.artist === parsed.artist)) track.artist = fb.artist;
+    if (fb.album && !track.album) track.album = fb.album;
+    if (fb.year && !track.year) track.year = fb.year;
+    if (fb.genre && !track.genre) track.genre = fb.genre;
+    if (fb.durationSec && !track.durationSec) track.durationSec = fb.durationSec;
+    if (extras.source) track.source = { ...extras.source };
+    return track;
+  }
+
   /** Delete a track's stored audio and cover. Resolves to the bytes freed. */
   async remove(trackOrId: string | Pick<Track, 'id'>): Promise<number> {
     const key = localKeyFromTrackId(typeof trackOrId === 'string' ? trackOrId : trackOrId.id);
@@ -118,24 +144,6 @@ export class LocalProvider {
       else artBytes += f.sizeBytes;
     }
     return { audioBytes, artBytes };
-  }
-
-  /**
-   * Store cover art fetched online (e.g. Cover Art Archive) next to a local
-   * track's audio so it works offline. Resolves to the new `coverPath`, or
-   * undefined for a non-local id or a failed write. Removed with the track.
-   */
-  async storeCover(trackId: string, data: Uint8Array, mimeType: string): Promise<string | undefined> {
-    const key = localKeyFromTrackId(trackId);
-    if (!key) return undefined;
-    const mime = mimeType.includes('/') ? mimeType : 'image/jpeg';
-    const path = `${keyPrefix(key)}cover-online.${imageExtension(mime)}`;
-    try {
-      await this.store.write(path, data, mime);
-      return path;
-    } catch {
-      return undefined;
-    }
   }
 
   private async removeWhere(match: (path: string) => boolean): Promise<number> {

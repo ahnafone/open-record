@@ -6,3 +6,5 @@ export * from './lib/library.store';
 export * from './lib/playlists.store';
 export * from './lib/player.store';
 export * from './lib/provide-state';
+export * from './lib/downloads.store';
+export * from './lib/remote-errors';

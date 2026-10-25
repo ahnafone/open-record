@@ -26,9 +26,6 @@ export interface LocalTagInfo {
     album?: string;
     year?: number;
     genre?: string[];
-    musicbrainz_recordingid?: string;
-    musicbrainz_albumid?: string;
-    musicbrainz_artistid?: string[];
   };
   format: { duration?: number };
 }
@@ -41,7 +38,7 @@ export interface LocalFileInfo {
   coverPath?: string;
 }
 
-const UNKNOWN_ARTIST = 'Unknown artist';
+export const UNKNOWN_ARTIST = 'Unknown artist';
 
 function clean(value: string | undefined | null): string | undefined {
   const v = value?.replace(/\s+/g, ' ').trim();
@@ -72,11 +69,6 @@ export function toLocalTrack(file: LocalFileInfo, tags?: LocalTagInfo | null): T
   const artist = clean(c.artist) ?? clean(c.artists?.join(', ')) ?? clean(c.albumartist);
   const duration = tags?.format.duration;
   const genre = clean(c.genre?.[0]);
-  const mbids = {
-    recording: clean(c.musicbrainz_recordingid),
-    release: clean(c.musicbrainz_albumid),
-    artist: clean(c.musicbrainz_artistid?.[0]),
-  };
 
   const track: Track = {
     id: localTrackId(file.key),
@@ -92,9 +84,6 @@ export function toLocalTrack(file: LocalFileInfo, tags?: LocalTagInfo | null): T
   if (genre) track.genre = genre;
   if (duration && Number.isFinite(duration) && duration > 0) track.durationSec = Math.round(duration);
   if (file.coverPath) track.coverPath = file.coverPath;
-  if (mbids.recording || mbids.release || mbids.artist) {
-    track.mbids = Object.fromEntries(Object.entries(mbids).filter(([, v]) => v)) as Track['mbids'];
-  }
   return track;
 }
 

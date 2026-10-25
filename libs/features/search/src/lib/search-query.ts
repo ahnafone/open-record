@@ -7,12 +7,6 @@ export const MAX_QUERY_LENGTH = 80;
 export const SEARCH_DEBOUNCE_MS = 250;
 
 /**
- * Idle delay before an online (MusicBrainz) lookup. MusicBrainz allows one
- * request per second, so online search never fires per keystroke.
- */
-export const ONLINE_DEBOUNCE_MS = 600;
-
-/**
  * Turn what the user typed into a provider query. Providers match title,
  * artist, year or genre by substring, so a decade such as "1920s" (or "1920's")
  * becomes its three-digit prefix "192", which matches every year in it.

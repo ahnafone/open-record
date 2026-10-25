@@ -39,8 +39,8 @@ export function formatTime(totalSec: number): string {
 /**
  * Now Playing: large sleeve over a disc that spins while playing, title,
  * artist, album, tags (imported, licence, year, genre), a reserved status
- * line, the seek bar, the transport row, credits (including a MusicBrainz
- * credit for looked-up metadata) and the up-next queue. The shell's top bar already carries the screen's h1.
+ * line, the seek bar, the transport row, the track credit and the up-next
+ * queue. The shell's top bar already carries the screen's h1.
  */
 @Component({
   selector: 'or-now-playing-page',
@@ -174,9 +174,6 @@ export function formatTime(totalSec: number): string {
 
       @if (track.credit) {
         <p class="note">{{ track.credit }}</p>
-      }
-      @if (hasMbids(track)) {
-        <p class="note">Metadata: MusicBrainz</p>
       }
 
       <or-section-head heading="Up next" />
@@ -446,10 +443,6 @@ export class NowPlayingPage {
 
   protected isImported(track: Track): boolean {
     return this.library.isImported(track);
-  }
-
-  protected hasMbids({ mbids }: Track): boolean {
-    return !!(mbids?.recording || mbids?.release || mbids?.artist);
   }
 
   /** Album title for the line under the artist (year and genre are tags). */

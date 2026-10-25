@@ -1,0 +1,10 @@
+node_modules
+dist
+tmp
+.nx
+.angular
+coverage
+**/data
+**/.env
+apps/app/android
+apps/app/ios

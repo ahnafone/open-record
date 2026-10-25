@@ -4,7 +4,7 @@ import { MusicSourceRegistry } from '@open-record/music-source';
 import { StoragePort, createInMemoryStorage } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
-import { LocalMediaPort, MetadataPort } from './ports';
+import { LocalMediaPort } from './ports';
 
 const tracks: Track[] = [
   { id: 'fake:a', providerId: 'fake', title: 'A', artist: 'X' },
@@ -27,7 +27,10 @@ function boot(storage: StoragePort) {
       { provide: MusicSourceRegistry, useValue: registry },
     ],
   });
-  return { library: TestBed.inject(LibraryStore), playlists: TestBed.inject(PlaylistsStore) };
+  return {
+    library: TestBed.inject(LibraryStore),
+    playlists: TestBed.inject(PlaylistsStore),
+  };
 }
 
 describe('store persistence', () => {
@@ -48,7 +51,10 @@ describe('store persistence', () => {
       visibility: 'public',
       trackIds: ['fake:b', 'fake:a'],
     });
-    expect(second.playlists.tracksOf(pl.id).map((t) => t.title)).toEqual(['B', 'A']);
+    expect(second.playlists.tracksOf(pl.id).map((t) => t.title)).toEqual([
+      'B',
+      'A',
+    ]);
     expect(second.library.isSaved('fake:a')).toBe(true);
     expect(second.library.savedRecords().map((t) => t.id)).toEqual(['fake:a']);
   });
@@ -62,32 +68,15 @@ describe('imported tracks', () => {
     artist: 'Band',
     album: 'My Album',
     userEdited: ['album'],
-    enrichment: 'pending',
   };
 
   function bootWithPorts(storage: StoragePort) {
     const media: LocalMediaPort = {
       pickAndImport: async () => ({ tracks: [], failures: [] }),
       artUrl: async () => undefined,
-      storeCover: async () => undefined,
       remove: async () => 0,
       cleanup: vi.fn(async () => 0),
       usage: async () => ({ audioBytes: 0, artBytes: 0 }),
-    };
-    const metadata: MetadataPort = {
-      available: true,
-      searchRecordings: async () => [],
-      enrich: async () => ({
-        recordingMbid: 'rec-1',
-        title: 'Song',
-        artist: 'Band',
-        artistMbids: ['art-1'],
-        album: 'Online Album',
-        year: 1999,
-        genres: ['jazz'],
-        matchScore: 0.9,
-        coverArt: null,
-      }),
     };
     TestBed.resetTestingModule();
     TestBed.configureTestingModule({
@@ -95,28 +84,22 @@ describe('imported tracks', () => {
         { provide: StoragePort, useValue: storage },
         { provide: MusicSourceRegistry, useValue: new MusicSourceRegistry() },
         { provide: LocalMediaPort, useValue: media },
-        { provide: MetadataPort, useValue: metadata },
       ],
     });
-    return { library: TestBed.inject(LibraryStore), playlists: TestBed.inject(PlaylistsStore), media };
+    return {
+      library: TestBed.inject(LibraryStore),
+      playlists: TestBed.inject(PlaylistsStore),
+      media,
+    };
   }
-
-  it('enrichment fills empty fields but never overwrites user edits', async () => {
-    const storage = createInMemoryStorage();
-    await storage.importedTracks.save({ track: imported, filePath: 'f', importedAt: 1 });
-    const { library } = bootWithPorts(storage);
-    await library.ready();
-    await library.enrichmentIdle();
-
-    const stored = (await storage.importedTracks.get(imported.id))?.track;
-    expect(stored).toMatchObject({ album: 'My Album', year: 1999, genre: 'jazz', enrichment: 'done' });
-    expect(stored?.mbids).toEqual({ recording: 'rec-1', artist: 'art-1' });
-    expect(library.track(imported.id)?.album).toBe('My Album');
-  });
 
   it('clearImported removes records, references and files', async () => {
     const storage = createInMemoryStorage();
-    await storage.importedTracks.save({ track: { ...imported, enrichment: 'done' }, filePath: 'f', importedAt: 1 });
+    await storage.importedTracks.save({
+      track: imported,
+      filePath: 'f',
+      importedAt: 1,
+    });
     const { library, playlists, media } = bootWithPorts(storage);
     await Promise.all([library.ready(), playlists.ready()]);
     await library.setSaved(imported.id, true);

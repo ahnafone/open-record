@@ -1,6 +1,6 @@
 # v1: Frontend app
 
-Fully working client app, no backend (network limited to metadata and cover-art lookups), installable on Android and iOS, also runs in a browser.
+Fully working client app, with an optional self-hosted downloader server (see [downloader-server.md](downloader-server.md)). No accounts or cloud backend. Installable on Android and iOS, also runs in a browser.
 
 ## Goals
 
@@ -11,8 +11,8 @@ Fully working client app, no backend (network limited to metadata and cover-art 
 
 ## Non-goals
 
-- Backend of any kind: accounts, sync, cloud storage, realtime anything (v2). The only network calls allowed are metadata and cover-art lookups (MusicBrainz, Cover Art Archive); never audio.
-- YouTube or any downloader-backed source, and any audio download or downloader code (v2, see [v2-backend.md](v2-backend.md)).
+- Hosted backend of any kind: accounts, sync, cloud storage, realtime anything (v2). The only network calls allowed go to the user's own optional download server (search, metadata, audio download); the app talks to no other service directly and nothing runs unless the user enters a server URL and token in Settings.
+- Hosting a downloader for others, multi-user access, and a secure token store (v2, see [v2-backend.md](v2-backend.md)).
 - Real collaborators (v2).
 
 ## Architecture
@@ -27,12 +27,13 @@ libs/models/              Track, Playlist, Member, Role types (no deps)
 libs/music-source/        MusicSourceProvider interface + registry
 libs/providers/local/     user-imported files provider
 libs/providers/catalog/   bundled public-domain catalog provider
-libs/metadata/            MusicBrainz + Cover Art Archive lookups (native only, rate limited)
+libs/providers/remote/    client + provider for the download server
 libs/state/               player, library, playlists, settings stores (signals)
 libs/storage/             persistence port + SQLite/IndexedDB adapters
 libs/player/              audio engine + media-session wrapper
 libs/ui/                  tokens.css, buttons, chips, sleeve/disc, modal, toast
 libs/features/<screen>/   browse, search, library, playlist, collab, now-playing, settings
+apps/server/              self-hosted downloader (Fastify + yt-dlp + ffmpeg, Docker)
 ```
 
 Enforce boundaries with Nx module-boundary lint tags (features -> state/ui; providers -> models only).
@@ -49,10 +50,10 @@ interface MusicSourceProvider {
 }
 ```
 
-- v1 providers: `local` (file picker import, metadata via tags) and `catalog` (mockup's 5 Wikimedia Commons items with licences/credits from `mockup/ATTRIBUTION.md`).
+- v1 providers: `remote` (download server, optional, see M3.5), `local` (file picker import, metadata via tags) and `catalog` (mockup's 5 Wikimedia Commons items with licences/credits from `mockup/ATTRIBUTION.md`).
 - Providers are registered at startup; UI never references a concrete provider.
 
-**Capacitor plugins:** Filesystem (imported files, offline copies), a media-session / background-audio plugin (lock-screen controls, metadata, artwork), File Picker (import), `music-metadata` (tag and embedded-art parsing, not a plugin), SQLite (native) with IndexedDB fallback on web behind the storage port, Preferences for small settings. Online lookups use native HTTP (CapacitorHttp) via `libs/metadata`; they are skipped on web.
+**Capacitor plugins:** Filesystem (imported files, offline copies), a media-session / background-audio plugin (lock-screen controls, metadata, artwork), File Picker (import), `music-metadata` (tag and embedded-art parsing, not a plugin), SQLite (native) with IndexedDB fallback on web behind the storage port, Preferences for small settings. Download-server calls use native HTTP (CapacitorHttp) on device and `fetch` on web, via `libs/providers/remote`.
 
 **Persistence:** playlists, saved records (bookmarks), imported track metadata, queue/last position, settings. Versioned schema with migrations.
 
@@ -87,8 +88,23 @@ interface MusicSourceProvider {
 
 M3 extras (all untested on device):
 - [x] Settings screen at `/settings` (`libs/features/settings`)
-- [x] Online metadata via MusicBrainz + Cover Art Archive (`libs/metadata`): native only, behind a user toggle in Settings, results cached on device, attribution shown in Settings; metadata and cover art only, never audio
+- [x] MusicBrainz / Cover Art Archive enrichment was built, then removed in M3.5 (storage migration v3 deletes its setting and fields)
 - [x] App icon and splash screen (`apps/app/resources`)
+
+### M3.5 Downloader
+
+Optional; off until a server URL and token are set. All items untested on device. Details in [downloader-server.md](downloader-server.md).
+
+- [x] `apps/server`: Fastify + yt-dlp + ffmpeg, Docker, single-user bearer token
+- [x] Search (YouTube, YouTube Music, SoundCloud) and pasted links (Bandcamp, Audiomack, Mixcloud, any yt-dlp site)
+- [x] Metadata from iTunes Search + Deezer (hi-res art), embedded into downloaded files
+- [x] MusicBrainz and Cover Art Archive removed (code, toggle, credits, setting)
+- [x] `libs/providers/remote`: downloads become normal `local:` tracks
+- [x] Settings > Download server (URL, token, Test connection); Search > Download sources; downloads queue (not persisted across restarts)
+- [x] Token stored in plain text in the settings collection (no secure-storage plugin yet)
+- [x] Server URL over HTTPS (Tailscale / Cloudflare tunnel, recommended) or plain HTTP on the home LAN. Decision: Android network security config allows cleartext (base-config; IP ranges cannot be scoped), iOS `NSAllowsLocalNetworking` + local-network usage string, server compose `BIND_ADDRESS` (default `127.0.0.1`). LAN HTTP exposes the token on the network; documented
+- [ ] Device test: download over Wi-Fi, play offline in airplane mode
+- [ ] Keep the downloader out of store builds (decide how before M5)
 
 ### M4 Collaborators (stub)
 - [x] Decision: hide the screen in v1 (4 tabs); role logic is built in `state` for v2
@@ -118,7 +134,8 @@ M3 extras (all untested on device):
 - [ ] Lock-screen play/pause/next/seek work
 - [ ] Data survives app restart; works in airplane mode
 - [ ] Nx lint, type check, build all pass; small test suite green (queue/persistence/permission logic)
-- [ ] No audio downloads and no downloader code in the bundle; metadata lookups only
+- [ ] Without a configured server the app makes no network calls; downloads work only against the user's own server (device-tested over HTTPS, offline playback afterwards)
+- [ ] Downloader kept out of store builds (or store policy reviewed)
 
 ## Risks
 
@@ -127,6 +144,8 @@ M3 extras (all untested on device):
 | iOS background audio limits, interruptions, route changes | Enable audio background mode; test on device early (M1); handle interruptions in engine |
 | Webview audio quirks (WKWebView/Android) | Spike native-backed audio plugin in M1 before building UI on top |
 | Storage limits (IndexedDB eviction, device space) | Prefer native filesystem + SQLite on device; show usage; request persistent storage on web |
-| App Store/Play policy on downloaders | None shipped in v1; v2 downloader providers stay out of store builds |
-| Imported files carry unknown rights | README disclaimer in About; local-only, never uploaded in v1 |
+| App Store/Play policy on downloaders | Server is separate and self-hosted; the app's download UI stays out of store builds until reviewed |
+| Token stored in plain text on device | Documented; secure storage plugin in v2 |
+| Source ToS, art terms (iTunes, Deezer), yt-dlp breakage | See [downloader-server.md](downloader-server.md) |
+| Imported files carry unknown rights | README disclaimer in About; local-only, never uploaded |
 | Scope creep into backend features | Non-goals list above; collaborators stay a stub |

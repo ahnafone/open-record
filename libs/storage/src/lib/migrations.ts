@@ -48,9 +48,12 @@ export const COLLECTIONS = {
 
 /** Well-known keys in the `settings` collection. */
 export const SETTINGS_KEYS = {
-  /** boolean, default true: allow MusicBrainz/Cover Art Archive lookups. */
-  onlineMetadata: 'onlineMetadata',
+  /** `{ url, token }` of the self-hosted download server (no migration: new key, absent = not set up). */
+  downloadServer: 'downloadServer',
 } as const;
+
+/** Removed setting (online metadata lookups); only migrations reference it. */
+const LEGACY_ONLINE_METADATA_KEY = 'onlineMetadata';
 
 /** Ordered schema history. Append only; never edit a shipped migration. */
 export const MIGRATIONS: readonly Migration[] = [
@@ -69,7 +72,9 @@ export const MIGRATIONS: readonly Migration[] = [
       'Imported track metadata fields (sourceFile, enrichment) and the onlineMetadata setting',
     async up(ctx) {
       // Collections from v1 are reused; only data is backfilled.
-      for (const [key, value] of await ctx.entries(COLLECTIONS.importedTracks)) {
+      for (const [key, value] of await ctx.entries(
+        COLLECTIONS.importedTracks,
+      )) {
         const record = value as {
           track?: Record<string, unknown>;
           filePath?: string;
@@ -83,8 +88,31 @@ export const MIGRATIONS: readonly Migration[] = [
         await ctx.put(COLLECTIONS.importedTracks, key, { ...record, track });
       }
       const settings = await ctx.entries(COLLECTIONS.settings);
-      if (!settings.some(([key]) => key === SETTINGS_KEYS.onlineMetadata)) {
-        await ctx.put(COLLECTIONS.settings, SETTINGS_KEYS.onlineMetadata, true);
+      if (!settings.some(([key]) => key === LEGACY_ONLINE_METADATA_KEY)) {
+        await ctx.put(COLLECTIONS.settings, LEGACY_ONLINE_METADATA_KEY, true);
+      }
+    },
+  },
+  {
+    version: 3,
+    description:
+      'Remove online metadata: drop the onlineMetadata setting and track enrichment/mbids fields',
+    async up(ctx) {
+      for (const [key, value] of await ctx.entries(
+        COLLECTIONS.importedTracks,
+      )) {
+        const record = value as { track?: Record<string, unknown> };
+        if (!record?.track) continue;
+        if (!('enrichment' in record.track) && !('mbids' in record.track))
+          continue;
+        const track = { ...record.track };
+        delete track['enrichment'];
+        delete track['mbids'];
+        await ctx.put(COLLECTIONS.importedTracks, key, { ...record, track });
+      }
+      const settings = await ctx.entries(COLLECTIONS.settings);
+      if (settings.some(([key]) => key === LEGACY_ONLINE_METADATA_KEY)) {
+        await ctx.delete(COLLECTIONS.settings, LEGACY_ONLINE_METADATA_KEY);
       }
     },
   },

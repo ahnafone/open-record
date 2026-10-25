@@ -66,6 +66,16 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Allow plain HTTP to local-network hosts (the self-hosted downloader
+		     server on the home LAN, e.g. http://192.168.1.20:8787). ATS still
+		     applies to everything on the public internet. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Open Record connects to your own downloader server on your home network to search for and download music.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

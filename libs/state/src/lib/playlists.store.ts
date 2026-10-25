@@ -25,7 +25,9 @@ export class PlaylistsStore {
   readonly playlists = this._playlists.asReadonly();
   readonly status = this._status.asReadonly();
   readonly error = this._error.asReadonly();
-  private readonly byIdMap = computed(() => new Map(this._playlists().map((p) => [p.id, p])));
+  private readonly byIdMap = computed(
+    () => new Map(this._playlists().map((p) => [p.id, p])),
+  );
 
   private readonly loaded: Promise<void>;
 
@@ -48,7 +50,10 @@ export class PlaylistsStore {
     return playlist ? this.library.resolveIds(playlist.trackIds) : [];
   }
 
-  async create(name: string, visibility: PlaylistVisibility = 'private'): Promise<Playlist> {
+  async create(
+    name: string,
+    visibility: PlaylistVisibility = 'private',
+  ): Promise<Playlist> {
     await this.loaded;
     const now = Date.now();
     const playlist: Playlist = {
@@ -94,7 +99,10 @@ export class PlaylistsStore {
   }
 
   removeTrack(id: string, trackId: string): Promise<Playlist> {
-    return this.mutate(id, (p) => ({ ...p, trackIds: p.trackIds.filter((t) => t !== trackId) }));
+    return this.mutate(id, (p) => ({
+      ...p,
+      trackIds: p.trackIds.filter((t) => t !== trackId),
+    }));
   }
 
   /** Move a track from one position to another. */
@@ -113,9 +121,14 @@ export class PlaylistsStore {
     await this.loaded;
     const gone = new Set(trackIds);
     if (!gone.size) return;
-    const affected = this._playlists().filter((p) => p.trackIds.some((t) => gone.has(t)));
+    const affected = this._playlists().filter((p) =>
+      p.trackIds.some((t) => gone.has(t)),
+    );
     for (const p of affected) {
-      await this.mutate(p.id, (pl) => ({ ...pl, trackIds: pl.trackIds.filter((t) => !gone.has(t)) }));
+      await this.mutate(p.id, (pl) => ({
+        ...pl,
+        trackIds: pl.trackIds.filter((t) => !gone.has(t)),
+      }));
     }
   }
 
@@ -143,7 +156,10 @@ export class PlaylistsStore {
     }
   }
 
-  private async mutate(id: string, change: (p: Playlist) => Playlist): Promise<Playlist> {
+  private async mutate(
+    id: string,
+    change: (p: Playlist) => Playlist,
+  ): Promise<Playlist> {
     await this.loaded;
     const before = this.playlist(id);
     if (!before) throw new Error(`Playlist "${id}" not found`);
@@ -151,7 +167,9 @@ export class PlaylistsStore {
     if (changed === before) return before;
     const after: Playlist = { ...changed, id, updatedAt: Date.now() };
     const replace = (with_: Playlist) =>
-      this._playlists.update((all) => all.map((p) => (p.id === id ? with_ : p)));
+      this._playlists.update((all) =>
+        all.map((p) => (p.id === id ? with_ : p)),
+      );
     replace(after);
     try {
       await this.storage.playlists.save(after);
@@ -169,7 +187,9 @@ export class PlaylistsStore {
       this._playlists.set(await this.storage.playlists.list());
       this._status.set('ready');
     } catch (err) {
-      this._error.set(err instanceof Error ? err.message : 'Could not load playlists.');
+      this._error.set(
+        err instanceof Error ? err.message : 'Could not load playlists.',
+      );
       this._status.set('error');
     }
   }
@@ -179,7 +199,9 @@ function validName(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) throw new Error('Playlist name is required.');
   if (trimmed.length > PLAYLIST_NAME_MAX) {
-    throw new Error(`Playlist name must be ${PLAYLIST_NAME_MAX} characters or fewer.`);
+    throw new Error(
+      `Playlist name must be ${PLAYLIST_NAME_MAX} characters or fewer.`,
+    );
   }
   return trimmed;
 }

@@ -15,11 +15,11 @@ describe('local track mapping', () => {
     });
   });
 
-  it('prefers tags and maps album, year, genre, duration and mbids', () => {
+  it('prefers tags and maps album, year, genre and duration', () => {
     const track = toLocalTrack(file, {
-      common: { title: ' Sinnerman ', artists: ['Nina Simone'], album: 'Pastel Blues', year: 1965, genre: ['Jazz'], musicbrainz_recordingid: 'rec-1' },
+      common: { title: ' Sinnerman ', artists: ['Nina Simone'], album: 'Pastel Blues', year: 1965, genre: ['Jazz'] },
       format: { duration: 622.4 },
     });
-    expect(track).toMatchObject({ title: 'Sinnerman', artist: 'Nina Simone', album: 'Pastel Blues', year: 1965, genre: 'Jazz', durationSec: 622, mbids: { recording: 'rec-1' } });
+    expect(track).toMatchObject({ title: 'Sinnerman', artist: 'Nina Simone', album: 'Pastel Blues', year: 1965, genre: 'Jazz', durationSec: 622 });
   });
 });

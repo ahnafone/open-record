@@ -12,11 +12,7 @@ import {
   viewChild,
 } from '@angular/core';
 import type { Track } from '@open-record/models';
-import {
-  LibraryStore,
-  PlayerStore,
-  type OnlineRecording,
-} from '@open-record/state';
+import { LibraryStore, PlayerStore } from '@open-record/state';
 import {
   OrButton,
   OrChip,
@@ -31,11 +27,11 @@ import {
 } from '@open-record/ui';
 import {
   MAX_QUERY_LENGTH,
-  ONLINE_DEBOUNCE_MS,
   SEARCH_DEBOUNCE_MS,
   suggestionChips,
   toProviderQuery,
 } from './search-query';
+import { DownloadSources } from './download-sources';
 import { injectTrackArt } from './track-art';
 
 /**
@@ -43,16 +39,13 @@ import { injectTrackArt } from './track-art';
  * from every searchable provider (title, artist, year or genre). Typing is
  * debounced; chips and "Clear search" apply at once. Tapping a row plays it
  * with the results as the queue; the bookmark saves it to the library.
- * Imported records are matched locally and tagged "Imported".
- *
- * When online metadata is available (native, setting on), an "Online" section
- * below lists info-only MusicBrainz matches: no play button, never queued.
- * MusicBrainz allows 1 request per second, so the online query only fires
- * after `ONLINE_DEBOUNCE_MS` of idle typing (or at once on Enter or a chip).
+ * Imported records are matched locally and tagged "Imported". Below, the
+ * "Download sources" section searches the user's download server.
  */
 @Component({
   selector: 'or-search-page',
   imports: [
+    DownloadSources,
     OrButton,
     OrChip,
     OrEmptyState,
@@ -187,50 +180,10 @@ import { injectTrackArt } from './track-art';
       </ul>
     }
 
-    @if (showOnline()) {
-      <section class="online" aria-labelledby="or-online-head">
-        <or-section-head id="or-online-head" heading="Online" />
-        <p class="online-note">
-          <or-icon name="globe" [size]="14" />
-          Info only, not playable
-        </p>
-        <p class="status" role="status">
-          @if (onlinePending()) {
-            <span class="status-load">
-              <or-spinner [size]="14" />
-              Looking up MusicBrainz…
-            </span>
-          } @else if (onlineHits().length === 0) {
-            <span class="status-load">No online matches.</span>
-          } @else {
-            <span class="status-load">{{ onlineCountLabel() }}</span>
-          }
-        </p>
-        @if (onlineHits().length) {
-          <ul class="online-list" [class.is-stale]="onlinePending()">
-            @for (r of onlineHits(); track r.recordingMbid) {
-              <li class="online-row">
-                <span class="title">{{ r.title }}</span>
-                <span class="artist">{{ r.artist }}</span>
-                @if (onlineDetail(r); as d) {
-                  <span class="detail">{{ d }}</span>
-                }
-                @if (r.genres.length) {
-                  <span class="tags">
-                    @for (g of r.genres.slice(0, 3); track g) {
-                      <or-tag>{{ g }}</or-tag>
-                    }
-                  </span>
-                }
-              </li>
-            }
-          </ul>
-        }
-        <p class="attribution">
-          Online results from MusicBrainz (CC0), not part of your library.
-        </p>
-      </section>
-    }
+    <or-download-sources
+      class="downloads"
+      [query]="hasQuery() ? settledText() : ''"
+    />
   `,
   styles: `
     :host {
@@ -290,7 +243,9 @@ import { injectTrackArt } from './track-art';
     /* Reserved status line: never collapses, so results do not jump. */
     .status {
       margin: var(--spacing-xxs) 0 var(--spacing-xs);
-      min-block-size: calc(var(--type-meta-font-size) * var(--type-meta-line-height));
+      min-block-size: calc(
+        var(--type-meta-font-size) * var(--type-meta-line-height)
+      );
       font-size: var(--type-meta-font-size);
       line-height: var(--type-meta-line-height);
       letter-spacing: var(--type-meta-letter-spacing);
@@ -319,6 +274,9 @@ import { injectTrackArt } from './track-art';
     }
     .clear {
       margin-block-start: var(--spacing-sm);
+    }
+    .downloads {
+      margin-block-start: var(--spacing-lg);
     }
 
     /* Record rows: separated by hairlines, not boxed. */
@@ -412,54 +370,7 @@ import { injectTrackArt } from './track-art';
       margin-block-start: 1px;
     }
 
-    /* Online: info-only rows, plain text (no button, no play affordance). */
-    .online {
-      margin-block-start: var(--spacing-lg);
-    }
-    .online-note {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin: var(--spacing-xs) 0 0;
-      font-size: var(--type-eyebrow-font-size);
-      letter-spacing: var(--type-eyebrow-letter-spacing);
-      text-transform: uppercase;
-      color: var(--color-muted);
-    }
-    .online-list {
-      display: grid;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      transition: opacity var(--duration-fast) var(--ease-standard);
-    }
-    .online-list.is-stale {
-      opacity: 0.6;
-    }
-    .online-row {
-      display: grid;
-      align-content: center;
-      gap: var(--spacing-xxs);
-      min-block-size: 60px;
-      padding: var(--spacing-xs) var(--spacing-xs);
-      border-block-start: 1px solid
-        color-mix(in srgb, var(--color-border) 32%, transparent);
-    }
-    .online-row:first-child {
-      border-block-start: 0;
-    }
-    .online-row .title {
-      font-size: 14px;
-    }
-    .attribution {
-      margin: var(--spacing-sm) 0 0;
-      font-size: var(--type-meta-font-size);
-      line-height: var(--type-meta-line-height);
-      color: var(--color-muted);
-    }
-
     @media (prefers-reduced-motion: reduce) {
-      .online-list,
       .search-field,
       .crate,
       .record-main {
@@ -515,52 +426,10 @@ export class SearchPage {
     return `${n} record${n === 1 ? '' : 's'}`;
   });
 
-  /** `query` after `ONLINE_DEBOUNCE_MS` idle (MusicBrainz allows 1 req/s). */
-  private readonly onlineQuery = signal('');
-  private readonly onlineText = computed(() => {
-    const q = this.onlineQuery().trim();
-    return q.length > MAX_QUERY_LENGTH ? '' : q;
-  });
-
-  /** The Online section exists only where lookups can run. */
-  protected readonly showOnline = computed(
-    () => this.library.onlineAvailable() && this.hasQuery(),
-  );
-
-  protected readonly online = resource({
-    params: () =>
-      this.library.onlineAvailable() && this.onlineText()
-        ? this.onlineText()
-        : undefined,
-    loader: ({ params }) => this.library.onlineSearch(params),
-  });
-
-  /** Latest online matches, kept (dimmed) while the next lookup runs. */
-  protected readonly onlineHits = linkedSignal<
-    OnlineRecording[] | undefined,
-    OnlineRecording[]
-  >({
-    source: () => (this.online.hasValue() ? this.online.value() : undefined),
-    computation: (next, prev) => next ?? prev?.value ?? [],
-  });
-
-  /** Typing has not settled for the online query yet, or it is loading. */
-  protected readonly onlinePending = computed(
-    () =>
-      this.onlineText() !== this.query().trim() || this.online.isLoading(),
-  );
-
-  protected readonly onlineCountLabel = computed(() => {
-    const n = this.onlineHits().length;
-    return `${n} online match${n === 1 ? '' : 'es'}`;
-  });
-
   protected readonly chips = computed(() =>
     suggestionChips(this.library.tracks()),
   );
-  protected readonly exampleBin = computed(
-    () => this.chips()[0] ?? 'Ragtime',
-  );
+  protected readonly exampleBin = computed(() => this.chips()[0] ?? 'Ragtime');
 
   constructor() {
     // Debounce typing; chips, Enter and Clear settle immediately.
@@ -568,13 +437,6 @@ export class SearchPage {
       const q = this.query();
       if (q === untracked(this.settled)) return;
       const timer = setTimeout(() => this.settled.set(q), SEARCH_DEBOUNCE_MS);
-      onCleanup(() => clearTimeout(timer));
-    });
-    // Online lookups wait longer: never one per keystroke.
-    effect((onCleanup) => {
-      const q = this.query();
-      if (q === untracked(this.onlineQuery)) return;
-      const timer = setTimeout(() => this.onlineQuery.set(q), ONLINE_DEBOUNCE_MS);
       onCleanup(() => clearTimeout(timer));
     });
   }
@@ -585,7 +447,6 @@ export class SearchPage {
 
   protected settleNow(): void {
     this.settled.set(this.query());
-    this.onlineQuery.set(this.query());
   }
 
   protected isChip(label: string): boolean {
@@ -603,10 +464,6 @@ export class SearchPage {
 
   protected detail(t: Track): string {
     return [t.year, t.genre].filter(Boolean).join('  ·  ');
-  }
-
-  protected onlineDetail(r: OnlineRecording): string {
-    return [r.album, r.year].filter(Boolean).join('  ·  ');
   }
 
   protected rowLabel(t: Track, current: boolean): string {
@@ -637,6 +494,5 @@ export class SearchPage {
   private setQuery(q: string): void {
     this.query.set(q);
     this.settled.set(q);
-    this.onlineQuery.set(q);
   }
 }

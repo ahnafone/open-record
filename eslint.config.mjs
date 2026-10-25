@@ -70,6 +70,11 @@ export default [
               onlyDependOnLibsWithTags: ['type:models'],
             },
             {
+              // Downloader server (apps/server): shared types only, never app code.
+              sourceTag: 'type:server',
+              onlyDependOnLibsWithTags: ['type:models'],
+            },
+            {
               sourceTag: 'type:ui',
               onlyDependOnLibsWithTags: [],
             },

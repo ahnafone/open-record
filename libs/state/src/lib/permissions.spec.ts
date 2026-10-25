@@ -1,10 +1,21 @@
 import type { Role } from '@open-record/models';
-import { PLAYLIST_ACTIONS, allowedActions, can, canAssignRole } from './permissions';
+import {
+  PLAYLIST_ACTIONS,
+  allowedActions,
+  can,
+  canAssignRole,
+} from './permissions';
 
 describe('role permissions', () => {
   it('viewers listen, editors manage records, owners control everything', () => {
     expect(allowedActions('viewer')).toEqual(['view', 'play']);
-    expect(allowedActions('editor')).toEqual(['view', 'play', 'addTrack', 'removeTrack', 'reorder']);
+    expect(allowedActions('editor')).toEqual([
+      'view',
+      'play',
+      'addTrack',
+      'removeTrack',
+      'reorder',
+    ]);
     expect(allowedActions('owner')).toEqual([...PLAYLIST_ACTIONS]);
   });
 
@@ -12,7 +23,9 @@ describe('role permissions', () => {
     const order: Role[] = ['viewer', 'editor', 'owner'];
     for (const action of PLAYLIST_ACTIONS) {
       const allowed = order.map((r) => can(r, action));
-      expect(allowed).toEqual([...allowed].sort((a, b) => Number(a) - Number(b)));
+      expect(allowed).toEqual(
+        [...allowed].sort((a, b) => Number(a) - Number(b)),
+      );
     }
   });
 

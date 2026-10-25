@@ -15,9 +15,9 @@
     "skipDefaultLibCheck": true,
     "paths": {
       "@open-record/models": ["./libs/models/src/index.ts"],
-      "@open-record/metadata": ["./libs/metadata/src/index.ts"],
       "@open-record/music-source": ["./libs/music-source/src/index.ts"],
       "@open-record/providers/local": ["./libs/providers/local/src/index.ts"],
+      "@open-record/providers/remote": ["./libs/providers/remote/src/index.ts"],
       "@open-record/providers/catalog": [
         "./libs/providers/catalog/src/index.ts"
       ],

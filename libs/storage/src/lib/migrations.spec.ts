@@ -3,7 +3,6 @@ import {
   COLLECTIONS,
   MIGRATIONS,
   Migration,
-  SETTINGS_KEYS,
   latestVersion,
   runMigrations,
 } from './migrations';
@@ -110,17 +109,42 @@ describe('runMigrations', () => {
       track: { sourceFile: 'imported/1.audio.mp3', enrichment: 'none' },
     });
     expect(
-      await backend.get(COLLECTIONS.settings, SETTINGS_KEYS.onlineMetadata),
+      await backend.get(COLLECTIONS.settings, 'onlineMetadata'),
     ).toBe(true);
   });
 
   it('v2 keeps an existing onlineMetadata choice', async () => {
     const backend = new InMemoryBackend();
     await runMigrations(backend, MIGRATIONS.slice(0, 1));
-    await backend.put(COLLECTIONS.settings, SETTINGS_KEYS.onlineMetadata, false);
+    await backend.put(COLLECTIONS.settings, 'onlineMetadata', false);
     await runMigrations(backend, MIGRATIONS.slice(0, 2));
     expect(
-      await backend.get(COLLECTIONS.settings, SETTINGS_KEYS.onlineMetadata),
+      await backend.get(COLLECTIONS.settings, 'onlineMetadata'),
     ).toBe(false);
+  });
+
+  it('v3 removes the onlineMetadata setting and enrichment/mbids fields', async () => {
+    const backend = new InMemoryBackend();
+    await runMigrations(backend, MIGRATIONS.slice(0, 1));
+    await backend.put(COLLECTIONS.importedTracks, 'local:1', {
+      track: { id: 'local:1', providerId: 'local', title: 'T', artist: 'A', mbids: { recording: 'r' }, enrichment: 'done' },
+      filePath: 'imported/1.audio.mp3',
+      importedAt: 1,
+    });
+    await backend.put(COLLECTIONS.settings, 'theme', 'dark');
+
+    const result = await runMigrations(backend, MIGRATIONS.slice(0, 3));
+
+    expect(result.applied).toEqual([2, 3]);
+    const record = (await backend.get(COLLECTIONS.importedTracks, 'local:1')) as { track: Record<string, unknown> };
+    expect(record.track).toEqual({
+      id: 'local:1',
+      providerId: 'local',
+      title: 'T',
+      artist: 'A',
+      sourceFile: 'imported/1.audio.mp3',
+    });
+    expect(await backend.get(COLLECTIONS.settings, 'onlineMetadata')).toBeUndefined();
+    expect(await backend.get(COLLECTIONS.settings, 'theme')).toBe('dark');
   });
 });
