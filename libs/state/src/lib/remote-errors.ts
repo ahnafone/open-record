@@ -7,8 +7,12 @@ export function remoteErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : '';
   switch (name) {
     case 'AuthError':
-      return 'Server rejected the token.';
+      return 'Sign in to use the download server.';
     case 'NetworkError':
+      // The server answered, but the audio file itself could not be fetched
+      // (browsers block cross-site downloads of the audio CDN).
+      if (/fetch the audio/i.test(message))
+        return 'Could not download the audio file. Streaming still works.';
       return 'Could not reach the download server.';
     case 'RemoteConfigError':
       return message || 'Set up a download server in Settings.';

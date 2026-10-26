@@ -1,23 +1,26 @@
 // Pairing payload shared by the download server (QR / banner) and the app
-// (scan + paste). Format: openrecord://pair?url=<enc>&token=<enc>
+// (scan + paste). Format: openrecord://pair?url=<enc>[&token=<enc>]
+// The app only uses the server address; users sign in with their account.
 
 export interface PairingPayload {
   url: string;
-  token: string;
+  /** Legacy static token; optional ('' when absent). The app ignores it. */
+  token?: string;
 }
 
 const PAIRING_SCHEME = 'openrecord:';
 const PAIRING_HOST = 'pair';
 
 export function buildPairingLink({ url, token }: PairingPayload): string {
-  return `openrecord://${PAIRING_HOST}?url=${encodeURIComponent(url)}&token=${encodeURIComponent(token)}`;
+  const base = `openrecord://${PAIRING_HOST}?url=${encodeURIComponent(url)}`;
+  return token ? `${base}&token=${encodeURIComponent(token)}` : base;
 }
 
 /**
  * Parses a pairing link. Returns null unless the input is an `openrecord://pair`
- * link with an http/https `url` and a non-empty `token`.
+ * link with an http/https `url`. `token` is '' when the link has none.
  */
-export function parsePairingLink(text: string): PairingPayload | null {
+export function parsePairingLink(text: string): { url: string; token: string } | null {
   const input = text.trim();
   if (!input) return null;
 
@@ -31,8 +34,6 @@ export function parsePairingLink(text: string): PairingPayload | null {
 
   const url = parsed.searchParams.get('url')?.trim() ?? '';
   const token = parsed.searchParams.get('token')?.trim() ?? '';
-  if (!token) return null;
-
   let target: URL;
   try {
     target = new URL(url);

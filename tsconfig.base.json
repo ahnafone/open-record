@@ -36,6 +36,9 @@
       "@open-record/features/now-playing": [
         "./libs/features/now-playing/src/index.ts"
       ],
+      "@open-record/features/import": [
+        "./libs/features/import/src/index.ts"
+      ],
       "@open-record/features/settings": [
         "./libs/features/settings/src/index.ts"
       ]

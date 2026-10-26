@@ -158,9 +158,9 @@ export class LibraryStore {
   }
 
   /**
-   * Bookmark or un-bookmark a record. Bookmarking a remote track persists it
-   * and starts saving it to the device (see `OfflineStore.ensureSaved`);
-   * un-bookmarking reconciles stored files.
+   * Bookmark or un-bookmark a record. Bookmarking never downloads by itself:
+   * saving to the device is left to Auto-download (`AutoDownloadStore`) or an
+   * explicit download. Un-bookmarking reconciles stored files.
    */
   async setSaved(trackId: string, saved: boolean): Promise<void> {
     // Hydration would otherwise overwrite an early optimistic change.
@@ -180,12 +180,7 @@ export class LibraryStore {
       apply(!saved);
       throw err;
     }
-    if (saved) {
-      const track = this.track(trackId);
-      if (track) await this.offline().ensureSaved(track);
-    } else {
-      await this.offline().reconcile();
-    }
+    if (!saved) await this.offline().reconcile();
   }
 
   /**
@@ -256,6 +251,9 @@ export class LibraryStore {
       all.filter((t) => !gone.has(t.id) || stored.has(t.id)),
     );
   }
+
+  /** Ids of every metadata-only persisted track (account sync reads these). */
+  readonly metadataIds = computed(() => [...this._metadata().keys()]);
 
   /** True when the track is persisted by metadata only. Reactive. */
   isMetadataOnly(trackId: string): boolean {

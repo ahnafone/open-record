@@ -71,6 +71,12 @@ export class DocumentStorage extends StoragePort {
       ).getAll<SavedRecord>(COLLECTIONS.savedRecords);
       return all.sort((a, b) => b.savedAt - a.savedAt).map((r) => r.trackId);
     },
+    entries: async () => {
+      const all = await (
+        await this.db()
+      ).getAll<SavedRecord>(COLLECTIONS.savedRecords);
+      return all.sort((a, b) => b.savedAt - a.savedAt);
+    },
     has: async (trackId) =>
       (await (await this.db()).get(COLLECTIONS.savedRecords, trackId)) !==
       undefined,

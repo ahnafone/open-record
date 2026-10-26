@@ -132,6 +132,28 @@ import { injectTrackArt } from './track-art';
       flex-wrap: wrap;
       gap: var(--spacing-sm);
     }
+    /* Desktop: sleeve on the left, details and actions beside it. */
+    @media (min-width: 900px) {
+      :host {
+        grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
+        grid-template-rows: 1fr auto auto 1fr;
+        align-items: center;
+        column-gap: var(--spacing-xl);
+        padding: var(--spacing-lg);
+      }
+      or-sleeve {
+        grid-row: 1 / -1;
+        align-self: center;
+      }
+      .info {
+        grid-column: 2;
+        grid-row: 2;
+      }
+      .actions {
+        grid-column: 2;
+        grid-row: 3;
+      }
+    }
   `,
 })
 export class OrListeningBooth {

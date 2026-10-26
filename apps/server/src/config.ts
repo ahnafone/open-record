@@ -22,6 +22,19 @@ export interface ServerConfig {
    * as a bearer credential next to the static token. Null = static token only.
    */
   supabase: SupabaseAuthConfig | null;
+  /** Built web app to serve at `/` (public, SPA fallback). Null = API only. */
+  webDir: string | null;
+  /**
+   * Public client config served by GET /app-config (no token). Both null unless
+   * SUPABASE_URL and SUPABASE_ANON_KEY are set. Never holds the JWT secret.
+   */
+  appConfig: AppConfig;
+}
+
+/** Body of GET /app-config: what the web app needs to sign in with Supabase. */
+export interface AppConfig {
+  supabaseUrl: string | null;
+  supabaseAnonKey: string | null;
 }
 
 export interface SupabaseAuthConfig {
@@ -76,17 +89,40 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
     supabase: supabaseConfig(env),
+    webDir: env['WEB_DIR']?.trim() || null,
+    appConfig: appConfig(env),
   };
+}
+
+const supabaseUrl = (env: Env): string | undefined => {
+  const url = env['SUPABASE_URL']?.trim().replace(/\/+$/, '') || undefined;
+  if (url && !/^https?:\/\/[^/]+/i.test(url)) {
+    throw new ConfigError('SUPABASE_URL must be an http(s) URL');
+  }
+  return url;
+};
+
+/**
+ * Public Supabase client config. The anon key is public by design; it only
+ * makes sense with SUPABASE_URL, so a key without a URL is a config error.
+ * A URL without a key is valid (JWKS verification only) and serves nulls.
+ */
+function appConfig(env: Env): AppConfig {
+  const url = supabaseUrl(env);
+  const anonKey = env['SUPABASE_ANON_KEY']?.trim() || undefined;
+  if (anonKey && !url) {
+    throw new ConfigError('SUPABASE_ANON_KEY needs SUPABASE_URL');
+  }
+  return url && anonKey
+    ? { supabaseUrl: url, supabaseAnonKey: anonKey }
+    : { supabaseUrl: null, supabaseAnonKey: null };
 }
 
 function supabaseConfig(env: Env): SupabaseAuthConfig | null {
   const jwtSecret = env['SUPABASE_JWT_SECRET']?.trim() || undefined;
-  const rawUrl = env['SUPABASE_URL']?.trim().replace(/\/+$/, '') || undefined;
+  const rawUrl = supabaseUrl(env);
   if (jwtSecret && jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
     throw new ConfigError(`SUPABASE_JWT_SECRET must be at least ${MIN_JWT_SECRET_LENGTH} characters`);
-  }
-  if (rawUrl && !/^https?:\/\/[^/]+/i.test(rawUrl)) {
-    throw new ConfigError('SUPABASE_URL must be an http(s) URL');
   }
   if (!jwtSecret && !rawUrl) return null;
   return {

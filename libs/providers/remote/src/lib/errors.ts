@@ -19,13 +19,13 @@ export class NetworkError extends RemoteError {
   override name = 'NetworkError';
 }
 
-/** 401/403: missing or wrong token. */
+/** 401/403: not signed in, or the token was rejected. */
 export class AuthError extends RemoteError {
   override name = 'AuthError';
 
   constructor(
     readonly status: number,
-    message = 'The download server rejected the token.',
+    message = 'Sign in to use the download server.',
   ) {
     super(message);
   }

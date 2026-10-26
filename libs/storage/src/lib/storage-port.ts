@@ -54,6 +54,8 @@ export interface PlaylistRepository {
 export interface SavedRecordsRepository {
   /** Bookmarked track ids, most recently saved first. */
   list(): Promise<string[]>;
+  /** Bookmarks with their savedAt, most recently saved first. */
+  entries(): Promise<SavedRecord[]>;
   has(trackId: string): Promise<boolean>;
   /** No-op when already saved. `savedAt` (epoch ms) defaults to now. */
   add(trackId: string, savedAt?: number): Promise<void>;

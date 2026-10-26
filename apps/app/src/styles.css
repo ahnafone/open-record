@@ -63,3 +63,9 @@ body {
     animation: none;
   }
 }
+
+/* Desktop: settings and import read better at a capped width. */
+.screen-host.narrow > router-outlet + * {
+  max-inline-size: 800px;
+  margin-inline: auto;
+}

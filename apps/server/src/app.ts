@@ -7,6 +7,7 @@ import Fastify, {
 } from 'fastify';
 import type { ServerConfig } from './config';
 import { createSupabaseVerifier, registerAuth } from './plugins/auth';
+import { hasWebApp, registerWebApp } from './plugins/web';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
 import { configureResolveLimits } from './services/ytdlp';
 
@@ -46,6 +47,14 @@ export async function buildApp(
 
   for (const route of options.routes ?? defaultRoutes) {
     await app.register(route, { config });
+  }
+
+  if (config.webDir) {
+    if (hasWebApp(config.webDir)) {
+      await registerWebApp(app, config.webDir);
+    } else {
+      app.log.warn({ webDir: config.webDir }, 'WEB_DIR has no index.html; serving the API only');
+    }
   }
 
   return app;

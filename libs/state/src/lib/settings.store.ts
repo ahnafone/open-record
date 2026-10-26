@@ -18,6 +18,10 @@ import { isAbort, remoteErrorMessage } from './remote-errors';
 /** The self-hosted download server the app talks to. */
 export interface DownloadServerSettings {
   url: string;
+  /**
+   * Legacy static token (never asked for in the UI). Signed-in users send
+   * their account token instead; this is only a fallback for headless setups.
+   */
   token: string;
 }
 
@@ -130,16 +134,22 @@ export class SettingsStore {
   }
 
   /**
-   * Save the download server. A blank URL removes it. Throws (without saving)
-   * for a URL that is not http(s), or if the write fails.
+   * Save the download server. A blank URL removes it. Without `token`, a
+   * saved legacy token is kept only while the URL stays the same. Throws
+   * (without saving) for a URL that is not http(s), or if the write fails.
    */
-  async setDownloadServer(next: DownloadServerSettings): Promise<void> {
+  async setDownloadServer(next: {
+    url: string;
+    token?: string;
+  }): Promise<void> {
     await this.loaded;
-    const value: DownloadServerSettings = {
-      url: next.url.trim(),
-      token: next.token.trim(),
-    };
     const before = this._server();
+    const url = next.url.trim();
+    const value: DownloadServerSettings = {
+      url,
+      token:
+        next.token?.trim() ?? (url === before.url ? before.token : ''),
+    };
     if (value.url === before.url && value.token === before.token) return;
     this.apply(value, true);
     this._connection.set({ status: 'idle' });
@@ -187,8 +197,8 @@ export class SettingsStore {
   }
 
   /**
-   * Pair with a server from an `openrecord://pair` link: save its URL and token,
-   * then run the connection test. The settings stay saved even when the test
+   * Pair with a server from an `openrecord://pair` link: save its address
+   * (any token in the link is ignored), then run the connection test. The settings stay saved even when the test
    * fails, so the message can be fixed in place.
    */
   async pairFromLink(text: string): Promise<PairResult> {
@@ -197,7 +207,7 @@ export class SettingsStore {
     if (!link)
       return { ok: false, message: 'That is not an Open Record pairing link.' };
     try {
-      await this.setDownloadServer(link);
+      await this.setDownloadServer({ url: link.url });
     } catch (err) {
       return {
         ok: false,

@@ -17,8 +17,11 @@ import {
   REMOTE_PROVIDER_ID,
   RemoteServerPort,
   SettingsStore,
+  AuthStore,
+  formatDuration,
   isAbort,
   remoteErrorMessage,
+  sourceLabel,
 } from '@open-record/state';
 import {
   OrButton,
@@ -44,13 +47,6 @@ export const SEARCHABLE_SOURCES: readonly {
   { site: 'ytmusic', label: 'YouTube Music' },
   { site: 'soundcloud', label: 'SoundCloud' },
 ];
-
-/** `m:ss` for a duration in seconds. */
-export function formatDuration(sec: number | undefined): string {
-  if (!sec || sec < 0) return '';
-  const s = Math.round(sec);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
 
 /**
  * "Find online" on the Search screen: search a site on the stream server or
@@ -202,8 +198,11 @@ export function formatDuration(sec: number | undefined): string {
             <span class="title" [class.is-current]="player.isCurrent(t.id)">{{
               t.title
             }}</span>
-            <span class="artist">{{ t.artist }}</span>
+            <span class="artist">{{ t.artist }}@if (t.album) { · {{ t.album }}}</span>
             <span class="tags">
+              @if (sourceLabel(t.source?.site); as source) {
+                <or-tag>{{ source }}</or-tag>
+              }
               @if (st === 'saved') {
                 <or-tag ivory icon="check">Saved offline</or-tag>
               } @else if (t.providerId === REMOTE && !st) {
@@ -484,11 +483,13 @@ export class DownloadSources {
   protected readonly library = inject(LibraryStore);
   protected readonly player = inject(PlayerStore);
   protected readonly offline = inject(OfflineStore);
+  protected readonly auth = inject(AuthStore);
   private readonly server = inject(RemoteServerPort, { optional: true });
   private readonly toast = inject(OrToast);
 
   protected readonly REMOTE = REMOTE_PROVIDER_ID;
   protected readonly duration = formatDuration;
+  protected readonly sourceLabel = sourceLabel;
 
   /** Settled, valid search text from the Search screen ('' for none). */
   readonly query = input('');
@@ -542,6 +543,7 @@ export class DownloadSources {
 
   /** Bookmark (save offline) or un-bookmark; OfflineStore reports progress. */
   protected async toggleSaved(track: Track): Promise<void> {
+    if (!this.library.isSaved(track.id) && !this.auth.requireAccount()) return;
     this.library.remember([track]);
     try {
       await this.library.toggleSaved(track.id);
@@ -551,6 +553,7 @@ export class DownloadSources {
   }
 
   protected openPicker(track: Track): void {
+    if (!this.auth.requireAccount('Sign in to add music to your playlists.')) return;
     this.library.remember([track]);
     this.pickerTrack.set(track);
     this.pickerOpen.set(true);

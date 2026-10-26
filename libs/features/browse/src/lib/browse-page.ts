@@ -153,6 +153,23 @@ const FRESH_LIMIT = 12;
     .rail > li:last-child {
       margin-inline-end: var(--spacing-gutter);
     }
+    /* Desktop: crates become a responsive grid instead of a swipe rail. */
+    @media (min-width: 900px) {
+      .rail {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+        gap: var(--spacing-md) var(--spacing-sm);
+        margin: 0;
+        padding: var(--spacing-sm) 0 0;
+        overflow: visible;
+      }
+      .rail > li:last-child {
+        margin-inline-end: 0;
+      }
+      .display {
+        font-size: 40px;
+      }
+    }
     /* Holds roughly one rail's height so the page doesn't jump on load. */
     .crates-status {
       display: flex;

@@ -11,7 +11,7 @@ import {
   untracked,
   viewChild,
 } from '@angular/core';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import {
   AUDIO_QUALITIES,
   isAudioQuality,
@@ -50,7 +50,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
 };
 
 /**
- * Settings screen: import audio files, optional account sign-in, the stream server (URL, token,
+ * Settings screen: import audio files, optional account sign-in, the stream server (URL,
  * connection test), audio quality, auto-download network rule, manage
  * imported records, on-device storage with clear
  * actions, and the music disclaimer.
@@ -67,6 +67,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     OrSleeve,
     OrSpinner,
     OrSwitch,
+    RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -88,6 +89,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     @if (!library.canImport) {
       <p class="note">Importing is not available on this device.</p>
     }
+    <a class="text-link" routerLink="/import">Import from Spotify</a>
 
     @if (auth.available) {
       <or-account-section />
@@ -97,8 +99,8 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     <p class="lede">
       Connect your self-hosted Open Record server to search sites and stream
       records. Saved songs live on this device; unsaved songs are streamed.
-      Scan the pairing QR code from the server, or paste its pairing link into
-      the server URL.
+      Scan the QR code the server shows, or enter its address. Sign in to your
+      account to use it.
     </p>
     @if (settings.serverAvailable) {
       <form class="server" (submit)="saveServer($event)">
@@ -123,19 +125,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
           aria-describedby="or-server-status"
           [attr.aria-invalid]="serverError() ? 'true' : null"
           [value]="serverUrl()"
-          (input)="onServerInput($event, 'url')"
-        />
-        <label class="field-label" for="or-server-token">Access token</label>
-        <input
-          id="or-server-token"
-          class="input"
-          type="password"
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck="false"
-          aria-describedby="or-server-status"
-          [value]="serverToken()"
-          (input)="onServerInput($event, 'token')"
+          (input)="onServerInput($event)"
         />
         <div class="server-actions">
           <or-button
@@ -575,13 +565,8 @@ export class SettingsPage {
   protected readonly serverUrl = linkedSignal(() =>
     this.settings.downloadServerUrl(),
   );
-  protected readonly serverToken = linkedSignal(() =>
-    this.settings.downloadServerToken(),
-  );
   protected readonly serverDirty = computed(
-    () =>
-      this.serverUrl().trim() !== this.settings.downloadServerUrl() ||
-      this.serverToken().trim() !== this.settings.downloadServerToken(),
+    () => this.serverUrl().trim() !== this.settings.downloadServerUrl(),
   );
   protected readonly savingServer = signal(false);
   /** QR scanning is offered only where the app provides a pairing scanner. */
@@ -638,14 +623,14 @@ export class SettingsPage {
     });
   }
 
-  protected onServerInput(event: Event, field: 'url' | 'token'): void {
+  protected onServerInput(event: Event): void {
     const value = (event.target as HTMLInputElement).value;
-    // A pasted pairing link fills in both fields and connects at once.
-    if (field === 'url' && parsePairingLink(value)) {
+    // A pasted pairing link fills in the address and connects at once.
+    if (parsePairingLink(value)) {
       void this.pairWith(value);
       return;
     }
-    (field === 'url' ? this.serverUrl : this.serverToken).set(value);
+    this.serverUrl.set(value);
     this.serverError.set(null);
   }
 
@@ -655,10 +640,7 @@ export class SettingsPage {
     this.savingServer.set(true);
     this.serverError.set(null);
     try {
-      await this.settings.setDownloadServer({
-        url: this.serverUrl(),
-        token: this.serverToken(),
-      });
+      await this.settings.setDownloadServer({ url: this.serverUrl() });
       if (event)
         this.toast.show(
           this.serverUrl().trim()
@@ -685,9 +667,8 @@ export class SettingsPage {
     this.serverError.set(null);
     try {
       const result = await this.settings.pairFromLink(text);
-      // Show the saved values (the pasted link text is not a URL).
+      // Show the saved address (the pasted link text is not a URL).
       this.serverUrl.set(this.settings.downloadServerUrl());
-      this.serverToken.set(this.settings.downloadServerToken());
       if (result.ok) this.toast.show('Paired with your server');
       else this.serverError.set(result.message);
     } finally {

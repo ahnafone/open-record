@@ -1,6 +1,6 @@
 import { parseCsv } from './csv';
 import { dedupeTracks, makeTrack, splitArtists } from './tracks';
-import type { ImportedPlaylist, ImportedTrack, ParsedImport } from './types';
+import type { ImportedPlaylist, ParsedImport } from './types';
 
 /** Thrown for files that are not a recognised Spotify export. `message` is user-facing. */
 export class ImportFormatError extends Error {
@@ -69,9 +69,19 @@ function playlistName(fileName: string): string {
   return base.replace(/_/g, ' ').replace(/\s+/g, ' ').trim() || 'Imported playlist';
 }
 
-/** True for Exportify's Liked Songs export file name. */
+/**
+ * True for Exportify's Liked Songs export file name: `Liked_Songs.csv`
+ * (older exports) or `liked.csv` (Export All), with an optional copy suffix
+ * such as `liked (1).csv`.
+ */
 export function isLikedSongsFile(fileName: string): boolean {
-  return /^liked[\s_-]*songs/i.test(fileName.replace(/^.*[\\/]/, ''));
+  return isLikedSongsName(fileName.replace(/^.*[\\/]/, '').replace(/\.csv$/i, ''));
+}
+
+/** True for a playlist name that stands for Liked Songs ("liked", "Liked Songs", "liked_songs (2)"). */
+export function isLikedSongsName(name: string): boolean {
+  const n = name.trim();
+  return /^liked[\s_-]*songs/i.test(n) || /^liked(?:[\s_-]*\(?\d+\)?)?$/i.test(n);
 }
 
 // ---- Spotify "Download your data" JSON -------------------------------------
@@ -128,36 +138,6 @@ export function parseDataDownloadJson(text: string): ParsedImport {
 /** The data download lists one artist string per track; keep it whole. */
 function splitArtistField(v: unknown): string[] {
   return typeof v === 'string' && v.trim() ? [v.trim()] : [];
-}
-
-// ---- Spotify Web API -------------------------------------------------------
-
-/**
- * Maps one Spotify Web API track (or a saved-track / playlist item wrapping
- * it under `track` or the newer `item` key) to an ImportedTrack. Episodes and
- * unnamed local files map to null. Only the needed fields are copied.
- */
-export function mapSpotifyApiTrack(entry: unknown): ImportedTrack | null {
-  if (!isObj(entry)) return null;
-  const wrapped = isObj(entry['track']) ? entry['track'] : isObj(entry['item']) ? entry['item'] : null;
-  const t = wrapped ?? entry;
-  if (t['type'] !== undefined && t['type'] !== 'track') return null;
-  const album = isObj(t['album']) ? t['album']['name'] : undefined;
-  const ids = isObj(t['external_ids']) ? t['external_ids'] : {};
-  return makeTrack({
-    title: t['name'],
-    artists: arr(t['artists']).flatMap((a) => (isObj(a) && typeof a['name'] === 'string' ? [a['name']] : [])),
-    album,
-    durationMs: t['duration_ms'],
-    isrc: ids['isrc'],
-    uri: t['uri'] ?? (typeof t['id'] === 'string' ? `spotify:track:${t['id']}` : undefined),
-    addedAt: wrapped ? entry['added_at'] : undefined,
-  });
-}
-
-/** Maps a page (or concatenated pages) of `/me/tracks` or playlist items. */
-export function mapSpotifyApiTracks(items: readonly unknown[]): ImportedTrack[] {
-  return dedupeTracks(items.flatMap((i) => mapSpotifyApiTrack(i) ?? []));
 }
 
 // ---- Files -----------------------------------------------------------------

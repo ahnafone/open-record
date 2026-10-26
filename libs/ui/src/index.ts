@@ -32,3 +32,8 @@ export { OrToast, OrToastHost } from './lib/toast/toast';
 export { OrSlider } from './lib/slider/slider';
 export { OrProgressLine } from './lib/progress-line/progress-line';
 export { OrSpinner } from './lib/spinner/spinner';
+export {
+  OrViewport,
+  DESKTOP_MIN_WIDTH,
+  DESKTOP_MEDIA_QUERY,
+} from './lib/viewport/viewport';

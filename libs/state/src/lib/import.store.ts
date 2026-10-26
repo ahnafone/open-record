@@ -1,9 +1,12 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import type { Track } from '@open-record/models';
 import { MusicSourceRegistry } from '@open-record/music-source';
+import { fold } from '@open-record/metadata-lookup';
 import {
+  isLikedSongsName,
   matchQuery,
   matchTrack,
+  type MatchAliases,
   parseImportFile,
   toCsv,
   trackKey,
@@ -70,6 +73,8 @@ export interface ImportItem {
   manual?: boolean;
   /** Failed search attempts (unexpected errors). */
   attempts?: number;
+  /** Imported as a Liked Song (or "Also add to Liked Songs" was ticked): bookmarked in the library. */
+  liked?: true;
 }
 
 export interface ImportProgress {
@@ -78,6 +83,11 @@ export interface ImportProgress {
   review: number;
   unmatched: number;
   pending: number;
+}
+
+export interface ImportOptions {
+  /** "Also add these songs to Liked Songs": every playlist track is bookmarked too. */
+  likeAll?: boolean;
 }
 
 export interface ImportSummary {
@@ -97,6 +107,13 @@ interface ImportJob {
   /** Matched remote track by `isrc:` / `sp:` key, reused by later imports. */
   cache: Record<string, Track>;
   error?: string;
+  /**
+   * Set once tracks of imported "liked" playlists were bookmarked (jobs from
+   * before `liked.csv` was read as Liked Songs). Absent = not checked yet.
+   */
+  likedPlaylistsSaved?: true;
+  /** Set once every `liked` item was checked to be bookmarked (later imports bookmark directly). */
+  likedSaved?: true;
 }
 
 /** Pause between searches; the server allows 30 searches a minute. */
@@ -107,9 +124,13 @@ const BUSY_WAIT_SEC = 10;
 const MAX_ATTEMPTS = 3;
 const MAX_CANDIDATES = 5;
 const PERSIST_DEBOUNCE_MS = 500;
+/** Best title similarity below which catalogue aliases are fetched. */
+const LOW_TITLE_SCORE = 0.6;
+const NO_ALIASES: MatchAliases = { titles: [], artists: [] };
 /** Errors that stop the queue until the user resumes (server down, token, config). */
 const PAUSING_ERRORS = new Set(['AuthError', 'NetworkError', 'RemoteConfigError']);
 const NO_SERVER = 'Set up a download server in Settings to match imported tracks.';
+const INVALID_LINK = 'Paste a full http:// or https:// link.';
 
 /**
  * Spotify import: turns parsed exports into playlists and library entries
@@ -129,6 +150,7 @@ export class ImportStore {
 
   private readonly _job = signal<ImportJob | null>(null);
   private readonly _retryAt = signal<number | null>(null);
+  private readonly _searching = signal<ReadonlySet<string>>(new Set());
 
   /** `idle` = no job. */
   readonly status = computed<ImportStatus>(() => this._job()?.status ?? 'idle');
@@ -149,13 +171,22 @@ export class ImportStore {
   /** Items waiting for the user to pick a candidate (or skip). */
   readonly reviewItems = computed(() => this.items().filter((i) => i.state === 'review'));
   readonly unmatchedItems = computed(() => this.items().filter((i) => i.state === 'unmatched'));
+  /** Keys of items being searched again (`research`). */
+  readonly searching = this._searching.asReadonly();
   /** A file picker is available (`pickFile`). */
   readonly canPickFile = !!this.files;
 
   private readonly loaded: Promise<void>;
   private running = false;
   private abort: AbortController | null = null;
+  /** Catalogue aliases per item key (this session only). */
+  private readonly aliasCache = new Map<string, MatchAliases>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Serialises searches (queue and `research`); see `inSearchSlot`. */
+  private searchLock: Promise<void> = Promise.resolve();
+  private lastSearchEnd = 0;
+  /** In-flight `research` calls by item key. */
+  private readonly researchAborts = new Map<string, AbortController>();
 
   constructor() {
     const registry = inject(MusicSourceRegistry);
@@ -178,7 +209,61 @@ export class ImportStore {
   /** Startup: resume a job left running. */
   async restore(): Promise<void> {
     await this.loaded;
+    await this.saveLikedPlaylists().catch(() => undefined);
+    await this.repairMatched().catch(() => undefined);
     if (this._job()?.status === 'running') void this.run();
+  }
+
+  /**
+   * One-time fix for jobs that imported Exportify's `liked.csv` as a playlist
+   * named "liked": bookmark that playlist's imported tracks (keeping their
+   * added dates) so they show in Library. The playlist itself stays.
+   */
+  private async saveLikedPlaylists(): Promise<void> {
+    const job = this._job();
+    if (!job || job.likedPlaylistsSaved) return;
+    await Promise.all([this.library.ready(), this.playlists.ready()]);
+    const imported = new Set(job.items.flatMap((i) => (i.matchId ? [i.key, i.matchId] : [i.key])));
+    const entries: { id: string; savedAt?: number }[] = [];
+    for (const p of this.playlists.playlists()) {
+      if (!isLikedSongsName(p.name)) continue;
+      for (const id of p.trackIds) {
+        if (imported.has(id)) entries.push({ id, savedAt: p.addedAt?.[id] });
+      }
+    }
+    await this.library.bookmarkWithoutSaving(entries);
+    this.update((j) => ({ ...j, likedPlaylistsSaved: true }));
+    await this.persist();
+  }
+
+  /**
+   * Point bookmarks and playlist entries still on the placeholder of a
+   * matched item at its match. Catches ids written while the queue swapped
+   * them (importing more during a running job); such bookmarks were hidden
+   * from Library. Idempotent; never downloads.
+   */
+  private async repairMatched(): Promise<void> {
+    const job = this._job();
+    if (!job) return;
+    await Promise.all([this.library.ready(), this.playlists.ready()]);
+    const listed = new Set(this.playlists.playlists().flatMap((p) => p.trackIds));
+    for (const item of job.items) {
+      if (item.state !== 'matched' || !item.matchId) continue;
+      if (listed.has(item.key)) await this.playlists.replaceTrackEverywhere(item.key, item.matchId);
+      if (this.library.isSaved(item.key)) await this.library.replaceSaved(item.key, item.matchId);
+    }
+    // A liked item is bookmarked under whatever id it has now.
+    if (job.likedSaved) return;
+    const liked = job.items.filter((i) => i.liked).map((i) => ({ id: this.currentId(i.key) }));
+    await this.library.bookmarkWithoutSaving(liked);
+    this.update((j) => ({ ...j, likedSaved: true }));
+    await this.persist();
+  }
+
+  /** Track id an item's tracks use now: its match, else the placeholder. */
+  private currentId(key: string): string {
+    const item = this.item(key);
+    return item?.state === 'matched' && item.matchId ? item.matchId : key;
   }
 
   // ---- Files ---------------------------------------------------------------
@@ -207,16 +292,24 @@ export class ImportStore {
    * the remote track when an earlier import already matched it), then start
    * matching in the background. Adds to an existing job.
    */
-  async start(parsed: ParsedImport): Promise<ImportSummary> {
+  async start(parsed: ParsedImport, options: ImportOptions = {}): Promise<ImportSummary> {
     await Promise.all([this.loaded, this.library.ready(), this.playlists.ready()]);
-    const job: ImportJob = this._job() ?? { version: 1, status: 'running', items: [], cache: {} };
+    const job: ImportJob = this._job() ?? {
+      version: 1,
+      status: 'running',
+      items: [],
+      cache: {},
+      // Liked Songs are bookmarked directly from now on.
+      likedPlaylistsSaved: true,
+      likedSaved: true,
+    };
     const byKey = new Map<string, ImportItem>();
     for (const item of job.items) for (const k of idKeys(item)) byKey.set(k, item);
 
     const newItems: ImportItem[] = [];
     let alreadyMatched = 0;
-    /** Track id each imported track maps to (placeholder or match). */
-    const idOf = (t: ImportedTrack): string => {
+    /** Key of the item each imported track maps to. */
+    const keyOf = (t: ImportedTrack): string => {
       const keys = idKeys(t);
       let item = keys.map((k) => byKey.get(k)).find(Boolean);
       if (!item) {
@@ -240,11 +333,20 @@ export class ImportStore {
         newItems.push(item);
       }
       for (const k of keys) byKey.set(k, item);
-      return item.state === 'matched' && item.matchId ? item.matchId : item.key;
+      return item.key;
     };
 
-    const playlistIds = parsed.playlists.map((p) => p.tracks.map(idOf));
-    const likedIds = parsed.liked.map(idOf);
+    const playlistKeys = parsed.playlists.map((p) => p.tracks.map(keyOf));
+    const likedTracks = options.likeAll
+      ? [...parsed.liked, ...parsed.playlists.flatMap((p) => p.tracks)]
+      : parsed.liked;
+    const now = Date.now();
+    // One bookmark per item, dated by its first occurrence in the export.
+    const liked = new Map<string, number>();
+    likedTracks.forEach((t, i) => {
+      const key = keyOf(t);
+      if (!liked.has(key)) liked.set(key, parseAddedAt(t.addedAt) ?? now - i);
+    });
 
     // Index first so playlists and bookmarks resolve immediately.
     const fresh = newItems.filter((i) => i.state === 'pending').map(placeholderTrack);
@@ -257,28 +359,29 @@ export class ImportStore {
     const next: ImportJob = {
       ...job,
       status: newItems.some((i) => i.state === 'pending') || job.status === 'running' ? 'running' : job.status,
-      items: [...job.items, ...newItems],
+      items: [...job.items, ...newItems].map((i) => (liked.has(i.key) && !i.liked ? { ...i, liked: true } : i)),
     };
     delete next.error;
     this._job.set(next);
     await this.persist();
 
+    // Ids are resolved late: a running queue may have matched an item meanwhile.
     for (const [i, p] of parsed.playlists.entries()) {
       const name = p.name.trim().slice(0, PLAYLIST_NAME_MAX) || 'Imported playlist';
-      await this.playlists.createWithTracks(name, playlistIds[i]);
+      await this.playlists.createWithTracks(
+        name,
+        playlistKeys[i].map((k) => this.currentId(k)),
+        p.tracks.map((t) => parseAddedAt(t.addedAt)),
+      );
     }
-    const now = Date.now();
-    await this.library.bookmarkWithoutSaving(
-      likedIds.map((id, i) => {
-        const added = Date.parse(parsed.liked[i].addedAt ?? '');
-        return { id, savedAt: Number.isFinite(added) ? added : now - i };
-      }),
-    );
+    await this.library.bookmarkWithoutSaving([...liked].map(([key, savedAt]) => ({ id: this.currentId(key), savedAt })));
+    // Anything swapped while those were written follows its match.
+    await this.repairMatched();
 
     if (this._job()?.status === 'running') void this.run();
     return {
       playlists: parsed.playlists.length,
-      liked: parsed.liked.length,
+      liked: liked.size,
       tracks: newItems.length,
       alreadyMatched,
     };
@@ -338,6 +441,95 @@ export class ImportStore {
     await this.persist();
   }
 
+  /** Send an unmatched item that still has suggestions back to review. */
+  async reopen(key: string): Promise<void> {
+    await this.loaded;
+    const item = this.item(key);
+    if (!item || item.state !== 'unmatched' || !item.candidates?.length) return;
+    this.patchItem(key, { state: 'review', manual: undefined });
+    this.finishIfIdle();
+    await this.persist();
+  }
+
+  /**
+   * Search again for one review or unmatched item (fresh results, aliases
+   * refetched). A confident match is applied as usual; otherwise the new
+   * suggestions replace the old ones and the item waits in review. With no
+   * results the old suggestions stay. Paced with the import queue; throws a
+   * user-facing Error on failure (the job is not paused).
+   */
+  async research(key: string): Promise<void> {
+    await this.loaded;
+    const item = this.item(key);
+    if (!item || (item.state !== 'review' && item.state !== 'unmatched') || this.researchAborts.has(key)) return;
+    if (!this.remote?.configured) throw new Error(NO_SERVER);
+    const abort = new AbortController();
+    this.researchAborts.set(key, abort);
+    this._searching.update((s) => new Set(s).add(key));
+    try {
+      await Promise.all([this.library.ready(), this.playlists.ready()]);
+      this.aliasCache.delete(key);
+      const result = await this.searchItem(item, abort.signal);
+      const current = this.item(key);
+      if (!current || (current.state !== 'review' && current.state !== 'unmatched')) return;
+      if (result.verdict === 'matched') {
+        await this.applyResult(current, result);
+        this.finishIfIdle();
+      } else if (result.ranked.length) {
+        const candidates = result.ranked
+          .slice(0, MAX_CANDIDATES)
+          .map(({ candidate, score, durationMatch }) => ({ track: candidate, score, durationMatch }));
+        this.patchItem(key, { state: 'review', candidates, manual: undefined });
+      }
+      await this.persist();
+    } catch (error) {
+      if (isAbort(error) || abort.signal.aborted) return;
+      throw new Error(remoteErrorMessage(error));
+    } finally {
+      this.endSearching(key, abort);
+    }
+  }
+
+  private endSearching(key: string, abort: AbortController): void {
+    if (this.researchAborts.get(key) === abort) this.researchAborts.delete(key);
+    this._searching.update((s) => {
+      const next = new Set(s);
+      next.delete(key);
+      return next;
+    });
+  }
+
+  /**
+   * Match a review or unmatched item to a pasted video link (YouTube or any
+   * site the server supports), resolved like a pasted link in Search. Throws
+   * a user-facing Error for a bad link or a server failure.
+   */
+  async useLink(key: string, url: string): Promise<void> {
+    await this.loaded;
+    const link = url.trim();
+    if (!/^https?:\/\/\S+$/i.test(link)) throw new Error(INVALID_LINK);
+    const item = this.item(key);
+    if (!item || (item.state !== 'review' && item.state !== 'unmatched') || this.researchAborts.has(key)) return;
+    if (!this.remote?.configured) throw new Error(NO_SERVER);
+    const abort = new AbortController();
+    this.researchAborts.set(key, abort);
+    this._searching.update((s) => new Set(s).add(key));
+    try {
+      await Promise.all([this.library.ready(), this.playlists.ready()]);
+      const track = await this.remote.resolveUrl(link, abort.signal);
+      const current = this.item(key);
+      if (abort.signal.aborted || !current || (current.state !== 'review' && current.state !== 'unmatched')) return;
+      await this.applyMatch(current, track, undefined, true);
+      this.finishIfIdle();
+      await this.persist();
+    } catch (error) {
+      if (isAbort(error) || abort.signal.aborted) return;
+      throw new Error(remoteErrorMessage(error));
+    } finally {
+      this.endSearching(key, abort);
+    }
+  }
+
   /** Unmatched tracks as an Exportify-style CSV (re-importable). */
   unmatchedCsv(): string {
     return toCsv([
@@ -362,6 +554,8 @@ export class ImportStore {
   async deleteImportData(options: { keepPlaceholders?: boolean } = {}): Promise<void> {
     await this.loaded;
     this.stopRunner();
+    for (const abort of this.researchAborts.values()) abort.abort();
+    this.researchAborts.clear();
     const placeholders = (this._job()?.items ?? []).filter((i) => i.state !== 'matched').map((i) => i.key);
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = null;
@@ -411,9 +605,9 @@ export class ImportStore {
           break;
         }
         try {
-          const results = await this.remote.searchSite(matchQuery(toImported(item)), 'ytmusic', abort.signal);
+          const result = await this.searchItem(item, abort.signal);
           if (abort.signal.aborted) break;
-          await this.applyResult(item, matchTrack(toImported(item), results));
+          await this.applyResult(item, result);
           this.schedulePersist();
           await sleep(PACE_MS, abort.signal);
         } catch (error) {
@@ -445,6 +639,111 @@ export class ImportStore {
       // Resumed while this run was winding down after a pause.
       if (abort.signal.aborted && this._job()?.status === 'running') void this.run();
     }
+  }
+
+  /**
+   * One item's search pipeline: YT Music songs, then plain YouTube, then
+   * catalogue aliases (and an alias search) when the title looks off. Runs in
+   * the shared search slot so searches stay paced. Errors (aborts, busy,
+   * 429, pausing) propagate.
+   */
+  private async searchItem(item: ImportItem, signal: AbortSignal): Promise<MatchResult<Track>> {
+    return this.inSearchSlot(signal, async () => {
+      const remote = this.remote;
+      if (!remote?.configured) throw new Error(NO_SERVER);
+      const wanted = toImported(item);
+      const query = matchQuery(wanted);
+      let candidates = await remote.searchSite(query, 'ytmusic', signal);
+      let result = matchTrack(wanted, candidates);
+      if (result.verdict !== 'matched') {
+        // Not in YT Music songs (or unsure): also try plain YouTube uploads.
+        await sleep(PACE_MS, signal);
+        const extra = await this.fallbackSearch(query, signal);
+        const merged = mergeTracks(candidates, extra);
+        if (merged.length > candidates.length) result = matchTrack(wanted, (candidates = merged));
+      }
+      if (result.verdict !== 'matched' && needsAliases(wanted, result)) {
+        // Likely the same song titled in another script/language: ask the catalogue.
+        const aliases = await this.trackAliases(item, wanted, signal);
+        if (aliases.titles.length || aliases.artists.length) {
+          result = matchTrack(wanted, candidates, aliases);
+          const altQuery = result.verdict === 'matched' ? null : aliasQuery(wanted, aliases);
+          if (altQuery && fold(altQuery) !== fold(query)) {
+            await sleep(PACE_MS, signal);
+            const extra = await this.fallbackSearch(altQuery, signal);
+            const merged = mergeTracks(candidates, extra);
+            if (merged.length > candidates.length) result = matchTrack(wanted, (candidates = merged), aliases);
+          }
+        }
+      }
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      return result;
+    });
+  }
+
+  /**
+   * Runs `task` once no other search is in flight and at least PACE_MS after
+   * the last one ended, so the queue and per-item searches share one pace.
+   */
+  private async inSearchSlot<T>(signal: AbortSignal, task: () => Promise<T>): Promise<T> {
+    const previous = this.searchLock;
+    let release!: () => void;
+    this.searchLock = new Promise<void>((r) => (release = r));
+    try {
+      await previous;
+      const wait = this.lastSearchEnd + PACE_MS - Date.now();
+      if (wait > 0) await sleep(wait, signal);
+      else if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      try {
+        return await task();
+      } finally {
+        this.lastSearchEnd = Date.now();
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * YouTube search used when YT Music found no confident match. Aborts and
+   * queue-level errors (busy, 429, pausing) propagate to the run loop; any
+   * other failure yields no extra candidates so the YT Music result stands.
+   */
+  private async fallbackSearch(query: string, signal: AbortSignal): Promise<Track[]> {
+    try {
+      return (await this.remote?.searchSite(query, 'youtube', signal)) ?? [];
+    } catch (error) {
+      if (isAbort(error) || signal.aborted) throw error;
+      const name = error instanceof Error ? error.name : '';
+      const status = (error as { status?: unknown } | null)?.status;
+      if (name === 'busy' || (name === 'HttpError' && status === 429) || PAUSING_ERRORS.has(name)) throw error;
+      return [];
+    }
+  }
+
+  /**
+   * Catalogue aliases for an item, fetched once per item key (paced like a
+   * search). Aborts propagate; any other failure gives no aliases.
+   */
+  private async trackAliases(item: ImportItem, wanted: ImportedTrack, signal: AbortSignal): Promise<MatchAliases> {
+    const cached = this.aliasCache.get(item.key);
+    if (cached) return cached;
+    if (!this.remote?.aliases) return NO_ALIASES;
+    await sleep(PACE_MS, signal);
+    let aliases = NO_ALIASES;
+    try {
+      const query: { artist: string; title: string; isrc?: string } = {
+        artist: wanted.artists[0] ?? wanted.artist,
+        title: wanted.title,
+      };
+      if (item.isrc) query.isrc = item.isrc;
+      const raw = await this.remote.aliases(query, signal);
+      aliases = { titles: raw?.titles ?? [], artists: raw?.artists ?? [] };
+    } catch (error) {
+      if (isAbort(error) || signal.aborted) throw error;
+    }
+    if (!signal.aborted) this.aliasCache.set(item.key, aliases);
+    return aliases;
   }
 
   private async applyResult(item: ImportItem, result: MatchResult<Track>): Promise<void> {
@@ -591,6 +890,31 @@ function placeholderTrack(item: ImportItem): Track {
   return track;
 }
 
+/** Appends `extra` tracks not already in `base` (by track id). */
+function mergeTracks(base: readonly Track[], extra: readonly Track[]): Track[] {
+  const seen = new Set(base.map((t) => t.id));
+  return [...base, ...extra.filter((t) => !seen.has(t.id) && seen.add(t.id))];
+}
+
+const LATIN_ONLY = /^[\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]*$/u;
+
+/** Text in another script, or no candidate with a close title: aliases may help. */
+function needsAliases(wanted: ImportedTrack, result: MatchResult<Track>): boolean {
+  const text = `${wanted.title} ${wanted.artists.join(' ')} ${wanted.artist}`;
+  return !LATIN_ONLY.test(text) || (result.ranked[0]?.titleScore ?? 0) < LOW_TITLE_SCORE;
+}
+
+/** "Artist Title" from the aliases (preferring Latin forms), or null without a usable alias title. */
+function aliasQuery(wanted: ImportedTrack, aliases: MatchAliases): string | null {
+  const latin = (s: string) => LATIN_ONLY.test(s) && /\p{L}/u.test(s);
+  const wantTitle = fold(wanted.title);
+  const titles = aliases.titles.filter((t) => fold(t) && fold(t) !== wantTitle);
+  const title = titles.find(latin) ?? titles[0];
+  if (!title) return null;
+  const artist = aliases.artists.find(latin) ?? aliases.artists[0] ?? wanted.artists[0] ?? wanted.artist;
+  return `${artist} ${title}`.trim();
+}
+
 function toImported(item: ImportItem): ImportedTrack {
   const t: ImportedTrack = { title: item.title, artists: item.artists, artist: item.artist };
   if (item.album) t.album = item.album;
@@ -622,4 +946,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
     };
     signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/** Epoch ms of an export's ISO `addedAt`, or undefined when missing/invalid. */
+function parseAddedAt(value: string | undefined): number | undefined {
+  const at = Date.parse(value ?? '');
+  return Number.isFinite(at) && at > 0 ? at : undefined;
 }

@@ -73,6 +73,8 @@ export class PlayerEngine {
   private readonly _repeat = signal<RepeatMode>('off');
   private readonly _error = signal<PlayerError | null>(null);
   private readonly _skipOnError = signal(true);
+  private readonly _volume = signal(1);
+  private readonly _muted = signal(false);
 
   readonly queue = this._queue.asReadonly();
   readonly status = this._status.asReadonly();
@@ -82,6 +84,11 @@ export class PlayerEngine {
   readonly repeat = this._repeat.asReadonly();
   readonly error = this._error.asReadonly();
   readonly skipOnError = this._skipOnError.asReadonly();
+  /** Output volume 0..1, independent of mute. */
+  readonly volume = this._volume.asReadonly();
+  readonly muted = this._muted.asReadonly();
+  /** False when the engine has no software volume (native: hardware keys). */
+  readonly canSetVolume: boolean;
 
   /** Queue index of the current track, or -1. */
   readonly currentIndex = computed(() => {
@@ -124,6 +131,7 @@ export class PlayerEngine {
     this.artResolver = options.resolveArt;
     this.neighbourResolver = options.resolveNeighbour;
     this._skipOnError.set(options.skipOnError ?? true);
+    this.canSetVolume = typeof engine.setVolume === 'function';
     engine.setListener({
       onPlaying: () => {
         this.failures = 0;
@@ -286,6 +294,27 @@ export class PlayerEngine {
       one: 'off',
     };
     this.setRepeat(next[this._repeat()]);
+  }
+
+  /** Set volume (clamped 0..1). Raising it above 0 also unmutes. */
+  setVolume(volume: number): void {
+    const v = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
+    this._volume.set(v);
+    if (v > 0) this._muted.set(false);
+    this.applyVolume();
+  }
+
+  setMuted(muted: boolean): void {
+    this._muted.set(muted);
+    this.applyVolume();
+  }
+
+  toggleMute(): void {
+    this.setMuted(!this._muted());
+  }
+
+  private applyVolume(): void {
+    this.engine.setVolume?.(this._muted() ? 0 : this._volume());
   }
 
   setSkipOnError(on: boolean): void {

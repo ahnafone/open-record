@@ -3,7 +3,8 @@ import { AuthPort, type AuthProjectConfig, type AuthUser } from './ports';
 
 /**
  * - `unavailable`: accounts are not built into this app (no AuthPort).
- * - `unconfigured`: no Supabase project set; the app runs anonymously.
+ * - `unconfigured`: no Supabase project (none built in and the download
+ *   server offers none); the app runs anonymously.
  * - `loading`: restoring the saved session.
  */
 export type AuthStatus = 'unavailable' | 'unconfigured' | 'loading' | 'signedOut' | 'signedIn';
@@ -29,8 +30,11 @@ export class AuthStore {
   private readonly _error = signal<string | null>(null);
   private readonly _notice = signal<string | null>(null);
   private readonly _project = signal<AuthProjectConfig | null>(null);
+  private readonly _prompt = signal<string | null>(null);
+  private readonly _recovering = signal(false);
   private started?: Promise<void>;
   private unsubscribe?: () => void;
+  private unsubscribeRecovery?: () => void;
 
   readonly status = this._status.asReadonly();
   readonly user = this._user.asReadonly();
@@ -41,10 +45,17 @@ export class AuthStore {
   readonly notice = this._notice.asReadonly();
   /** Accounts are built into this app. */
   readonly available = !!this.port;
-  /** The project comes from the build and cannot be edited in Settings. */
-  readonly projectLocked = !!this.port?.buildConfig;
-  /** The active project (build-time or Settings-entered). */
+  /** The active project (build-time or from the download server). */
   readonly project = this._project.asReadonly();
+  /** Accounts can be used right now (a project is available). */
+  readonly accountsReady = computed(() => {
+    const status = this._status();
+    return status === 'signedIn' || status === 'signedOut' || status === 'loading';
+  });
+  /** Message of the open "Sign in to continue" prompt, or null when closed. */
+  readonly signInPrompt = this._prompt.asReadonly();
+  /** The user opened a password reset link and must choose a new password. */
+  readonly recovering = this._recovering.asReadonly();
 
   /** Restore the session once (called at app start; safe to call again). */
   start(): Promise<void> {
@@ -52,19 +63,33 @@ export class AuthStore {
     return this.started;
   }
 
-  /** Save or clear the Settings-entered project, then restore its session. */
-  async setProject(config: AuthProjectConfig | null): Promise<boolean> {
-    if (!this.port || this.projectLocked) return false;
-    const next = config && { url: config.url.trim(), anonKey: config.anonKey.trim() };
-    if (next && (!next.url || !next.anonKey)) {
-      this._error.set('Enter the project URL and anon key.');
-      return false;
-    }
-    return this.run(async (port) => {
-      await port.setProjectConfig(next);
-      this.started = this.restore();
-      await this.started;
-    });
+  /** Re-resolve the project and restore its session (e.g. after the server URL changed). */
+  refresh(): Promise<void> {
+    if (!this.port) return Promise.resolve();
+    this.started = this.restore();
+    return this.started;
+  }
+
+  /**
+   * Gate for account-only actions (liking, saving, importing). True when the
+   * user may go ahead: signed in, or accounts are not set up at all (the app
+   * then works anonymously). Otherwise opens the sign-in prompt and returns false.
+   */
+  requireAccount(message = 'Sign in to save music to your library.'): boolean {
+    if (this.signedIn() || !this.accountsReady()) return true;
+    this.promptSignIn(message);
+    return false;
+  }
+
+  /** Open the "Sign in to continue" prompt (no-op when signed in or accounts are unavailable). */
+  promptSignIn(message = 'Sign in to continue.'): void {
+    if (this.signedIn() || !this.accountsReady()) return;
+    this.clearMessages();
+    this._prompt.set(message);
+  }
+
+  closeSignInPrompt(): void {
+    this._prompt.set(null);
   }
 
   async signUp(email: string, password: string): Promise<boolean> {
@@ -88,6 +113,19 @@ export class AuthStore {
       await port.signOut();
       this.setUser(null);
     });
+  }
+
+  async setNewPassword(password: string): Promise<boolean> {
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      this._error.set(`Use at least ${MIN_PASSWORD_LENGTH} characters for the password.`);
+      return false;
+    }
+    const ok = await this.run(async (port) => {
+      await port.updatePassword(password);
+      this._recovering.set(false);
+      this._notice.set('Password updated.');
+    });
+    return ok;
   }
 
   async resetPassword(email: string): Promise<boolean> {
@@ -119,14 +157,22 @@ export class AuthStore {
   private async restore(): Promise<void> {
     const port = this.port;
     if (!port) return;
-    this._status.set('loading');
+    // A refresh keeps the current state visible (no flicker, no sync restart).
+    const status = this._status();
+    if (status !== 'signedIn' && status !== 'signedOut') this._status.set('loading');
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.unsubscribeRecovery?.();
+    this.unsubscribeRecovery = port.onRecovery(() => {
+      this._recovering.set(true);
+      this._prompt.set(null);
+    });
     try {
-      const project = port.buildConfig ?? (await port.loadProjectConfig());
+      const project = await port.activeProject();
       this._project.set(project);
       if (!project) {
         this._user.set(null);
+        this._prompt.set(null);
         this._status.set('unconfigured');
         return;
       }
@@ -142,6 +188,7 @@ export class AuthStore {
   private setUser(user: AuthUser | null): void {
     this._user.set(user);
     this._status.set(user ? 'signedIn' : 'signedOut');
+    if (user) this._prompt.set(null);
   }
 
   private validate(email: string, password: string): boolean {

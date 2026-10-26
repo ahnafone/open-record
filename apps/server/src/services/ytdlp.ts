@@ -6,7 +6,12 @@ import { createLimiter } from './resolve-limiter';
 export const YTDLP_BIN = process.env['YTDLP_PATH']?.trim() || 'yt-dlp';
 
 /** Arguments every yt-dlp call gets: no user config files, JS challenges solved with Node. */
-export const BASE_ARGS = ['--ignore-config', '--no-colors', '--js-runtimes', 'node'];
+export const BASE_ARGS = [
+  '--ignore-config',
+  '--no-colors',
+  '--js-runtimes',
+  'node',
+];
 
 export const SEARCH_LIMIT = 15;
 export const MAX_QUERY_LENGTH = 200;
@@ -20,7 +25,10 @@ const DEFAULT_MAX_QUEUE = 16;
 export const STREAM_FORMAT = 'bestaudio[ext=m4a]/bestaudio/best';
 
 /** Average-bitrate caps (kbps) for the capped quality levels. */
-export const QUALITY_MAX_ABR: Record<Exclude<AudioQuality, 'highest'>, number> = {
+export const QUALITY_MAX_ABR: Record<
+  Exclude<AudioQuality, 'highest'>,
+  number
+> = {
   high: 160,
   medium: 128,
   low: 64,
@@ -44,7 +52,14 @@ export function streamFormatFor(quality: AudioQuality = 'highest'): string {
   ].join('/');
 }
 
-export const SEARCH_SOURCES = ['youtube', 'ytmusic', 'soundcloud', 'bandcamp', 'audiomack', 'mixcloud'] as const;
+export const SEARCH_SOURCES = [
+  'youtube',
+  'ytmusic',
+  'soundcloud',
+  'bandcamp',
+  'audiomack',
+  'mixcloud',
+] as const;
 export type SearchSource = (typeof SEARCH_SOURCES)[number];
 
 export interface SearchResult {
@@ -102,7 +117,10 @@ export interface YtDlpInfo {
  * mixcloud have no search extractor in yt-dlp (neither a `xxsearch:` prefix
  * nor a search-URL extractor), so they return null and the route answers 400.
  */
-export function searchTarget(source: SearchSource, query: string): string | null {
+export function searchTarget(
+  source: SearchSource,
+  query: string,
+): string | null {
   switch (source) {
     case 'youtube':
       return `ytsearch${SEARCH_LIMIT}:${query}`;
@@ -125,20 +143,126 @@ export function siteFromUrl(raw: string): string {
     return 'unknown';
   }
   if (host === 'music.youtube.com') return 'ytmusic';
-  if (host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) return 'youtube';
+  if (
+    host === 'youtube.com' ||
+    host === 'youtu.be' ||
+    host.endsWith('.youtube.com')
+  )
+    return 'youtube';
   for (const site of ['soundcloud', 'bandcamp', 'audiomack', 'mixcloud']) {
     if (host === `${site}.com` || host.endsWith(`.${site}.com`)) return site;
   }
   return host;
 }
 
-const clean = (s: unknown): string | undefined => (typeof s === 'string' && s.trim() ? s.trim() : undefined);
+const clean = (s: unknown): string | undefined =>
+  typeof s === 'string' && s.trim() ? s.trim() : undefined;
 
-/** Best artist guess; drops YouTube's auto-generated " - Topic" channel suffix. */
+/**
+ * Cleans a channel/uploader name into an artist name: drops YouTube's
+ * auto-generated " - Topic" suffix and a trailing "VEVO" (splitting the
+ * remaining CamelCase, so "DaftPunkVEVO" becomes "Daft Punk"). Empty when nothing is left.
+ */
+export function normalizeArtist(raw: string | undefined): string {
+  let name = raw?.trim() ?? '';
+  name = name.replace(/\s+-\s+Topic$/i, '').trim();
+  const vevo = /^(.*?)\s*VEVO$/.exec(name);
+  if (vevo) {
+    const base = vevo[1].trim();
+    name = /\s/.test(base) ? base : base.replace(/([a-z])([A-Z])/g, '$1 $2');
+  }
+  return name.trim();
+}
+
+/** Best artist guess from the info dict; empty when none is known. */
 export function artistOf(info: YtDlpInfo): string {
-  const raw =
-    clean(info.artist) ?? clean(info.artists?.[0]) ?? clean(info.creator) ?? clean(info.uploader) ?? clean(info.channel);
-  return raw?.replace(/\s+-\s+Topic$/, '') ?? '';
+  const candidates = [
+    info.artist,
+    info.artists?.[0],
+    info.creator,
+    info.uploader,
+    info.channel,
+  ];
+  for (const c of candidates) {
+    const name = normalizeArtist(clean(c));
+    if (name) return name;
+  }
+  return '';
+}
+
+/** Channel names that belong to a label or aggregator rather than the artist. */
+const LABEL_LIKE =
+  /VEVO$|\b(records|recordings|music|entertainment|label|media|tv|official charts|lyrics|hits)\b/i;
+
+/** Bracketed title noise: "(Official Music Video)", "[Lyrics]", "(HD)", ... ("Remastered" is kept). */
+const TITLE_NOISE =
+  /\s*[([]\s*(?:official\s+)?(?:(?:music|lyrics?|hd|4k)\s+)?(?:video|audio|visuali[sz]er)(?:\s+(?:hd|4k|hq))?\s*[)\]]|\s*[([]\s*(?:lyrics?|hd|hq|4k|official)\s*[)\]]/gi;
+
+const squash = (s: string): string =>
+  s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+/**
+ * Splits video-style titles into track and artist. Drops bracketed noise
+ * such as "(Official Music Video)" and, for "Artist - Title" titles, takes
+ * the artist from the title when the channel is missing, label-like or VEVO
+ * (or is the same artist). `artist` is the raw channel/uploader name.
+ */
+export function parseTitle(
+  title: string,
+  artist?: string,
+): { title: string; artist: string } {
+  const raw = artist?.trim() ?? '';
+  const channel = normalizeArtist(raw);
+  let text =
+    title
+      .replace(TITLE_NOISE, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim() || title.trim();
+
+  const split = /^(.+?)\s+[-\u2013\u2014]\s+(.+)$/.exec(text);
+  if (split) {
+    const left = split[1].trim();
+    const right = split[2]
+      .trim()
+      .replace(/^["'\u201c\u2018](.+)["'\u201d\u2019]$/, '$1');
+    const sameArtist = !!channel && squash(left).includes(squash(channel));
+    if (!channel || LABEL_LIKE.test(raw) || sameArtist) {
+      return { title: right, artist: left };
+    }
+  }
+  text = text.replace(/^["'\u201c](.+)["'\u201d]$/, '$1');
+  return { title: text, artist: channel };
+}
+
+const BOOST =
+  /official\s+(?:music\s+)?video|official\s+lyrics?\s+video|official\s+audio/i;
+const DEMOTE_WORDS = ['cover', 'live', 'reaction', 'karaoke', 'remix'] as const;
+
+/** Relevance adjustment for a raw result title: + for official uploads, - for unrequested variants. */
+export function relevanceScore(title: string, query: string): number {
+  const q = query.toLowerCase();
+  let score = BOOST.test(title) ? 1 : 0;
+  for (const word of DEMOTE_WORDS) {
+    const re = new RegExp(`\\b${word}\\b`, 'i');
+    if (re.test(title) && !re.test(q)) score -= 1;
+  }
+  return score;
+}
+
+/** Stable re-ordering by `relevanceScore`; ties keep the source's order. */
+export function rankByRelevance<T>(
+  items: T[],
+  query: string,
+  titleOf: (item: T) => string,
+): T[] {
+  return items
+    .map((item, i) => ({
+      item,
+      i,
+      score: relevanceScore(titleOf(item), query),
+    }))
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .map((x) => x.item);
 }
 
 export function thumbnailOf(info: YtDlpInfo): string | undefined {
@@ -147,22 +271,50 @@ export function thumbnailOf(info: YtDlpInfo): string | undefined {
 }
 
 export function durationOf(info: YtDlpInfo): number | undefined {
-  return typeof info.duration === 'number' && Number.isFinite(info.duration) && info.duration > 0
+  return typeof info.duration === 'number' &&
+    Number.isFinite(info.duration) &&
+    info.duration > 0
     ? Math.round(info.duration)
     : undefined;
 }
 
 /** Maps one yt-dlp info dict (full or flat-playlist entry) to the API shape. */
-export function toSearchResult(info: YtDlpInfo, site?: string): SearchResult | null {
-  const url = clean(info.webpage_url) ?? clean(info.url) ?? clean(info.original_url);
+export function toSearchResult(
+  info: YtDlpInfo,
+  site?: string,
+): SearchResult | null {
+  const url =
+    clean(info.webpage_url) ?? clean(info.url) ?? clean(info.original_url);
   const id = clean(info.id);
   if (!url || !id || !/^https?:\/\//.test(url)) return null;
+  const track = clean(info.track);
+  const metaArtist = normalizeArtist(
+    clean(info.artist) ?? clean(info.artists?.[0]) ?? clean(info.creator),
+  );
+  let title: string;
+  let artist: string;
+  const resolvedSite = site ?? siteFromUrl(url);
+  if (track) {
+    title = track;
+    artist = artistOf(info);
+  } else if (resolvedSite === 'ytmusic') {
+    // YouTube Music titles are already track names; a " - " there is part of the name.
+    title = clean(info.title) ?? id;
+    artist = artistOf(info);
+  } else {
+    const parsed = parseTitle(
+      clean(info.title) ?? id,
+      clean(info.uploader) ?? clean(info.channel),
+    );
+    title = parsed.title || id;
+    artist = metaArtist || parsed.artist;
+  }
   const result: SearchResult = {
     id,
-    title: clean(info.track) ?? clean(info.title) ?? id,
-    artist: artistOf(info),
+    title,
+    artist,
     url,
-    site: site ?? siteFromUrl(url),
+    site: resolvedSite,
   };
   const durationSec = durationOf(info);
   if (durationSec !== undefined) result.durationSec = durationSec;
@@ -172,10 +324,17 @@ export function toSearchResult(info: YtDlpInfo, site?: string): SearchResult | n
 }
 
 /** Global cap on concurrent yt-dlp processes; replaced by `configureResolveLimits`. */
-let limiter = createLimiter({ max: 2, maxQueue: DEFAULT_MAX_QUEUE, waitMs: QUEUE_WAIT_MS });
+let limiter = createLimiter({
+  max: 2,
+  maxQueue: DEFAULT_MAX_QUEUE,
+  waitMs: QUEUE_WAIT_MS,
+});
 
 /** Sets the yt-dlp concurrency cap and wait-queue length (called from buildApp). */
-export function configureResolveLimits(max: number, maxQueue = DEFAULT_MAX_QUEUE): void {
+export function configureResolveLimits(
+  max: number,
+  maxQueue = DEFAULT_MAX_QUEUE,
+): void {
   limiter = createLimiter({ max, maxQueue, waitMs: QUEUE_WAIT_MS });
 }
 
@@ -189,13 +348,24 @@ function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
     execFile(
       YTDLP_BIN,
       [...BASE_ARGS, ...args],
-      { timeout: INFO_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: INFO_MAX_BUFFER, windowsHide: true },
+      {
+        timeout: INFO_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        maxBuffer: INFO_MAX_BUFFER,
+        windowsHide: true,
+      },
       (err, stdout, stderr) => {
         if (err) {
           const code = (err as NodeJS.ErrnoException).code;
-          if (code === 'ENOENT') return reject(new YtDlpError('yt-dlp is not installed on the server', 500));
-          if ((err as { killed?: boolean }).killed) return reject(new YtDlpError('yt-dlp timed out', 504));
-          return reject(new YtDlpError(lastError(String(stderr)) ?? 'yt-dlp failed'));
+          if (code === 'ENOENT')
+            return reject(
+              new YtDlpError('yt-dlp is not installed on the server', 500),
+            );
+          if ((err as { killed?: boolean }).killed)
+            return reject(new YtDlpError('yt-dlp timed out', 504));
+          return reject(
+            new YtDlpError(lastError(String(stderr)) ?? 'yt-dlp failed'),
+          );
         }
         try {
           resolve(JSON.parse(String(stdout)) as YtDlpInfo);
@@ -216,10 +386,17 @@ export function lastError(stderr: string): string | undefined {
   return line?.replace(/^ERROR:\s*/, '').slice(0, 300) || undefined;
 }
 
-/** Searches a source; returns at most SEARCH_LIMIT results. */
-export async function search(query: string, source: SearchSource): Promise<SearchResult[]> {
+/** Searches a source; returns at most SEARCH_LIMIT results, official uploads first. */
+export async function search(
+  query: string,
+  source: SearchSource,
+): Promise<SearchResult[]> {
   const target = searchTarget(source, query);
-  if (!target) throw new YtDlpError(`search is not supported for ${source}; paste a link instead`, 400);
+  if (!target)
+    throw new YtDlpError(
+      `search is not supported for ${source}; paste a link instead`,
+      400,
+    );
   const info = await runYtDlpJson([
     '-J',
     '--flat-playlist',
@@ -229,25 +406,156 @@ export async function search(query: string, source: SearchSource): Promise<Searc
     target,
   ]);
   const site = source;
-  return (info.entries ?? [])
-    .filter((e): e is YtDlpInfo => !!e && (e._type === undefined || e._type === 'url' || e._type === 'video'))
-    .map((e) => toSearchResult(e, site))
-    .filter((r): r is SearchResult => r !== null)
-    .map((r) => {
-      // Flat YouTube Music entries carry only id + title; the thumbnail is derivable.
-      if (!r.thumbnailUrl && (site === 'youtube' || site === 'ytmusic') && /^[\w-]{11}$/.test(r.id)) {
-        r.thumbnailUrl = `https://i.ytimg.com/vi/${r.id}/hqdefault.jpg`;
-      }
-      return r;
-    })
+  const mapped = (info.entries ?? [])
+    .filter(
+      (e): e is YtDlpInfo =>
+        !!e &&
+        (e._type === undefined || e._type === 'url' || e._type === 'video'),
+    )
+    .map((e) => ({
+      raw: clean(e.title) ?? '',
+      result: toSearchResult(e, site),
+    }))
+    .filter(
+      (x): x is { raw: string; result: SearchResult } => x.result !== null,
+    )
     .slice(0, SEARCH_LIMIT);
+  const results = rankByRelevance(mapped, query, (x) => x.raw).map(
+    (x) => x.result,
+  );
+
+  await enrichMissingArtists(results);
+
+  for (const r of results) {
+    // Flat YouTube Music entries carry only id + title; the thumbnail is derivable.
+    if (
+      !r.thumbnailUrl &&
+      (site === 'youtube' || site === 'ytmusic') &&
+      /^[\w-]{11}$/.test(r.id)
+    ) {
+      r.thumbnailUrl = `https://i.ytimg.com/vi/${r.id}/hqdefault.jpg`;
+    }
+  }
+  return results;
+}
+
+/** Parallel per-result metadata lookups during one search. */
+const ENRICH_CONCURRENCY = 3;
+/** A search stops waiting for lookups after this long and answers with what it has. */
+const ENRICH_BUDGET_MS = 15_000;
+const ENRICH_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ENRICH_CACHE_MAX = 1000;
+/** Only these sites are looked up again (their URLs come straight from a yt-dlp search). */
+const ENRICH_SITES = new Set(['youtube', 'ytmusic', 'soundcloud']);
+
+type TrackMeta = Pick<
+  SearchResult,
+  'title' | 'artist' | 'durationSec' | 'thumbnailUrl'
+>;
+const metaCache = new Map<string, { meta: TrackMeta; expires: number }>();
+
+function cachedMeta(key: string): TrackMeta | undefined {
+  const hit = metaCache.get(key);
+  if (!hit) return undefined;
+  if (hit.expires <= Date.now()) {
+    metaCache.delete(key);
+    return undefined;
+  }
+  return hit.meta;
+}
+
+function cacheMeta(key: string, meta: TrackMeta): void {
+  metaCache.delete(key);
+  metaCache.set(key, { meta, expires: Date.now() + ENRICH_CACHE_TTL_MS });
+  while (metaCache.size > ENRICH_CACHE_MAX) {
+    const oldest = metaCache.keys().next().value;
+    if (oldest === undefined) break;
+    metaCache.delete(oldest);
+  }
+}
+
+function applyMeta(r: SearchResult, meta: TrackMeta): void {
+  r.artist = meta.artist;
+  if (meta.title) r.title = meta.title;
+  if (r.durationSec === undefined && meta.durationSec !== undefined)
+    r.durationSec = meta.durationSec;
+  if (!r.thumbnailUrl && meta.thumbnailUrl) r.thumbnailUrl = meta.thumbnailUrl;
+}
+
+/**
+ * Fills in results that came back without an artist (YouTube Music flat
+ * search has none) with one `-J --no-playlist` lookup each, through the
+ * global yt-dlp limiter, a few at a time, cached by id. Lookup failures and
+ * lookups past the time budget leave the result as it was.
+ */
+async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
+  const todo: SearchResult[] = [];
+  for (const r of results) {
+    if (
+      r.artist ||
+      !ENRICH_SITES.has(siteFromUrl(r.url)) ||
+      !r.url.startsWith('https://')
+    )
+      continue;
+    const meta = cachedMeta(`${r.site}:${r.id}`);
+    if (meta) applyMeta(r, meta);
+    else todo.push(r);
+  }
+  if (!todo.length) return;
+
+  let next = 0;
+  let expired = false;
+  const worker = async (): Promise<void> => {
+    while (!expired && next < todo.length) {
+      const r = todo[next++];
+      try {
+        const info = await runYtDlpJson(['-J', '--no-playlist', '--', r.url]);
+        const full = toSearchResult(
+          {
+            ...info,
+            id: clean(info.id) ?? r.id,
+            webpage_url: clean(info.webpage_url) ?? r.url,
+          },
+          r.site,
+        );
+        if (!full?.artist) continue;
+        const meta: TrackMeta = { title: full.title, artist: full.artist };
+        if (full.durationSec !== undefined) meta.durationSec = full.durationSec;
+        if (full.thumbnailUrl) meta.thumbnailUrl = full.thumbnailUrl;
+        cacheMeta(`${r.site}:${r.id}`, meta);
+        if (!expired) applyMeta(r, meta);
+      } catch {
+        // Keep the flat result; a failed lookup never fails the search.
+      }
+    }
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ENRICH_BUDGET_MS);
+    timer.unref?.();
+  });
+  const workers = Array.from(
+    { length: Math.min(ENRICH_CONCURRENCY, todo.length) },
+    worker,
+  );
+  await Promise.race([Promise.all(workers), budget]);
+  clearTimeout(timer);
+  expired = true;
 }
 
 /** Metadata for one already-validated URL (no download). */
 export async function resolveUrl(url: string): Promise<SearchResult> {
   const info = await runYtDlpJson(['-J', '--no-playlist', '--', url]);
-  if (info._type === 'playlist') throw new YtDlpError('playlists are not supported; use a single track link', 400);
-  const result = toSearchResult(info, siteFromUrl(clean(info.webpage_url) ?? url));
+  if (info._type === 'playlist')
+    throw new YtDlpError(
+      'playlists are not supported; use a single track link',
+      400,
+    );
+  const result = toSearchResult(
+    info,
+    siteFromUrl(clean(info.webpage_url) ?? url),
+  );
   if (!result) throw new YtDlpError('yt-dlp returned no usable metadata');
   return result;
 }
@@ -296,19 +604,31 @@ export function expiresAtOf(mediaUrl: string): string | undefined {
  */
 export function toStreamResponse(info: YtDlpInfo): StreamResponse {
   if (info._type === 'playlist') {
-    throw new YtDlpError('playlists are not supported; use a single track link', 400);
+    throw new YtDlpError(
+      'playlists are not supported; use a single track link',
+      400,
+    );
   }
   const mediaUrl = clean(info.url);
   if (!mediaUrl || !/^https?:\/\//.test(mediaUrl)) {
     throw new YtDlpError('no direct audio link for this page', 422);
   }
-  if (!/^https?$/.test(info.protocol ?? '') || /\.m3u8?(\?|$)/i.test(mediaUrl)) {
-    throw new YtDlpError('this source only offers segmented streams, which are not supported', 422);
+  if (
+    !/^https?$/.test(info.protocol ?? '') ||
+    /\.m3u8?(\?|$)/i.test(mediaUrl)
+  ) {
+    throw new YtDlpError(
+      'this source only offers segmented streams, which are not supported',
+      422,
+    );
   }
 
   const response: StreamResponse = {
     url: mediaUrl,
-    track: { title: clean(info.track) ?? clean(info.title) ?? 'Untitled', artist: artistOf(info) },
+    track: {
+      title: clean(info.track) ?? clean(info.title) ?? 'Untitled',
+      artist: artistOf(info),
+    },
   };
   const ext = clean(info.ext)?.toLowerCase();
   if (ext && MIME_BY_EXT[ext]) response.mimeType = MIME_BY_EXT[ext];
@@ -321,7 +641,10 @@ export function toStreamResponse(info: YtDlpInfo): StreamResponse {
 
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(info.http_headers ?? {})) {
-    if ((STREAM_HEADERS as readonly string[]).includes(name.toLowerCase()) && typeof value === 'string') {
+    if (
+      (STREAM_HEADERS as readonly string[]).includes(name.toLowerCase()) &&
+      typeof value === 'string'
+    ) {
       headers[name] = value;
     }
   }
@@ -337,7 +660,17 @@ export function toStreamResponse(info: YtDlpInfo): StreamResponse {
 }
 
 /** Resolves a validated page URL to a direct, playable audio link (nothing is downloaded). */
-export async function resolveStream(url: string, quality: AudioQuality = 'highest'): Promise<StreamResponse> {
-  const info = await runYtDlpJson(['-J', '--no-playlist', '-f', streamFormatFor(quality), '--', url]);
+export async function resolveStream(
+  url: string,
+  quality: AudioQuality = 'highest',
+): Promise<StreamResponse> {
+  const info = await runYtDlpJson([
+    '-J',
+    '--no-playlist',
+    '-f',
+    streamFormatFor(quality),
+    '--',
+    url,
+  ]);
   return toStreamResponse(info);
 }

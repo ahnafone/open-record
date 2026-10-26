@@ -41,6 +41,27 @@ describe('remote provider', () => {
     ]);
   });
 
+  it('fills a missing artist from lookupArtist, falling back to Unknown artist on failure', async () => {
+    const transport = fakeTransport(200, {
+      results: [
+        { title: 'Feeling Good', url: 'https://www.youtube.com/watch?v=a', site: 'youtube' },
+        { title: 'Mystery', url: 'https://www.youtube.com/watch?v=b', site: 'youtube' },
+      ],
+    });
+    const lookupArtist = vi.fn(async ({ title }: { title: string }) => {
+      if (title === 'Mystery') throw new Error('offline');
+      return 'Nina Simone';
+    });
+    const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport, lookupArtist });
+
+    const tracks = await provider.searchSite('x', 'youtube');
+    await provider.searchSite('x', 'youtube');
+
+    expect(tracks.map((t) => t.artist)).toEqual(['Nina Simone', 'Unknown artist']);
+    // Hits are cached per track id; failures are retried.
+    expect(lookupArtist).toHaveBeenCalledTimes(3);
+  });
+
   it('turns 401 into a typed AuthError', async () => {
     const client = new RemoteClient({ baseUrl: 'http://192.168.1.20:8080', token: 'wrong' }, fakeTransport(401, { error: 'Unauthorized' }));
     await expect(client.search('anything')).rejects.toBeInstanceOf(AuthError);

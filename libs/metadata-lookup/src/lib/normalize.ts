@@ -31,9 +31,21 @@ export function fold(s: string): string {
     .replace(/\s+/g, ' ');
 }
 
+/**
+ * Drops bracketed translations/transliterations with no Latin letters, e.g.
+ * "Cheye Dekho (চেয়ে দেখো)", when the rest of the title is Latin.
+ */
+function stripScriptBrackets(s: string): string {
+  const BRACKET = /[([{【「]([^)\]}】」]*)[)\]}】」]/g;
+  if (!/\p{Script=Latin}/u.test(s.replace(BRACKET, ' '))) return s;
+  return s.replace(BRACKET, (whole, inner: string) =>
+    /\p{L}/u.test(inner) && !/\p{Script=Latin}/u.test(inner) ? ' ' : whole,
+  );
+}
+
 /** Normalises a track title: drops upload noise and featured artists. */
 export function normalizeTitle(title: string): string {
-  let s = stripNoiseBrackets(title);
+  let s = stripScriptBrackets(stripNoiseBrackets(title));
   s = stripFeat(s);
   // Bare trailing noise without brackets, e.g. "Song - Official Video" / "Song | Lyrics".
   s = s.replace(/\s[-|]\s*(official.*|lyrics?.*|audio|video|hd|hq)$/i, ' ');

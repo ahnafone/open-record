@@ -4,7 +4,7 @@ Everything that needs a server: accounts, sync, realtime collaboration, hardenin
 
 ## Goals
 
-- [ ] Accounts and sign-in
+- [x] Accounts and sign-in: in scope via Supabase; email sign-in shipped in v1 (optional, untested on device)
 - [ ] Sync library/playlists across devices (offline-first, v1 local store stays source of truth on device)
 - [ ] Realtime collaborative playlists; Collaborators screen goes live
 - [ ] Harden and multi-user the existing downloader server (see below)
@@ -22,11 +22,11 @@ Everything that needs a server: accounts, sync, realtime collaboration, hardenin
 | Effort | Low | Low | High |
 | Custom jobs (downloader, exists as Fastify) | Edge functions / separate service | Cloud Functions | Native fit |
 
-**Recommendation:** Supabase for auth, Postgres (RLS enforces Owner/Editor/Viewer), realtime and storage. The downloader already exists as a small Fastify app (`apps/server`); keep it as a separate service for long-running jobs and put it behind the same accounts instead of rewriting it in NestJS. Reason: relational playlist/membership data fits Postgres, roles map cleanly to RLS, and open source keeps self-hosting possible. Confirm with a short spike before committing.
+**Decision:** Supabase is chosen (accounts started; schema in `supabase/migrations`, SQL untested on real Postgres). **Recommendation:** Supabase for auth, Postgres (RLS enforces Owner/Editor/Viewer), realtime and storage. The downloader already exists as a small Fastify app (`apps/server`); keep it as a separate service for long-running jobs and put it behind the same accounts instead of rewriting it in NestJS. Reason: relational playlist/membership data fits Postgres, roles map cleanly to RLS, and open source keeps self-hosting possible. Confirm with a short spike before committing.
 
 ## Auth and privacy
 
-- [ ] Email + OAuth providers; anonymous local use remains possible
+- [x] Email sign-in (anonymous local use remains possible); [ ] OAuth providers, set-new-password screen, encrypted session storage
 - [ ] Roles Owner/Editor/Viewer enforced server-side (RLS), not only in the client
 - [ ] Private/Public playlist visibility enforced server-side
 - [ ] Minimal data collection; export and delete-account flows
@@ -34,6 +34,8 @@ Everything that needs a server: accounts, sync, realtime collaboration, hardenin
 - [ ] Security tests (permanent suite): role enforcement, visibility, auth bypass
 
 ## Sync
+
+M3.7 PC web + Supabase sync: first version shipped (last-write-wins sync of metadata, saved songs, playlists).
 
 - [ ] Server schema: users, tracks (metadata refs), playlists, members, library items
 - [ ] Offline queue, last-write-wins per field with conflict rules for playlist order
@@ -55,9 +57,9 @@ Everything that needs a server: accounts, sync, realtime collaboration, hardenin
 
 v1 ships `apps/server` (Fastify + yt-dlp, Docker): single user, one shared bearer token. It only searches and returns direct stream links (no downloads, tags or file serving); the device downloads saved songs. It runs only on a server since yt-dlp needs a native process. v2 work:
 
-- [ ] Accounts and auth: replace `OPEN_RECORD_TOKEN` with per-user credentials (tokens or sessions), revocable
+- [ ] Accounts and auth: server already accepts Supabase JWTs next to `OPEN_RECORD_TOKEN` (per-user rate limits); the app now sends the user JWT (M3.8) and the UI no longer asks for the shared token; still to do: retiring the shared token on the server, revocation
 - [ ] Multi-user: per-user quotas and resolve limits; no cross-user cache sharing
-- [ ] Secure token storage in the app (Keychain / Keystore plugin) instead of plain text in the settings collection
+- [ ] Secure session storage in the app (Keychain / Keystore plugin) instead of plain text
 - [ ] Optional server-side proxy so links work off the home network (reintroduces bandwidth load; needs quotas)
 - [ ] Rate and abuse controls: per-user limits, concurrency quotas, audit log
 - [ ] Hardening against DNS rebinding: the URL guard checks the resolved address, but yt-dlp resolves again and follows redirects; pin resolved IPs or run yt-dlp in an egress-restricted network namespace/container
@@ -79,8 +81,8 @@ v1 ships `apps/server` (Fastify + yt-dlp, Docker): single user, one shared beare
 
 ## Milestones
 
-- [ ] M1 Spike: pick backend, schema, auth
-- [ ] M2 Auth + sync
+- [x] M1 Spike: Supabase picked; initial schema and auth done (untested on real Postgres)
+- [x] M2 Auth + sync (done in v1 M3.7: metadata, saved songs and playlists, last-write-wins; untested against real Supabase; offline queue and playlist-order rules still open)
 - [ ] M3 Realtime collaboration + Collaborators screen live
 - [ ] M4 Cloud storage (optional)
 - [ ] M5 Downloader hardening and multi-user (server exists since v1 M3.5), after legal review

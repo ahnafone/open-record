@@ -12,6 +12,7 @@ import {
   OfflineStore,
   PlayerStore,
   REMOTE_PROVIDER_ID,
+  AuthStore,
 } from '@open-record/state';
 import {
   OrEmptyState,
@@ -63,6 +64,8 @@ export function formatTime(totalSec: number): string {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (player.current(); as track) {
+      <div class="np">
+      <div class="np-art">
       <or-sleeve
         class="stage"
         size="large"
@@ -72,7 +75,8 @@ export function formatTime(totalSec: number): string {
         [playing]="player.isPlaying()"
         [lazy]="false"
       />
-
+      </div>
+      <div class="np-body">
       <div class="meta">
         <span class="eyebrow">{{
           player.isPlaying() ? 'On the turntable' : 'Paused'
@@ -210,6 +214,8 @@ export function formatTime(totalSec: number): string {
       } @else {
         <or-empty-state>Nothing else is queued after this record.</or-empty-state>
       }
+      </div>
+      </div>
     } @else {
       <or-empty-state class="nothing">
         <p>Nothing is playing yet. Pick a record from the crates.</p>
@@ -220,6 +226,36 @@ export function formatTime(totalSec: number): string {
   styles: `
     :host {
       display: block;
+    }
+    /* Phone and the desktop side panel: one column (wrappers are transparent). */
+    .np,
+    .np-art,
+    .np-body {
+      display: contents;
+    }
+    /* Desktop /now-playing route: sleeve left (sticky), details and queue right. */
+    @media (min-width: 900px) {
+      :host {
+        container-type: inline-size;
+      }
+      @container (min-width: 640px) {
+        .np {
+          display: grid;
+          grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+          gap: var(--spacing-xl);
+          align-items: start;
+          max-inline-size: 1100px;
+          margin-inline: auto;
+        }
+        .np-art {
+          display: block;
+          position: sticky;
+          top: 0;
+        }
+        .np-body {
+          display: block;
+        }
+      }
     }
     .stage {
       margin: 6px 0 var(--spacing-lg);
@@ -401,6 +437,7 @@ export class NowPlayingPage {
   protected readonly player = inject(PlayerStore);
   private readonly library = inject(LibraryStore);
   private readonly offline = inject(OfflineStore);
+  protected readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
 
   /** Slider value while the user drags; null follows playback. */
@@ -476,6 +513,7 @@ export class NowPlayingPage {
   }
 
   protected async toggleSaved(track: Track): Promise<void> {
+    if (!this.library.isSaved(track.id) && !this.auth.requireAccount()) return;
     try {
       const nowSaved = await this.library.toggleSaved(track.id);
       this.toast.show(

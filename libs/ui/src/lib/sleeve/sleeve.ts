@@ -163,13 +163,13 @@ function isPromiseLike(
     /* booth: Browse hero stage, sleeve overlapping a large disc */
     :host(.size-booth) {
       inline-size: 100%;
-      aspect-ratio: 1.34 / 1;
-      overflow: hidden;
+      /* As tall as the sleeve (68% of the width) so nothing is cropped. */
+      aspect-ratio: 1 / 0.68;
     }
     :host(.size-booth) .disc {
       right: 0;
-      top: 7%;
-      inline-size: 74%;
+      top: 0;
+      inline-size: 68%;
     }
     :host(.size-booth) .art {
       position: absolute;

@@ -1,30 +1,36 @@
 import {
+  booleanAttribute,
   ChangeDetectionStrategy,
   Component,
   computed,
   inject,
-  linkedSignal,
+  input,
   signal,
 } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
-import { AuthStore } from '@open-record/state';
+import { AuthStore, SyncStore } from '@open-record/state';
 import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-record/ui';
 
 /**
- * Settings "Account" section: optional Supabase sign-in. Shown only when the
- * app is built with accounts (an AuthPort). Without a project the app stays
- * fully usable; this section explains that and lets the user add one.
+ * Settings "Account" section: Supabase email/password sign-in. The project
+ * comes from the build or the download server; users never enter it. When the
+ * server has no accounts set up, this says so and the app stays browse-only.
  */
 @Component({
   selector: 'or-account-section',
   imports: [NgTemplateOutlet, OrButton, OrIcon, OrSectionHead, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <or-section-head heading="Account" />
-    <p class="lede">
-      Accounts are optional. Everything works on this device without one;
-      signing in prepares your library for syncing across devices.
-    </p>
+    @if (!compact()) {
+      <or-section-head heading="Account" />
+      <p class="lede">
+        Browse and play without an account. Sign in to save music, build
+        playlists and import your library.
+        @if (sync.available) {
+          Your library and playlists (not audio files) sync across your devices.
+        }
+      </p>
+    }
 
     @switch (view()) {
       @case ('loading') {
@@ -32,64 +38,46 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
           <span class="muted"><or-spinner [size]="14" />Checking your account…</span>
         </p>
       }
-      @case ('project') {
-        <form class="form" (submit)="saveProject($event)">
-          <label class="field-label" for="or-auth-url">Supabase project URL</label>
-          <input
-            id="or-auth-url"
-            class="input"
-            type="url"
-            inputmode="url"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            placeholder="https://xyz.supabase.co"
-            aria-describedby="or-auth-status"
-            [attr.aria-invalid]="auth.error() ? 'true' : null"
-            [value]="projectUrl()"
-            (input)="projectUrl.set(value($event))"
-          />
-          <label class="field-label" for="or-auth-key">Anon key</label>
-          <input
-            id="or-auth-key"
-            class="input"
-            type="password"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            aria-describedby="or-auth-status"
-            [attr.aria-invalid]="auth.error() ? 'true' : null"
-            [value]="projectKey()"
-            (input)="projectKey.set(value($event))"
-          />
-          <div class="actions">
-            <or-button
-              type="submit"
-              [disabled]="auth.busy() || !projectUrl().trim() || !projectKey().trim()"
-              >Save project</or-button
+      @case ('unconfigured') {
+        <p class="note">
+          Accounts are not set up, or this device can't reach the server yet.
+          Check the server address below, then try again.
+        </p>
+        <or-button size="sm" (click)="auth.refresh()">Try again</or-button>
+      }
+      @case ('recovery') {
+        <form class="form" (submit)="saveNewPassword($event)">
+          <label class="field-label" for="or-auth-new-password">New password</label>
+          <div class="pw">
+            <input
+              id="or-auth-new-password"
+              class="input"
+              [type]="showPassword() ? 'text' : 'password'"
+              autocomplete="new-password"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-describedby="or-auth-status"
+              [attr.aria-invalid]="auth.error() ? 'true' : null"
+              [value]="password()"
+              (input)="password.set(value($event))"
+            />
+            <button
+              type="button"
+              class="pw-toggle"
+              [attr.aria-label]="showPassword() ? 'Hide password' : 'Show password'"
+              [attr.aria-pressed]="showPassword()"
+              (click)="showPassword.set(!showPassword())"
             >
-            @if (auth.project()) {
-              <or-button [disabled]="auth.busy()" (click)="editingProject.set(false)"
-                >Cancel</or-button
-              >
-            }
+              <or-icon [name]="showPassword() ? 'eye-off' : 'eye'" [size]="20" />
+            </button>
+          </div>
+          <div class="actions">
+            <or-button type="submit" variant="primary" [disabled]="auth.busy()"
+              >Save new password</or-button
+            >
           </div>
           <ng-container *ngTemplateOutlet="status" />
         </form>
-        <p class="note">
-          Use your hosted Supabase project or a local one from the Supabase
-          CLI. Find both values under Project Settings, API.
-        </p>
-        @if (auth.project()) {
-          <button
-            type="button"
-            class="text-link"
-            [disabled]="auth.busy()"
-            (click)="removeProject()"
-          >
-            Stop using accounts on this device
-          </button>
-        }
       }
       @case ('signedOut') {
         <form class="form" (submit)="signIn($event)">
@@ -108,16 +96,29 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
             (input)="email.set(value($event))"
           />
           <label class="field-label" for="or-auth-password">Password</label>
-          <input
-            id="or-auth-password"
-            class="input"
-            type="password"
-            [attr.autocomplete]="creating() ? 'new-password' : 'current-password'"
-            aria-describedby="or-auth-status"
-            [attr.aria-invalid]="auth.error() ? 'true' : null"
-            [value]="password()"
-            (input)="password.set(value($event))"
-          />
+          <div class="pw">
+            <input
+              id="or-auth-password"
+              class="input"
+              [type]="showPassword() ? 'text' : 'password'"
+              [attr.autocomplete]="creating() ? 'new-password' : 'current-password'"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-describedby="or-auth-status"
+              [attr.aria-invalid]="auth.error() ? 'true' : null"
+              [value]="password()"
+              (input)="password.set(value($event))"
+            />
+            <button
+              type="button"
+              class="pw-toggle"
+              [attr.aria-label]="showPassword() ? 'Hide password' : 'Show password'"
+              [attr.aria-pressed]="showPassword()"
+              (click)="showPassword.set(!showPassword())"
+            >
+              <or-icon [name]="showPassword() ? 'eye-off' : 'eye'" [size]="20" />
+            </button>
+          </div>
           <div class="actions">
             @if (creating()) {
               <or-button type="submit" variant="primary" [disabled]="auth.busy()"
@@ -148,11 +149,6 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
               Forgot password?
             </button>
           }
-          @if (!auth.projectLocked) {
-            <button type="button" class="text-link" (click)="editingProject.set(true)">
-              Change project
-            </button>
-          }
         </div>
       }
       @case ('signedIn') {
@@ -163,7 +159,31 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
             <strong>{{ auth.user()?.email || 'your account' }}</strong>
           </span>
         </div>
-        <or-button block [disabled]="auth.busy()" (click)="signOut()">Sign out</or-button>
+        @if (sync.available) {
+          <p class="status sync-line" role="status" aria-live="polite">
+            @switch (sync.status()) {
+              @case ('syncing') {
+                <span class="muted"><or-spinner [size]="14" />Syncing your library…</span>
+              }
+              @case ('error') {
+                <span class="bad"><or-icon name="alert" [size]="14" />{{ sync.error() }}</span>
+              }
+              @default {
+                <span class="muted">{{ syncedLabel() }}</span>
+              }
+            }
+          </p>
+          <div class="actions">
+            <or-button
+              [disabled]="auth.busy() || sync.status() === 'syncing'"
+              (click)="syncNow()"
+              >Sync now</or-button
+            >
+            <or-button [disabled]="auth.busy()" (click)="signOut()">Sign out</or-button>
+          </div>
+        } @else {
+          <or-button block [disabled]="auth.busy()" (click)="signOut()">Sign out</or-button>
+        }
         <ng-container *ngTemplateOutlet="status" />
       }
     }
@@ -216,6 +236,34 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
       border-radius: var(--rounded-md);
       outline: none;
       transition: border-color var(--duration-fast) var(--ease-standard);
+    }
+    .pw {
+      display: grid;
+    }
+    .pw > * {
+      grid-area: 1 / 1;
+    }
+    .pw .input {
+      padding-inline-end: var(--spacing-touch);
+    }
+    .pw-toggle {
+      justify-self: end;
+      inline-size: var(--spacing-touch);
+      block-size: var(--spacing-touch);
+      display: inline-grid;
+      place-items: center;
+      color: var(--color-muted);
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      cursor: pointer;
+    }
+    .pw-toggle[aria-pressed='true'] {
+      color: var(--color-primary);
+    }
+    .pw-toggle:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
     }
     .input::placeholder {
       color: var(--color-muted);
@@ -285,6 +333,9 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
       margin-bottom: var(--spacing-sm);
       font-size: 14px;
     }
+    .sync-line {
+      margin: 0;
+    }
     .who {
       min-inline-size: 0;
       overflow-wrap: anywhere;
@@ -298,22 +349,38 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
 })
 export class AccountSection {
   protected readonly auth = inject(AuthStore);
+  protected readonly sync = inject(SyncStore);
   private readonly toast = inject(OrToast);
 
   protected readonly email = signal('');
   protected readonly password = signal('');
   protected readonly creating = signal(false);
-  protected readonly editingProject = signal(false);
-  protected readonly projectUrl = linkedSignal(() => this.auth.project()?.url ?? '');
-  protected readonly projectKey = linkedSignal(() => this.auth.project()?.anonKey ?? '');
+  protected readonly showPassword = signal(false);
+  /** Form only (no heading or lede), for the "Sign in to continue" modal. */
+  readonly compact = input(false, { transform: booleanAttribute });
 
   protected readonly view = computed(() => {
     const status = this.auth.status();
+    if (this.auth.recovering()) return 'recovery';
     if (status === 'loading') return 'loading';
-    if (status === 'unconfigured' || (this.editingProject() && !this.auth.projectLocked))
-      return 'project';
+    if (status === 'unconfigured') return 'unconfigured';
     return status === 'signedIn' ? 'signedIn' : 'signedOut';
   });
+
+  protected readonly syncedLabel = computed(() => {
+    const at = this.sync.lastSyncedAt();
+    if (!at) return 'Not synced yet on this device.';
+    const when = new Date(at).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    return `Last synced ${when}`;
+  });
+
+  protected async syncNow(): Promise<void> {
+    await this.sync.syncNow();
+    if (this.sync.status() === 'idle') this.toast.show('Library synced');
+  }
 
   protected value(event: Event): string {
     return (event.target as HTMLInputElement).value;
@@ -322,22 +389,6 @@ export class AccountSection {
   protected setCreating(on: boolean): void {
     this.creating.set(on);
     this.auth.clearMessages();
-  }
-
-  protected async saveProject(event: Event): Promise<void> {
-    event.preventDefault();
-    const ok = await this.auth.setProject({ url: this.projectUrl(), anonKey: this.projectKey() });
-    if (ok) {
-      this.editingProject.set(false);
-      this.toast.show('Account project saved');
-    }
-  }
-
-  protected async removeProject(): Promise<void> {
-    if (await this.auth.setProject(null)) {
-      this.editingProject.set(false);
-      this.toast.show('Accounts turned off on this device');
-    }
   }
 
   protected async signIn(event: Event): Promise<void> {
@@ -349,6 +400,14 @@ export class AccountSection {
     this.password.set('');
     if (this.auth.signedIn()) this.toast.show('Signed in');
     else if (this.creating()) this.creating.set(false);
+  }
+
+  protected async saveNewPassword(event: Event): Promise<void> {
+    event.preventDefault();
+    if (await this.auth.setNewPassword(this.password())) {
+      this.password.set('');
+      this.toast.show('Password updated');
+    }
   }
 
   protected async resetPassword(): Promise<void> {

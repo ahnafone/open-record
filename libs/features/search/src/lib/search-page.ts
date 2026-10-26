@@ -12,7 +12,16 @@ import {
   viewChild,
 } from '@angular/core';
 import type { Track } from '@open-record/models';
-import { LibraryStore, PlayerStore } from '@open-record/state';
+import {
+  AuthStore,
+  LibraryStore,
+  OfflineStore,
+  PlayerStore,
+  REMOTE_PROVIDER_ID,
+  downloadState,
+  formatDuration,
+  sourceLabel,
+} from '@open-record/state';
 import {
   OrButton,
   OrChip,
@@ -33,6 +42,131 @@ import {
 } from './search-query';
 import { DownloadSources } from './download-sources';
 import { injectTrackArt } from './track-art';
+
+/** Result row styles (kept apart from the page sheet). */
+const ROW_STYLES = `
+    /* Record rows: separated by hairlines, not boxed. */
+    .crate {
+      display: grid;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      transition: opacity var(--duration-fast) var(--ease-standard);
+    }
+    .crate.is-stale {
+      opacity: 0.6;
+    }
+    .record {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto 44px;
+      align-items: center;
+      gap: var(--spacing-xs);
+      padding: var(--spacing-xxs) 0;
+      border-block-start: 1px solid
+        color-mix(in srgb, var(--color-border) 32%, transparent);
+    }
+    .record:first-child {
+      border-block-start: 0;
+    }
+    .record-main {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      min-block-size: 72px;
+      min-inline-size: 0;
+      padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-xs)
+        var(--spacing-xs);
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      color: inherit;
+      font: inherit;
+      text-align: start;
+      cursor: pointer;
+      transition:
+        background var(--duration-fast) var(--ease-standard),
+        transform var(--duration-fast) var(--ease-standard);
+    }
+    .record-main:hover {
+      background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    }
+    .record-main:active {
+      transform: scale(0.97);
+    }
+    .record-main:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+    .info {
+      display: grid;
+      gap: var(--spacing-xxs);
+      min-inline-size: 0;
+    }
+    .info > span {
+      min-inline-size: 0;
+    }
+    .title {
+      font-size: var(--type-row-title-font-size);
+      font-weight: var(--type-row-title-font-weight);
+      line-height: var(--type-row-title-line-height);
+      overflow-wrap: anywhere;
+    }
+    .record.is-current .title {
+      color: var(--color-primary);
+    }
+    .artist {
+      font-size: 13px;
+      line-height: 1.35;
+      color: var(--color-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .detail {
+      font-size: var(--type-meta-font-size);
+      line-height: var(--type-meta-line-height);
+      letter-spacing: var(--type-meta-letter-spacing);
+      color: var(--color-muted);
+    }
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--spacing-xs);
+      margin-block-start: 1px;
+    }
+    or-tag.tag-failed {
+      color: var(--color-primary);
+      border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+    }
+    .dur {
+      font-size: 12px;
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+      text-align: end;
+    }
+
+    /* Desktop: results flow into responsive columns. */
+    @media (min-width: 900px) {
+      .crate {
+        grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+        column-gap: var(--spacing-lg);
+      }
+      .record,
+      .record:first-child {
+        border-block-start: 0;
+        border-block-end: 1px solid
+          color-mix(in srgb, var(--color-border) 32%, transparent);
+      }
+      .record-main {
+        min-block-size: 64px;
+      }
+      .record-main:hover {
+        background: var(--color-surface-raised);
+      }
+    }
+
+`;
 
 /**
  * Search screen: a search field, genre/decade suggestion chips and record rows
@@ -127,6 +261,10 @@ import { injectTrackArt } from './track-art';
         @for (t of hits(); track t.id) {
           @let current = player.isCurrent(t.id);
           @let saved = library.isSaved(t.id);
+          @let status = offline.status(t.id);
+          @let state = downloadState(status);
+          @let source = sourceLabel(t.source?.site);
+          @let streamOnly = !status && t.providerId === remoteId;
           <li class="record" [class.is-current]="current">
             <button
               class="record-main"
@@ -142,12 +280,12 @@ import { injectTrackArt } from './track-art';
               />
               <span class="info">
                 <span class="title">{{ t.title }}</span>
-                <span class="artist">{{ t.artist }}</span>
+                <span class="artist">{{ t.artist }}@if (t.album) { · {{ t.album }}}</span>
                 @if (detail(t); as d) {
                   <span class="detail">{{ d }}</span>
                 }
                 @let imported = library.isImported(t);
-                @if (current || imported || t.tags?.length) {
+                @if (current || imported || source || state || streamOnly || t.tags?.length) {
                   <span class="tags">
                     @if (current) {
                       <or-tag ivory icon="disc">{{
@@ -157,6 +295,24 @@ import { injectTrackArt } from './track-art';
                     @if (imported) {
                       <or-tag ivory>Imported</or-tag>
                     }
+                    @if (source) {
+                      <or-tag>{{ source }}</or-tag>
+                    }
+                    @if (state) {
+                      @switch (state.kind) {
+                        @case ('saved') {
+                          <or-tag icon="check">{{ state.label }}</or-tag>
+                        }
+                        @case ('downloading') {
+                          <or-tag><or-spinner [size]="12" />{{ state.label }}</or-tag>
+                        }
+                        @case ('failed') {
+                          <or-tag class="tag-failed" icon="alert">{{ state.label }}</or-tag>
+                        }
+                      }
+                    } @else if (streamOnly) {
+                      <or-tag>Streaming only</or-tag>
+                    }
                     @for (tag of t.tags?.slice(0, 2); track tag) {
                       <or-tag>{{ tag }}</or-tag>
                     }
@@ -164,6 +320,7 @@ import { injectTrackArt } from './track-art';
                 }
               </span>
             </button>
+            <span class="dur">{{ formatDuration(t.durationSec) }}</span>
             <or-icon-button
               icon="bookmark"
               [pressed]="saved"
@@ -185,7 +342,10 @@ import { injectTrackArt } from './track-art';
       [query]="hasQuery() ? settledText() : ''"
     />
   `,
-  styles: `
+  // Two sheets so each stays inside the per-stylesheet budget.
+  styles: [
+    ROW_STYLES,
+    `
     :host {
       display: block;
     }
@@ -279,97 +439,6 @@ import { injectTrackArt } from './track-art';
       margin-block-start: var(--spacing-lg);
     }
 
-    /* Record rows: separated by hairlines, not boxed. */
-    .crate {
-      display: grid;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      transition: opacity var(--duration-fast) var(--ease-standard);
-    }
-    .crate.is-stale {
-      opacity: 0.6;
-    }
-    .record {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: var(--spacing-xs);
-      padding: var(--spacing-xxs) 0;
-      border-block-start: 1px solid
-        color-mix(in srgb, var(--color-border) 32%, transparent);
-    }
-    .record:first-child {
-      border-block-start: 0;
-    }
-    .record-main {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: center;
-      gap: 10px;
-      min-block-size: 72px;
-      min-inline-size: 0;
-      padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-xs)
-        var(--spacing-xs);
-      background: transparent;
-      border: 0;
-      border-radius: var(--rounded-md);
-      color: inherit;
-      font: inherit;
-      text-align: start;
-      cursor: pointer;
-      transition:
-        background var(--duration-fast) var(--ease-standard),
-        transform var(--duration-fast) var(--ease-standard);
-    }
-    .record-main:hover {
-      background: color-mix(in srgb, var(--color-text) 5%, transparent);
-    }
-    .record-main:active {
-      transform: scale(0.97);
-    }
-    .record-main:focus-visible {
-      outline: 2px solid var(--color-primary);
-      outline-offset: 2px;
-    }
-    .info {
-      display: grid;
-      gap: var(--spacing-xxs);
-      min-inline-size: 0;
-    }
-    .info > span {
-      min-inline-size: 0;
-    }
-    .title {
-      font-size: var(--type-row-title-font-size);
-      font-weight: var(--type-row-title-font-weight);
-      line-height: var(--type-row-title-line-height);
-      overflow-wrap: anywhere;
-    }
-    .record.is-current .title {
-      color: var(--color-primary);
-    }
-    .artist {
-      font-size: 13px;
-      line-height: 1.35;
-      color: var(--color-muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .detail {
-      font-size: var(--type-meta-font-size);
-      line-height: var(--type-meta-line-height);
-      letter-spacing: var(--type-meta-letter-spacing);
-      color: var(--color-muted);
-    }
-    .tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: var(--spacing-xs);
-      margin-block-start: 1px;
-    }
-
     @media (prefers-reduced-motion: reduce) {
       .search-field,
       .crate,
@@ -381,10 +450,17 @@ import { injectTrackArt } from './track-art';
       }
     }
   `,
+  ],
 })
 export class SearchPage {
   protected readonly library = inject(LibraryStore);
   protected readonly player = inject(PlayerStore);
+  protected readonly auth = inject(AuthStore);
+  protected readonly offline = inject(OfflineStore);
+  protected readonly remoteId = REMOTE_PROVIDER_ID;
+  protected readonly downloadState = downloadState;
+  protected readonly sourceLabel = sourceLabel;
+  protected readonly formatDuration = formatDuration;
   private readonly toast = inject(OrToast);
   protected readonly art = injectTrackArt();
   private readonly searchInput =
@@ -479,6 +555,7 @@ export class SearchPage {
   }
 
   protected async toggleSave(track: Track): Promise<void> {
+    if (!this.library.isSaved(track.id) && !this.auth.requireAccount()) return;
     try {
       const saved = await this.library.toggleSaved(track.id);
       this.toast.show(

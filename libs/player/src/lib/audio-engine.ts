@@ -70,6 +70,11 @@ export interface AudioEngine {
   play(): Promise<void>;
   pause(): Promise<void>;
   seek(positionSec: number): Promise<void>;
+  /**
+   * Optional output gain, 0..1 (0 also covers mute). Engines without it
+   * (native: the OS owns volume) leave it out and the player hides the control.
+   */
+  setVolume?(volume: number): void;
   stop(): Promise<void>;
   destroy(): Promise<void>;
 }

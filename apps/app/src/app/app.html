@@ -1,3 +1,8 @@
+@if (isDesktop()) {
+<or-sidebar class="sidebar" />
+}
+
+@if (!isDesktop() || !screen().data.root) {
 <or-top-bar
   [root]="screen().data.root"
   [title]="title()"
@@ -5,20 +10,41 @@
   [backLabel]="screen().data.screen === 'now-playing' ? 'Close player' : 'Back'"
   (back)="back()"
 />
+}
 
 <main
   #screenHost
   class="screen-host"
+  [class.narrow]="narrow()"
   [attr.aria-label]="screen().data.title ?? null"
 >
   <router-outlet />
 </main>
 
+@if (panelShown()) {
+<aside class="np-panel" aria-label="Now playing">
+  @if (nowPlayingPanel(); as page) {
+  <ng-container *ngComponentOutlet="page" />
+  }
+</aside>
+}
+
 <div #dock class="dock">
+  @if (isDesktop()) {
+  <or-player-bar
+    [panelOpen]="panelShown() || onNowPlaying()"
+    (togglePanel)="toggleNowPlaying()"
+  />
+  } @else {
   @if (player.current()) {
   <or-mini-player (open)="openNowPlaying()" />
   }
   <or-tab-bar />
+  }
 </div>
+
+@if (signInPrompt(); as prompt) {
+<ng-container *ngComponentOutlet="prompt" />
+}
 
 <or-toast-host />

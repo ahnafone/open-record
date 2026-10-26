@@ -58,6 +58,15 @@ describe('store persistence', () => {
     expect(second.library.isSaved('fake:a')).toBe(true);
     expect(second.library.savedRecords().map((t) => t.id)).toEqual(['fake:a']);
   });
+
+  it('adding a track records addedAt and removing it clears the entry', async () => {
+    const { playlists } = boot(createInMemoryStorage());
+    const pl = await playlists.create('Dated');
+    await playlists.addTracks(pl.id, ['fake:a']);
+    expect(playlists.addedAtOf(pl.id, 'fake:a')).toEqual(expect.any(Number));
+    await playlists.removeTrack(pl.id, 'fake:a');
+    expect(playlists.addedAtOf(pl.id, 'fake:a')).toBeUndefined();
+  });
 });
 
 describe('imported tracks', () => {

@@ -1,6 +1,6 @@
 # v1: Frontend app
 
-Fully working client app, with an optional self-hosted stream-link server (see [downloader-server.md](downloader-server.md)). No accounts or cloud backend. Installable on Android and iOS, also runs in a browser.
+Fully working client app, with an optional self-hosted stream-link server (see [downloader-server.md](downloader-server.md)). No cloud backend; optional Supabase sign-in and Spotify import are the only additions (below). Installable on Android and iOS, also runs in a browser.
 
 ## Goals
 
@@ -102,7 +102,7 @@ Optional; off until a server URL and token are set. All items untested on device
 - [x] MusicBrainz and Cover Art Archive removed (code, toggle, credits, setting)
 - [x] `libs/providers/remote`: tap an unsaved result streams the link; bookmark or add to a playlist downloads it to the device in the background; removed from the library and all playlists deletes the file
 - [x] Settings > Stream server (URL, token, Test connection via `/ping`); Search > Download sources (planned rename: Find online); Android and iOS both use the server URL
-- [x] One-command start `npm run server:up` (prints LAN URL, token, QR; token persisted in `/data` or `~/.config/open-record`) and QR pairing: Settings > Stream server > Scan QR code reads `openrecord://pair?...` (both platforms scan; a pasted link also works)
+- [x] One-command start `npm run server:up` (prints one link and a QR; token persisted in `/data` or `~/.config/open-record`) and a QR for the server address: Settings > Stream server > Scan QR code (both platforms scan; superseded in part by M3.8)
 - [x] One-command mobile build scripts: `npm run android` (cap sync, then `cap run android`) and `npm run android:open` (opens Android Studio)
 - [x] LAN address chooser in `server:up`: skips 192.0.2.* and Docker bridges, prompts when several candidates exist in a terminal, `--ip` overrides
 - [x] iOS QR scanner: in-app JS scanner (jsQR); device test pending
@@ -111,6 +111,26 @@ Optional; off until a server URL and token are set. All items untested on device
 - [x] Audio quality, auto-download and preloading (all untested on device): Settings > Audio quality (streaming and download quality: Highest default, High ~160, Medium ~128, Low ~64 kbps; optional "use streaming quality for downloads"); `POST /stream` accepts optional `quality` (400 if invalid, link cache per quality); Library auto-download switch (off by default) and per-playlist auto-download switch, Wi-Fi only unless Settings > Allow auto-download on mobile data (`@capacitor/network`, needs `npx cap sync`); saved tracks always play from the device file; the player pre-resolves and preloads the next track ~15 s before the current one ends. Device test pending
 - [ ] Device test (pending): stream with the server on the LAN; bookmark, file appears and plays in airplane mode; unbookmark from library and all playlists, file deleted
 - [ ] Keep the downloader out of store builds (decide how before M5)
+
+### M3.6 Accounts and Spotify import (optional, all untested on device)
+
+- [x] Accounts: `libs/state` auth store, `apps/app/src/app/supabase-auth.ts` and `supabase.config.ts`; email sign-in via your own Supabase project (config now served by the server, see M3.8); app works without it
+- [x] `supabase/` (config.toml + initial schema migration)
+- [x] Spotify import (`libs/spotify-import`, `libs/features/import`, import store): Exportify CSV (pasted text or picked file; the wizard links to exportify.app) or Spotify data-download JSON (unzip first); no Spotify login or client ID in the app
+- [x] Background matching to YouTube Music via the stream-link server, with a review list
+- [ ] Not done: OAuth sign-in (Google etc.); set-new-password screen (password reset flow); encrypted session storage (session is plain text on device); SQL migration untested on real Postgres; device tests (sign-in, Spotify import paste and matching on Android and iOS)
+
+### M3.7 PC web + Supabase sync (untested against a real Supabase project or browser)
+
+- [x] `npm run server:up` serves the web app at the one link it prints; Exportify CSV import works in the browser
+- [x] Sync of track metadata, saved songs and playlists to Supabase (`libs/state` sync store and merge, `apps/app/src/app/supabase-sync.ts`), last-write-wins, Sync now in Settings; never audio or raw Spotify data
+
+### M3.8 Server-provided Supabase config and sign-in (untested against a real Supabase project or browser)
+
+- [x] The host sets `SUPABASE_URL` and `SUPABASE_ANON_KEY` once in `apps/server/.env` (optional `SUPABASE_JWT_SECRET` for HS256); the server serves them at public `GET /app-config`, and the web app and phone fetch them. No Supabase URL or anon key in Settings; a build-time `supabase.config.ts` still works
+- [x] `npm run server:up` prints one link (`http://<lan-ip>:8787/`); the `#pair=` link is gone. Phone QR or manual entry stores only the server address
+- [x] Browse without an account; saving tracks, adding downloads to playlists and the Import wizard need email/password sign-in. The app sends the user's Supabase token to the server; the shared token is no longer asked for in the UI
+- [ ] Not tested against a real Supabase project, in a browser, or on a device
 
 ### M4 Collaborators (stub)
 Note: the Collaborators screen is hidden in v1 (three tabs plus Settings from the top bar); it stays in the mockup and screenshots only.

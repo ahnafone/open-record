@@ -52,6 +52,11 @@ export class PlaylistsStore {
     return playlist ? this.library.resolveIds(playlist.trackIds) : [];
   }
 
+  /** Reactive: when the track was added to the playlist, if known (epoch ms). */
+  addedAtOf(playlistId: string, trackId: string): number | undefined {
+    return this.playlist(playlistId)?.addedAt?.[trackId];
+  }
+
   async create(
     name: string,
     visibility: PlaylistVisibility = 'private',
@@ -119,7 +124,10 @@ export class PlaylistsStore {
         added.push(t);
       }
       if (!added.length) return p;
-      return { ...p, trackIds: [...p.trackIds, ...added] };
+      const now = Date.now();
+      const addedAt = { ...p.addedAt };
+      for (const t of added) addedAt[t] = now;
+      return { ...p, trackIds: [...p.trackIds, ...added], addedAt };
     });
     const newlyAdded = result.trackIds.filter(
       (t) => !before?.trackIds.includes(t),
@@ -134,16 +142,30 @@ export class PlaylistsStore {
   /**
    * Create a playlist from tracks already in the library index without
    * saving any of them to the device (imports: tracks stay metadata-only
-   * until matched or downloaded). Repeated ids are dropped.
+   * until matched or downloaded). Repeated ids are dropped. `addedAt` gives
+   * known add times (epoch ms, aligned with `trackIds`); missing or invalid
+   * entries fall back to now.
    */
   async createWithTracks(
     name: string,
     trackIds: readonly string[],
+    addedAt: readonly (number | undefined)[] = [],
   ): Promise<Playlist> {
     const created = await this.create(name);
     const ids = [...new Set(trackIds)];
     if (!ids.length) return created;
-    return this.mutate(created.id, (p) => ({ ...p, trackIds: ids }));
+    const now = Date.now();
+    const times: Record<string, number> = {};
+    trackIds.forEach((id, i) => {
+      if (id in times) return;
+      const at = addedAt[i];
+      times[id] = at !== undefined && Number.isFinite(at) && at > 0 ? at : now;
+    });
+    return this.mutate(created.id, (p) => ({
+      ...p,
+      trackIds: ids,
+      addedAt: times,
+    }));
   }
 
   /**
@@ -164,7 +186,10 @@ export class PlaylistsStore {
           const trackIds = pl.trackIds
             .map((t) => (t === oldId ? newId : t))
             .filter((t) => !seen.has(t) && !!seen.add(t));
-          return { ...pl, trackIds };
+          const addedAt = { ...pl.addedAt };
+          if (oldId in addedAt && !(newId in addedAt))
+            addedAt[newId] = addedAt[oldId];
+          return { ...pl, trackIds, addedAt };
         },
         false,
       );
@@ -230,6 +255,36 @@ export class PlaylistsStore {
     await this.offline.reconcile();
   }
 
+  /**
+   * Insert or replace a playlist from the account's cloud copy, keeping its
+   * clocks (no `updatedAt` bump) and never saving tracks to the device
+   * (auto-download playlists are picked up by `AutoDownloadStore`).
+   */
+  async applySynced(playlist: Playlist): Promise<void> {
+    await this.loaded;
+    const before = this.playlist(playlist.id);
+    const next = withPrunedAddedAt({
+      ...playlist,
+      trackIds: [...playlist.trackIds],
+    });
+    if (!next.autoDownload) delete next.autoDownload;
+    const put = (p: Playlist | undefined) =>
+      this._playlists.update((all) => {
+        const rest = all.filter((x) => x.id !== playlist.id);
+        if (!p) return rest;
+        return before ? all.map((x) => (x.id === p.id ? p : x)) : [...rest, p];
+      });
+    put(next);
+    try {
+      await this.storage.playlists.save(next);
+    } catch (err) {
+      put(before);
+      throw err;
+    }
+    if (before?.trackIds.some((t) => !next.trackIds.includes(t)))
+      await this.offline.reconcile();
+  }
+
   private async mutate(
     id: string,
     change: (p: Playlist) => Playlist,
@@ -240,7 +295,8 @@ export class PlaylistsStore {
     if (!before) throw new Error(`Playlist "${id}" not found`);
     const changed = change(before);
     if (changed === before) return before;
-    const after: Playlist = { ...changed, id, updatedAt: Date.now() };
+    // Entries for tracks no longer in the playlist are dropped here.
+    const after = withPrunedAddedAt({ ...changed, id, updatedAt: Date.now() });
     const replace = (with_: Playlist) =>
       this._playlists.update((all) =>
         all.map((p) => (p.id === id ? with_ : p)),
@@ -270,6 +326,20 @@ export class PlaylistsStore {
       this._status.set('error');
     }
   }
+}
+
+/** Copy with `addedAt` limited to tracks still in the playlist (absent when empty). */
+function withPrunedAddedAt(p: Playlist): Playlist {
+  const next: Playlist = { ...p };
+  delete next.addedAt;
+  if (!p.addedAt) return next;
+  const kept: Record<string, number> = {};
+  for (const id of p.trackIds) {
+    const at = p.addedAt[id];
+    if (typeof at === 'number' && Number.isFinite(at)) kept[id] = at;
+  }
+  if (Object.keys(kept).length) next.addedAt = kept;
+  return next;
 }
 
 function validName(name: string): string {

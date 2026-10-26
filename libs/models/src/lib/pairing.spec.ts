@@ -16,8 +16,7 @@ describe('pairing link', () => {
     expect(parsePairingLink('not a link')).toBeNull();
   });
 
-  it('rejects an empty token', () => {
-    expect(parsePairingLink('openrecord://pair?url=http%3A%2F%2Fx&token=')).toBeNull();
-    expect(parsePairingLink('openrecord://pair?url=http%3A%2F%2Fx')).toBeNull();
+  it('accepts a link without a token (address only)', () => {
+    expect(parsePairingLink(buildPairingLink({ url: 'http://x' }))).toEqual({ url: 'http://x', token: '' });
   });
 });

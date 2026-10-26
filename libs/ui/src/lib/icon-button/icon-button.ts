@@ -93,8 +93,9 @@ export type IconButtonVariant = 'plain' | 'transport' | 'transport-main';
       border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
     }
     :host(.variant-transport-main) .ib {
-      inline-size: 68px;
-      block-size: 68px;
+      /* The desktop player bar sets a smaller size. */
+      inline-size: var(--or-transport-main-size, 68px);
+      block-size: var(--or-transport-main-size, 68px);
       background: var(--color-primary);
       border-color: var(--color-primary);
       color: var(--color-on-primary);

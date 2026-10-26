@@ -1,4 +1,16 @@
-import { Route } from '@angular/router';
+import { inject } from '@angular/core';
+import { type CanActivateFn, Route, Router } from '@angular/router';
+import { AuthStore } from '@open-record/state';
+
+/** Import is account-only: signed out, open the sign-in prompt and stay put. */
+const requireAccount: CanActivateFn = async () => {
+  const auth = inject(AuthStore);
+  const router = inject(Router);
+  await auth.start();
+  if (auth.requireAccount('Sign in to import your Spotify library.')) return true;
+  // A direct visit has no page to stay on; land on the library instead.
+  return router.navigated ? false : router.parseUrl('/library');
+};
 
 /** Which shell chrome a route uses. `root` screens are the three tabs. */
 export interface ScreenData {
@@ -8,7 +20,8 @@ export interface ScreenData {
     | 'library'
     | 'playlist'
     | 'now-playing'
-    | 'settings';
+    | 'settings'
+    | 'import';
   root: boolean;
   /** Top-bar title for non-root screens (the playlist screen uses its name). */
   title?: string;
@@ -69,6 +82,18 @@ export const appRoutes: Route[] = [
     } satisfies ScreenData,
     loadComponent: () =>
       import('@open-record/features/settings').then((m) => m.SettingsPage),
+  },
+  {
+    path: 'import',
+    title: 'Import from Spotify · Open Record',
+    data: {
+      screen: 'import',
+      root: false,
+      title: 'Import from Spotify',
+    } satisfies ScreenData,
+    canActivate: [requireAccount],
+    loadComponent: () =>
+      import('@open-record/features/import').then((m) => m.ImportPage),
   },
   { path: '**', redirectTo: 'browse' },
 ];

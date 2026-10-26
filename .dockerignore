@@ -1,5 +1,7 @@
 node_modules
 dist
+# The built web app is served by the server image (npm run server:up builds it).
+!dist/apps/app/browser
 tmp
 .nx
 .angular

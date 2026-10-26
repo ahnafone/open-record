@@ -58,6 +58,8 @@ export const SETTINGS_KEYS = {
   metadataTracks: 'metadataTracks',
   /** Spotify import matching job (no migration: new key, absent = no job). Holds no raw Spotify payloads. */
   spotifyImport: 'spotifyImport',
+  /** Account sync clocks and tombstones (no migration: new key, absent = never synced). Metadata ids and hashes only. */
+  syncState: 'syncState',
 } as const;
 
 /** Removed setting (online metadata lookups); only migrations reference it. */

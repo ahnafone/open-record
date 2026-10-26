@@ -101,6 +101,8 @@ export interface Playlist {
   updatedAt: number;
   /** Keep every track of this playlist saved on the device. Absent = off. */
   autoDownload?: boolean;
+  /** When each track was added (track id -> epoch ms). Absent entry = unknown. */
+  addedAt?: Record<string, number>;
 }
 
 export type Role = 'owner' | 'editor' | 'viewer';

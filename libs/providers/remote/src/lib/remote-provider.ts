@@ -1,5 +1,5 @@
 import type { AudioQuality, DownloadSite, PlayableSource, RemoteSearchResult, Track, TrackSource } from '@open-record/models';
-import { RemoteClient, type RemoteConfig } from './client';
+import { RemoteClient, type RemoteAuthOptions, type RemoteConfig, type TrackAliasQuery, type TrackAliases } from './client';
 import { createLinkCache } from './link-cache';
 import { RemoteConfigError, RemoteError } from './errors';
 import { RemoteStreamResolver, type SaveBlob, type StreamLink } from './stream-resolver';
@@ -43,6 +43,18 @@ export function urlFromRemoteTrackId(trackId: string): string | null {
   }
 }
 
+/** Artist shown when neither the server nor a metadata lookup knows it. */
+export const UNKNOWN_ARTIST = 'Unknown artist';
+
+/** Upper bound on waiting for artist lookups so search stays responsive. */
+const ARTIST_LOOKUP_TIMEOUT_MS = 4000;
+
+/**
+ * Artist for a track the server returned without one (e.g. via an iTunes/Deezer
+ * search on the title). Resolves `undefined` when there is no confident match.
+ */
+export type ArtistLookup = (query: { title: string; durationSec?: number }) => Promise<string | undefined>;
+
 /** Pure mapping of a server search result to a (not yet playable) Track. */
 export function toRemoteTrack(result: RemoteSearchResult): Track {
   const source: TrackSource = { site: result.site, url: result.url };
@@ -51,7 +63,7 @@ export function toRemoteTrack(result: RemoteSearchResult): Track {
     id: remoteTrackId(result.url),
     providerId: REMOTE_PROVIDER_ID,
     title: result.title,
-    artist: result.artist || 'Unknown artist',
+    artist: result.artist || UNKNOWN_ARTIST,
     source,
   };
   if (result.durationSec) track.durationSec = Math.round(result.durationSec);
@@ -59,8 +71,8 @@ export function toRemoteTrack(result: RemoteSearchResult): Track {
   return track;
 }
 
-export interface RemoteProviderOptions {
-  /** Server URL + token; can be set later with `configure`. */
+export interface RemoteProviderOptions extends RemoteAuthOptions {
+  /** Server URL (+ optional static token); can be set later with `configure`. */
   config?: RemoteConfig | null;
   /** Default: CapacitorHttp on native, fetch on web. */
   transport?: HttpTransport;
@@ -77,6 +89,8 @@ export interface RemoteProviderOptions {
   now?: () => number;
   /** Streaming quality, read on every resolve (default: server default, highest). */
   streamQuality?: () => AudioQuality | undefined;
+  /** Fills in a missing artist (the app wires the iTunes/Deezer lookup). */
+  lookupArtist?: ArtistLookup;
 }
 
 /**
@@ -100,6 +114,8 @@ export class RemoteProvider {
   private readonly transport: HttpTransport;
   /** Keyed by `<quality>|<trackId>` so a quality change never reuses an old link. */
   private readonly links: (key: string, signal?: AbortSignal) => Promise<StreamLink>;
+  /** Looked-up artists per track id (`undefined` = no confident match). */
+  private readonly artists = new Map<string, Promise<string | undefined>>();
 
   constructor(private readonly options: RemoteProviderOptions = {}) {
     this.transport = options.transport ?? createDefaultTransport();
@@ -120,7 +136,12 @@ export class RemoteProvider {
 
   /** Set or clear the server. Throws `RemoteConfigError` for a bad URL. */
   configure(config: RemoteConfig | null): void {
-    this._client = config?.baseUrl.trim() ? new RemoteClient(config, this.transport) : null;
+    this._client = config?.baseUrl.trim()
+      ? new RemoteClient(config, this.transport, {
+          accessToken: this.options.accessToken,
+          onUnauthorized: this.options.onUnauthorized,
+        })
+      : null;
   }
 
   get configured(): boolean {
@@ -145,12 +166,52 @@ export class RemoteProvider {
   }
 
   async searchSite(query: string, site: DownloadSite, signal?: AbortSignal): Promise<Track[]> {
-    return (await this.client.search(query, site, signal)).map(toRemoteTrack);
+    const results = await this.client.search(query, site, signal);
+    return Promise.all(results.map((r) => this.withArtist(r)));
+  }
+
+  /**
+   * Alternative titles/artist names from the server's catalogue lookup. Never
+   * rejects: no server, a network/auth error or a bad response give empty lists.
+   */
+  async aliases(query: TrackAliasQuery, signal?: AbortSignal): Promise<TrackAliases> {
+    if (!this._client) return { titles: [], artists: [] };
+    try {
+      return await this._client.aliases(query, signal);
+    } catch {
+      return { titles: [], artists: [] };
+    }
   }
 
   /** A pasted link as a Track (server `POST /resolve`). */
   async resolveUrl(url: string, signal?: AbortSignal): Promise<Track> {
-    return toRemoteTrack(await this.client.resolve(url, signal));
+    return this.withArtist(await this.client.resolve(url, signal));
+  }
+
+  /**
+   * Maps a result, filling a missing artist from `lookupArtist` (cached per
+   * track id). Any failure or timeout falls back to "Unknown artist".
+   */
+  private async withArtist(result: RemoteSearchResult): Promise<Track> {
+    const track = toRemoteTrack(result);
+    const lookup = this.options.lookupArtist;
+    if (result.artist || !lookup || !track.title) return track;
+    let pending = this.artists.get(track.id);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => lookup({ title: track.title, durationSec: track.durationSec }))
+        .then((a) => a?.trim() || undefined)
+        .catch(() => {
+          this.artists.delete(track.id); // retry on a later search
+          return undefined;
+        });
+      this.artists.set(track.id, pending);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((r) => (timer = setTimeout(() => r(undefined), ARTIST_LOOKUP_TIMEOUT_MS)));
+    const artist = await Promise.race([pending, timeout]);
+    clearTimeout(timer);
+    return artist ? { ...track, artist } : track;
   }
 
   /**

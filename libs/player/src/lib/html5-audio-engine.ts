@@ -43,6 +43,7 @@ export class Html5AudioEngine implements AudioEngine {
   private audio: HTMLAudioElement;
   private unbind: () => void;
   private spare: { audio: HTMLAudioElement; url: string } | null = null;
+  private volume = 1;
 
   constructor(
     audio: HTMLAudioElement = new Audio(),
@@ -67,6 +68,7 @@ export class Html5AudioEngine implements AudioEngine {
       this.audio.removeAttribute('src');
       this.audio.load();
       this.audio = spare.audio;
+      this.audio.volume = this.volume;
       this.unbind = this.bind(spare.audio);
       const d = spare.audio.duration;
       if (Number.isFinite(d) && d > 0) this.listener?.onDuration(d);
@@ -119,6 +121,11 @@ export class Html5AudioEngine implements AudioEngine {
   async seek(positionSec: number): Promise<void> {
     this.audio.currentTime = Math.max(0, positionSec);
     this.listener?.onTime(this.audio.currentTime);
+  }
+
+  setVolume(volume: number): void {
+    this.volume = Math.min(1, Math.max(0, volume));
+    this.audio.volume = this.volume;
   }
 
   async stop(): Promise<void> {

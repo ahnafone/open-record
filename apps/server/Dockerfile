@@ -1,5 +1,6 @@
 # Open Record download server.
-# Build from the repository root:  docker build -f apps/server/Dockerfile -t open-record-server .
+# Build from the repository root, after building the web app (npx nx build app):
+#   docker build -f apps/server/Dockerfile -t open-record-server .
 
 # ---- build: bundle the server with esbuild (only esbuild is needed, not the whole monorepo) ----
 FROM node:24-slim AS build
@@ -32,6 +33,9 @@ RUN npm install --omit=dev --no-audit --no-fund \
   && npm cache clean --force \
   && useradd --system --uid 10001 --create-home openrecord
 
+# The web app, served at / (WEB_DIR). Built on the host by `nx build app`.
+COPY dist/apps/app/browser ./web
+
 # /data holds the generated access token (see OPEN_RECORD_DATA_DIR). Owned by
 # the runtime user so a fresh named volume is writable.
 RUN mkdir -p /data && chown 10001:10001 /data
@@ -40,7 +44,8 @@ ENV NODE_ENV=production \
     PORT=8787 \
     HOST=0.0.0.0 \
     XDG_CACHE_HOME=/tmp/.cache \
-    OPEN_RECORD_DATA_DIR=/data
+    OPEN_RECORD_DATA_DIR=/data \
+    WEB_DIR=/app/web
 
 USER openrecord
 EXPOSE 8787

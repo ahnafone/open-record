@@ -1,9 +1,12 @@
 # Normally started with the helper, from the repository root:
 #   npm run server:up
-# It detects your LAN IP, starts this compose file, and prints the URL, access
-# token and a QR code to scan in the app (Settings, Download server).
+# It detects your LAN IP, builds the web app, starts this compose file, and
+# prints the web app URL plus the URL, access token and a QR code to scan in
+# the app (Settings, Download server).
 #
-# Manual start (set BIND_ADDRESS to the LAN IP and PUBLIC_URL to the URL phones use):
+# Manual start (build the web app first; the image serves it at /. Set
+# BIND_ADDRESS to the LAN IP and PUBLIC_URL to the URL phones use):
+#   npx nx build app
 #   BIND_ADDRESS=192.168.1.20 PUBLIC_URL=http://192.168.1.20:8787 \
 #     docker compose -f apps/server/docker-compose.yml up -d --build
 services:
@@ -28,6 +31,8 @@ services:
       # Optional Supabase Auth (see .env.example).
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
       SUPABASE_URL: ${SUPABASE_URL:-}
+      # Public; served to the web app at GET /app-config with SUPABASE_URL.
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
     ports:
       # Host address to publish on. Default 127.0.0.1 (this machine only; expose
       # through an HTTPS tunnel, see README). For plain HTTP on a home LAN set

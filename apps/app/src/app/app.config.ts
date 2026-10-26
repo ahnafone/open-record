@@ -1,5 +1,6 @@
 import {
   ApplicationConfig,
+  effect,
   inject,
   provideAppInitializer,
   provideBrowserGlobalErrorListeners,
@@ -9,9 +10,15 @@ import { MusicSourceRegistry } from '@open-record/music-source';
 import { providePlayer } from '@open-record/player';
 import { CatalogProvider } from '@open-record/providers/catalog';
 import { LocalProvider, createDefaultFileStore, pickTextFile } from '@open-record/providers/local';
-import { REMOTE_PROVIDER_ID, RemoteProvider } from '@open-record/providers/remote';
+import {
+  REMOTE_PROVIDER_ID,
+  RemoteClient,
+  RemoteProvider,
+  createDefaultTransport,
+} from '@open-record/providers/remote';
 import {
   AuthPort,
+  AuthStore,
   ImportFilePort,
   LocalMediaPort,
   METADATA_FETCH,
@@ -20,18 +27,52 @@ import {
   RemoteServerPort,
   SettingsStore,
   StreamResolverPort,
+  SyncPort,
   provideState,
 } from '@open-record/state';
 import { StoragePort, provideStorage } from '@open-record/storage';
 import { appRoutes } from './app.routes';
-import { metadataFetch } from './metadata-fetch';
+import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
 import { SupabaseAuth } from './supabase-auth';
+import { SupabaseSync } from './supabase-sync';
 import { SUPABASE_BUILD_CONFIG } from './supabase.config';
+import { autoPairWeb } from './web-pairing';
 
 /** Music sources registered at startup; the UI never sees a concrete provider. */
 const sources = new MusicSourceRegistry();
+
+/**
+ * Storage is injected at app start (see `provideAppInitializer`); the remote
+ * provider is built before that, so it reads the saved-file record lazily.
+ */
+let storage: StoragePort | undefined;
+/** Read lazily for the streaming quality and server URL (set at app start, like `storage`). */
+let settings: SettingsStore | undefined;
+/** Resolves once the app initializer has assigned `settings` (account start-up may run first). */
+let settingsReady!: () => void;
+const settingsAssigned = new Promise<void>((resolve) => (settingsReady = resolve));
+/** Set at app start; opens the sign-in prompt when the server rejects a call. */
+let auth: AuthStore | undefined;
+
+/**
+ * Accounts: the build constant, else the project the download server offers
+ * at `GET /app-config` (web: the same-origin server; phone: the paired one).
+ */
+const supabase = new SupabaseAuth(SUPABASE_BUILD_CONFIG, {
+  serverUrl: async () => {
+    await settingsAssigned;
+    await settings?.ready();
+    return settings?.downloadServerUrl() ?? '';
+  },
+  fetchConfig: async (serverUrl) => {
+    const config = await new RemoteClient({ baseUrl: serverUrl }, createDefaultTransport()).appConfig();
+    return config.supabaseUrl && config.supabaseAnonKey
+      ? { url: config.supabaseUrl, anonKey: config.supabaseAnonKey }
+      : null;
+  },
+});
 sources.register(new CatalogProvider());
 /** Imported files: a playable source and the store's file port. */
 const fileStore = createDefaultFileStore();
@@ -39,18 +80,11 @@ const local = new LocalProvider(fileStore);
 sources.register(local);
 
 /**
- * Storage is injected at app start (see `provideAppInitializer`); the remote
- * provider is built before that, so it reads the saved-file record lazily.
- */
-let storage: StoragePort | undefined;
-/** Read lazily for the streaming quality (set at app start, like `storage`). */
-let settings: SettingsStore | undefined;
-
-/**
  * Stream server client. Playback resolves a saved copy first, else a stream
  * link. Search is not a library source, so it is not registered for search.
  * Saved copies are written by `remote.streams.saveToDevice`; SettingsStore
- * configures the URL + token.
+ * configures the URL. Calls carry the signed-in user's access token (else a
+ * legacy static token, if one is saved); a rejection opens the sign-in prompt.
  */
 const remote = new RemoteProvider({
   lookupSavedFile: async (trackId) => {
@@ -60,6 +94,9 @@ const remote = new RemoteProvider({
   },
   saveBlob: (path, file) => fileStore.copyIn(path, file),
   streamQuality: () => settings?.streamQuality(),
+  accessToken: () => supabase.accessToken(),
+  onUnauthorized: () => auth?.promptSignIn('Sign in to search and play from the download server.'),
+  lookupArtist: lookupRemoteArtist,
 });
 sources.register(remote);
 
@@ -69,6 +106,20 @@ export const appConfig: ApplicationConfig = {
     provideAppInitializer(() => {
       storage = inject(StoragePort);
       settings = inject(SettingsStore);
+      settingsReady();
+      auth = inject(AuthStore);
+      // Web build served by the download server: use it (not awaited).
+      void autoPairWeb(settings);
+      // A new server address may offer a different account project.
+      const store = settings;
+      const accounts = auth;
+      let lastUrl: string | undefined;
+      effect(() => {
+        if (!store.hydrated()) return;
+        const url = store.downloadServerUrl();
+        if (lastUrl !== undefined && url !== lastUrl) void accounts.refresh();
+        lastUrl = url;
+      });
     }),
     // Route params (e.g. playlist `:id`) bind to component inputs.
     provideRouter(appRoutes, withComponentInputBinding()),
@@ -81,8 +132,9 @@ export const appConfig: ApplicationConfig = {
     { provide: PairingScannerPort, useValue: new PlatformPairingScanner() },
     { provide: StreamResolverPort, useValue: remote.streams },
     { provide: NetworkStatusPort, useFactory: createNetworkStatus },
-    // Optional accounts; inert until a Supabase project is set (here or in Settings).
-    { provide: AuthPort, useValue: new SupabaseAuth(SUPABASE_BUILD_CONFIG) },
+    { provide: AuthPort, useValue: supabase },
+    // Library + playlist metadata sync for signed-in users (same client).
+    { provide: SyncPort, useValue: new SupabaseSync(supabase) },
     provideStorage(),
     // capacitor-plugin-playlist is not installed (iOS 18 target pending), so
     // createAudioEngine() falls back to the HTML5 engine on every platform.

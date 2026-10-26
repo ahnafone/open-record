@@ -94,6 +94,20 @@ import { injectTrackArt } from './track-art';
       --s: 96px;
       margin-block-end: var(--spacing-sm);
     }
+    @media (min-width: 900px) {
+      :host {
+        inline-size: 100%;
+      }
+      .card {
+        padding: var(--spacing-sm);
+      }
+      .card .sleeve {
+        --s: 128px;
+      }
+      .card:hover {
+        background: var(--color-surface-raised);
+      }
+    }
     .title {
       display: -webkit-box;
       -webkit-box-orient: vertical;

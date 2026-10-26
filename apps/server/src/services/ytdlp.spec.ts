@@ -5,7 +5,13 @@ import { loadConfig } from '../config';
 import { searchRoutes } from '../routes/search';
 import { streamRoutes } from '../routes/stream';
 import { isBlockedAddress, validateUrl, type LookupFn } from './url-guard';
-import { search, toStreamResponse } from './ytdlp';
+import {
+  artistOf,
+  parseTitle,
+  rankByRelevance,
+  search,
+  toStreamResponse,
+} from './ytdlp';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 
@@ -32,15 +38,15 @@ describe('URL validation (SSRF guard)', () => {
   });
 
   it('rejects hostnames that resolve to private addresses', async () => {
-    await expect(validateUrl('https://evil.example/', async () => ['8.8.8.8', '10.0.0.5'])).rejects.toThrow(
-      /not allowed/,
-    );
+    await expect(
+      validateUrl('https://evil.example/', async () => ['8.8.8.8', '10.0.0.5']),
+    ).rejects.toThrow(/not allowed/);
   });
 
   it('accepts a public https URL', async () => {
-    await expect(validateUrl('https://www.youtube.com/watch?v=abc', publicLookup)).resolves.toBe(
-      'https://www.youtube.com/watch?v=abc',
-    );
+    await expect(
+      validateUrl('https://www.youtube.com/watch?v=abc', publicLookup),
+    ).resolves.toBe('https://www.youtube.com/watch?v=abc');
     expect(isBlockedAddress('2606:4700::1111')).toBe(false);
   });
 });
@@ -58,14 +64,22 @@ describe('search result mapping', () => {
           title: 'Never Gonna Give You Up',
           channel: 'Rick Astley - Topic',
           duration: 213.4,
-          thumbnails: [{ url: 'https://i.ytimg.com/small.jpg' }, { url: 'https://i.ytimg.com/big.jpg' }],
+          thumbnails: [
+            { url: 'https://i.ytimg.com/small.jpg' },
+            { url: 'https://i.ytimg.com/big.jpg' },
+          ],
         },
         { _type: 'url', id: 'nourl', title: 'dropped: no url' },
         null,
       ],
     };
     const mocked = vi.mocked(execFile);
-    mocked.mockImplementation(((_file: string, _args: string[], _opts: unknown, cb: (...a: unknown[]) => void) => {
+    mocked.mockImplementation(((
+      _file: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (...a: unknown[]) => void,
+    ) => {
       cb(null, JSON.stringify(sample), '');
     }) as unknown as typeof execFile);
 
@@ -88,7 +102,125 @@ describe('search result mapping', () => {
   });
 
   it('refuses sources yt-dlp cannot search', async () => {
-    await expect(search('x', 'bandcamp')).rejects.toMatchObject({ status: 400 });
+    await expect(search('x', 'bandcamp')).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+});
+
+describe('artist and title cleanup', () => {
+  it.each([
+    [{ channel: 'Rick Astley - Topic' }, 'Rick Astley'],
+    [{ uploader: 'DaftPunkVEVO' }, 'Daft Punk'],
+    [{ uploader: 'Daft Punk VEVO' }, 'Daft Punk'],
+    [{ artist: '  ', uploader: 'Band' }, 'Band'],
+    [{ uploader: 'VEVO', channel: 'Real Channel' }, 'Real Channel'],
+    [{}, ''],
+  ])('artistOf(%o) -> %s', (info, expected) => {
+    expect(artistOf(info)).toBe(expected);
+  });
+
+  it.each([
+    [
+      'Daft Punk - Get Lucky (Official Video)',
+      'DaftPunkVEVO',
+      'Get Lucky',
+      'Daft Punk',
+    ],
+    [
+      'Daft Punk - Get Lucky [Official Audio]',
+      undefined,
+      'Get Lucky',
+      'Daft Punk',
+    ],
+    ['Adele - Hello (Official Lyric Video)', 'XL Recordings', 'Hello', 'Adele'],
+    [
+      'Rick Astley - Never Gonna Give You Up (Official Music Video) (4K)',
+      'Rick Astley',
+      'Never Gonna Give You Up',
+      'Rick Astley',
+    ],
+    [
+      'Song - Live at Wembley',
+      'Some Fan',
+      'Song - Live at Wembley',
+      'Some Fan',
+    ],
+    [
+      'Track (Remastered 2011) (Lyrics)',
+      'Band - Topic',
+      'Track (Remastered 2011)',
+      'Band',
+    ],
+  ])('parseTitle(%s, %s)', (title, channel, expectedTitle, expectedArtist) => {
+    expect(parseTitle(title, channel)).toEqual({
+      title: expectedTitle,
+      artist: expectedArtist,
+    });
+  });
+
+  it('ranks official uploads first and demotes unrequested variants, stably', () => {
+    const titles = [
+      'Song (Karaoke Version)',
+      'Song (Live)',
+      'Song',
+      'Song (Official Music Video)',
+      'Song (Cover)',
+      'Song (Official Audio)',
+    ];
+    expect(rankByRelevance(titles, 'artist song', (t) => t)).toEqual([
+      'Song (Official Music Video)',
+      'Song (Official Audio)',
+      'Song',
+      'Song (Karaoke Version)',
+      'Song (Live)',
+      'Song (Cover)',
+    ]);
+    expect(
+      rankByRelevance(['Song', 'Song (Live)'], 'song live', (t) => t),
+    ).toEqual(['Song', 'Song (Live)']);
+  });
+
+  it('fills in missing YouTube Music artists from a per-track lookup', async () => {
+    const flat = {
+      _type: 'playlist',
+      entries: [
+        {
+          _type: 'url',
+          id: 'ytmEnrich01',
+          url: 'https://music.youtube.com/watch?v=ytmEnrich01',
+          title: 'Get Lucky',
+        },
+      ],
+    };
+    const full = {
+      id: 'ytmEnrich01',
+      title: 'Get Lucky',
+      track: 'Get Lucky',
+      artists: ['Daft Punk'],
+      duration: 248,
+    };
+    const mocked = vi.mocked(execFile);
+    mocked.mockImplementation(((
+      _file: string,
+      args: string[],
+      _opts: unknown,
+      cb: (...a: unknown[]) => void,
+    ) => {
+      cb(
+        null,
+        JSON.stringify(args.includes('--flat-playlist') ? flat : full),
+        '',
+      );
+    }) as unknown as typeof execFile);
+
+    const [result] = await search('get lucky', 'ytmusic');
+    expect(result).toMatchObject({
+      title: 'Get Lucky',
+      artist: 'Daft Punk',
+      durationSec: 248,
+      site: 'ytmusic',
+    });
   });
 });
 
@@ -96,7 +228,9 @@ describe('yt-dlp routes auth', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
-    const config = loadConfig({ OPEN_RECORD_TOKEN: 'test-token-0123456789abcdef' });
+    const config = loadConfig({
+      OPEN_RECORD_TOKEN: 'test-token-0123456789abcdef',
+    });
     app = await buildApp(config, { routes: [searchRoutes, streamRoutes] });
   });
 
@@ -107,7 +241,11 @@ describe('yt-dlp routes auth', () => {
     ['POST', '/resolve'],
     ['POST', '/stream'],
   ] as const)('%s %s requires the token', async (method, url) => {
-    const res = await app.inject({ method, url, payload: method === 'POST' ? { url: 'https://example.com' } : undefined });
+    const res = await app.inject({
+      method,
+      url,
+      payload: method === 'POST' ? { url: 'https://example.com' } : undefined,
+    });
     expect(res.statusCode).toBe(401);
   });
 });
@@ -128,7 +266,12 @@ describe('stream response mapping', () => {
       url: media,
       duration: 200.4,
       thumbnail: 'https://i.ytimg.com/t.jpg',
-      http_headers: { 'User-Agent': 'UA', Referer: 'https://www.youtube.com/', Cookie: 'secret', 'X-Foo': 'bar' },
+      http_headers: {
+        'User-Agent': 'UA',
+        Referer: 'https://www.youtube.com/',
+        Cookie: 'secret',
+        'X-Foo': 'bar',
+      },
     });
     expect(res).toEqual({
       url: media,
@@ -148,7 +291,10 @@ describe('stream response mapping', () => {
   it.each([
     ['segmented protocol', { protocol: 'm3u8_native', url: media }],
     ['dash protocol', { protocol: 'http_dash_segments', url: media }],
-    ['manifest url', { protocol: 'https', url: 'https://cdn.example.com/a/index.m3u8' }],
+    [
+      'manifest url',
+      { protocol: 'https', url: 'https://cdn.example.com/a/index.m3u8' },
+    ],
     ['no url', { protocol: 'https' }],
   ])('refuses %s with 422', (_name, extra) => {
     let caught: unknown;

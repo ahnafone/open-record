@@ -12,7 +12,10 @@ import { tokenKey } from '../services/stream-cache';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
-    /** Set `config: { public: true }` on a route to skip bearer-token auth. */
+    /**
+     * Set `config: { public: true }` on a route to skip bearer-token auth.
+     * Public routes: GET /health, GET /app-config and the web app (WEB_DIR).
+     */
     public?: boolean;
   }
   interface FastifyRequest {

@@ -1,4 +1,7 @@
 import type { FastifyInstance } from 'fastify';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { SignJWT } from 'jose';
 import { buildApp } from './app';
 import { loadConfig } from './config';
@@ -95,7 +98,8 @@ describe('server auth with Supabase JWTs', () => {
     expect(res.json()).toEqual({ userId: 'user-1' });
   });
 
-  it('rejects a wrong signature, an expired token and a non-user (anon) audience', async () => {
+  it('rejects no token, a wrong signature, an expired token and a non-user (anon) audience', async () => {
+    expect((await app.inject({ method: 'GET', url: '/whoami' })).statusCode).toBe(401);
     expect((await get(await sign('another-secret-that-is-at-least-32-chars!!'))).statusCode).toBe(401);
     expect((await get(await sign(SECRET, { exp: Math.floor(Date.now() / 1000) - 60 }))).statusCode).toBe(401);
     expect((await get(await sign(SECRET, { aud: 'anon' }))).statusCode).toBe(401);
@@ -105,5 +109,71 @@ describe('server auth with Supabase JWTs', () => {
     const res = await get(TOKEN);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ userId: null });
+  });
+});
+
+describe('GET /app-config', () => {
+  const env = {
+    OPEN_RECORD_TOKEN: TOKEN,
+    SUPABASE_URL: 'https://abc.supabase.co/',
+    SUPABASE_ANON_KEY: 'public-anon-key',
+    SUPABASE_JWT_SECRET: 'super-secret-jwt-token-with-at-least-32-characters',
+  };
+
+  it('is public, not cached, and returns only the Supabase URL and anon key', async () => {
+    const app = await buildApp(loadConfig(env));
+    const res = await app.inject({ method: 'GET', url: '/app-config' });
+    await app.close();
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.json()).toEqual({ supabaseUrl: 'https://abc.supabase.co', supabaseAnonKey: 'public-anon-key' });
+    expect(res.body).not.toContain(env.SUPABASE_JWT_SECRET);
+  });
+
+  it('serves nulls without an anon key and rejects a key without a URL', async () => {
+    const app = await buildApp(loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_URL: env.SUPABASE_URL }));
+    const res = await app.inject({ method: 'GET', url: '/app-config' });
+    await app.close();
+    expect(res.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null });
+    expect(() => loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_ANON_KEY: 'k' })).toThrow(/SUPABASE_URL/);
+  });
+});
+
+describe('web app (WEB_DIR)', () => {
+  let app: FastifyInstance;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'or-web-'));
+    writeFileSync(join(dir, 'index.html'), '<!doctype html><title>Open Record</title>');
+    writeFileSync(join(dir, 'main.js'), 'console.log(1)');
+    app = await buildApp(loadConfig({ OPEN_RECORD_TOKEN: TOKEN, WEB_DIR: dir }));
+  });
+
+  afterAll(async () => {
+    await app.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const html = { accept: 'text/html' };
+
+  it('serves index.html and assets without a token, with SPA fallback', async () => {
+    const index = await app.inject({ method: 'GET', url: '/', headers: html });
+    expect(index.statusCode).toBe(200);
+    expect(index.body).toContain('Open Record');
+    expect((await app.inject({ method: 'GET', url: '/main.js' })).body).toBe('console.log(1)');
+    const deep = await app.inject({ method: 'GET', url: '/library/abc', headers: html });
+    expect(deep.statusCode).toBe(200);
+    expect(deep.body).toContain('Open Record');
+  });
+
+  it('does not shadow or open up the API', async () => {
+    expect((await app.inject({ method: 'GET', url: '/search?q=x', headers: html })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: '/stream', payload: {} })).statusCode).toBe(401);
+    const getStream = await app.inject({ method: 'GET', url: '/stream', headers: html });
+    expect(getStream.body).not.toContain('Open Record');
+    expect((await app.inject({ method: 'GET', url: '/health' })).json()).toEqual({ status: 'ok' });
+    const appConfig = await app.inject({ method: 'GET', url: '/app-config', headers: html });
+    expect(appConfig.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null });
   });
 });

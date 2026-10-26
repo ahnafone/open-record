@@ -1,11 +1,16 @@
 // Public API for @open-record/providers/remote (download server client + provider).
 export {
   normalizeBaseUrl,
+  parseAliases,
   parseSearchResult,
   parseStream,
   RemoteClient,
+  type RemoteAppConfig,
+  type RemoteAuthOptions,
   type RemoteConfig,
   type RemoteStream,
+  type TrackAliasQuery,
+  type TrackAliases,
 } from './lib/client';
 export {
   createLinkCache,
@@ -40,7 +45,9 @@ export {
   RemoteProvider,
   remoteTrackId,
   toRemoteTrack,
+  UNKNOWN_ARTIST,
   urlFromRemoteTrackId,
+  type ArtistLookup,
   type RemoteProviderOptions,
 } from './lib/remote-provider';
 export {

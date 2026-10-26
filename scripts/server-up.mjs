@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Starts the download server in Docker on this machine's LAN address, then
-// prints the startup banner (URL, token, pairing QR) and exits.
+// Builds the web app, starts the server in Docker on this machine's LAN
+// address (site + API on one origin), then prints the web app URL and the
+// startup banner (URL, token, pairing QR) and exits.
 //
 //   npm run server:up                  detect the LAN IP automatically
 //   npm run server:up -- --ip 10.0.0.5 use this address instead
@@ -106,8 +107,19 @@ if (spawnSync('docker', ['compose', 'version'], { stdio: 'ignore' }).status !== 
   fail('Docker with the compose plugin is required (docker compose version failed)');
 }
 
+// The image serves the built web app at / (dist/apps/app/browser, see the Dockerfile).
+console.log('server:up: building the web app (nx build app)');
+const web = spawnSync('npx', ['nx', 'build', 'app'], {
+  cwd: root,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+});
+if (web.status !== 0) fail('web app build failed (npx nx build app)');
+
 console.log(`server:up: starting on ${publicUrl}`);
 const since = new Date(Date.now() - 1000).toISOString();
+// SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_JWT_SECRET pass through from
+// this environment (compose interpolates them); unset = no Supabase.
 const up = compose(['up', '-d', '--build'], {
   stdio: 'inherit',
   env: { ...process.env, BIND_ADDRESS: ip, PUBLIC_URL: publicUrl },
@@ -117,6 +129,7 @@ if (up.status !== 0) fail('docker compose up failed');
 /** Prints the banner text, then warns when this machine cannot reach /health. */
 async function finish(bannerText) {
   console.log(bannerText.trimEnd());
+  console.log(`\nWeb app: ${publicUrl}/`);
   const healthUrl = `${publicUrl}/health`;
   if (!(await reachable(healthUrl))) {
     console.log(

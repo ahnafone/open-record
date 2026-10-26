@@ -16,6 +16,9 @@ import type { QueueState } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
 
+/** localStorage key for the per-device volume and mute (a convenience, not synced). */
+const VOLUME_KEY = 'or.volume';
+
 /** Minimum gap between queue-state writes while playing. */
 export const QUEUE_SAVE_INTERVAL_MS = 2000;
 
@@ -58,6 +61,11 @@ export class PlayerStore {
   readonly error = this.engine.error;
   readonly hasNext = this.engine.hasNext;
   readonly hasPrevious = this.engine.hasPrevious;
+  /** Output volume 0..1 (independent of mute). */
+  readonly volume = this.engine.volume;
+  readonly muted = this.engine.muted;
+  /** False on native engines, where the OS owns volume. */
+  readonly canSetVolume = this.engine.canSetVolume;
 
   private readonly _restored = signal(false);
   /** True once the saved queue has been restored (or there was none). */
@@ -74,6 +82,8 @@ export class PlayerStore {
       this.snapshot();
       untracked(() => this.scheduleSave());
     });
+
+    this.restoreVolume();
 
     const onHidden = () => {
       if (this.document?.visibilityState === 'hidden') void this.flush();
@@ -169,6 +179,18 @@ export class PlayerStore {
   seek(positionSec: number): Promise<void> {
     return this.engine.seek(positionSec);
   }
+  /** Seek relative to the current position (clamped by the engine). */
+  seekBy(deltaSec: number): Promise<void> {
+    return this.engine.seek(this.engine.position() + deltaSec);
+  }
+  setVolume(volume: number): void {
+    this.engine.setVolume(volume);
+    this.saveVolume();
+  }
+  toggleMute(): void {
+    this.engine.toggleMute();
+    this.saveVolume();
+  }
   toggleShuffle(): void {
     this.engine.toggleShuffle();
   }
@@ -216,6 +238,33 @@ export class PlayerStore {
   }
 
   // ---- Persistence -----------------------------------------------------
+
+  private restoreVolume(): void {
+    if (!this.engine.canSetVolume) return;
+    try {
+      const raw = globalThis.localStorage?.getItem(VOLUME_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { volume?: unknown; muted?: unknown };
+      if (typeof saved.volume === 'number') this.engine.setVolume(saved.volume);
+      if (saved.muted === true) this.engine.setMuted(true);
+    } catch {
+      // Storage blocked or corrupt: keep full volume.
+    }
+  }
+
+  private saveVolume(): void {
+    try {
+      globalThis.localStorage?.setItem(
+        VOLUME_KEY,
+        JSON.stringify({
+          volume: this.engine.volume(),
+          muted: this.engine.muted(),
+        }),
+      );
+    } catch {
+      // Best effort.
+    }
+  }
 
   /**
    * Load the saved queue, paused at the saved position. Safe to call more

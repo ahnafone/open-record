@@ -12,6 +12,8 @@ dependencies {
     implementation project(':capacitor-community-sqlite')
     implementation project(':capacitor-mlkit-barcode-scanning')
     implementation project(':capacitor-filesystem')
+    implementation project(':capacitor-network')
+    implementation project(':capacitor-preferences')
     implementation project(':capawesome-capacitor-file-picker')
     implementation project(':capacitor-plugin-playlist')
 

@@ -410,7 +410,21 @@ overlays.
   overlapping a grooved disc that spins while playing, followed by serif
   title and muted subtitle.
 - **Record and track rows:** sleeve thumbnail (60px sleeve plus peeking disc),
-  title, artist, detail and tags; the current item's title turns coral.
+  title, `artist · album` (album when known), detail and tags; the current
+  item's title turns coral. Library and Search rows carry the same source and
+  download-state tags as playlist rows and a trailing tabular duration
+  (`h:mm:ss` from an hour); missing fields are simply omitted.
+- **Playlist rows:** number cell, sleeve, title, `artist · album`, then tags
+  (source: YouTube / YT Music / SoundCloud / Link; download state: On device
+  with a check, Downloading with a spinner, Failed in coral with an alert
+  icon, or Streaming only). Trailing duration (tabular), bookmark toggle and
+  options button. The number turns into a play icon on hover or focus; the
+  current row shows a small disc (spinning while playing, pause on hover)
+  beside its coral title. On desktop the list becomes a table (`#`, Title,
+  Album, Source, Date added, Duration) with header buttons that sort the view
+  ascending, descending, then back to the custom playlist order
+  (`aria-sort`); Play, Shuffle and row taps follow the displayed order, and
+  Move up/down only appear in custom order.
 - **Missing artwork:** a designed fallback, a grooved disc with an ivory centre
   label; never a broken-image icon or a fake sleeve.
 - **Now Playing:** large sleeve over a disc, artist in muted 15px, a status
@@ -458,3 +472,33 @@ overlays.
 - Don't animate longer than 200ms for UI transitions or use bouncy easing.
 - Don't convey "now playing" by colour alone; pair it with the spinning disc,
   progress bar or pressed state.
+
+## Desktop layout
+
+At 900px and wider (`DESKTOP_MEDIA_QUERY`, `OrViewport.isDesktop` in
+`@open-record/ui`) the phone chrome gives way to three zones. Below 900px
+nothing changes.
+
+- **Sidebar (248px):** brand mark and wordmark, nav links (Browse, Search,
+  Library, then Import from Spotify and Settings) and the user's playlists in
+  serif. Links are 44px tall with an 8px radius; hover is surface-raised, the
+  current link sits on surface with a coral icon.
+- **Content:** scrolls on its own with 16px top and 24px side padding. Crate
+  rails become `auto-fill` grids (min 168px cards, 128px sleeves); record rows
+  flow into `auto-fill` columns (min 360px) at 64px; playlist cards in 280px
+  columns. The listening booth puts the sleeve left and details right. The top
+  bar only appears on pushed screens (back plus serif title). Settings and
+  Import cap their content at 800px.
+- **Player bar:** full width across the bottom, surface with a hairline top
+  border: 56px sleeve, title and artist; shuffle, previous, a 44px coral play
+  button, next and repeat over a seek bar with tabular times; volume (mute
+  button plus slider) and a Now Playing toggle (`aria-pressed`).
+- **Now Playing:** a 360px side panel beside the content, toggled from the
+  player bar. The `/now-playing` route becomes two columns (sticky sleeve left,
+  details and queue right).
+- **Keyboard:** Space play/pause, Left/Right seek 5s, Shift+Left/Right
+  previous/next, M mute, / search. Ignored while typing or in a dialog.
+- **Import:** a dashed-border drop zone accepts Exportify `.csv` and Spotify
+  `.json`; it turns coral (10% tint) while a file is dragged over.
+- Desktop rows may be denser than phone rows but keep 44px controls, the same
+  tokens, radii and motion.
