@@ -44,7 +44,7 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
   {
     id: 'youtube',
     title: 'YouTube or YT Music playlist or song',
-    hint: 'Paste the link of a public or unlisted playlist (made into a new playlist) or of a single song (added to your library). Song details are tidied up in the background.',
+    hint: 'Paste the link of a public or unlisted playlist (made into a new playlist) or of a single song (added to your library). Song details are looked up for you to review.',
   },
 ];
 
@@ -82,7 +82,7 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
         @if (source() === s.id) {
           <div class="detail">
             @if (s.id === 'youtube') {
-              <or-youtube-source (imported)="youtubeImported.emit()" />
+              <or-youtube-source [(likeToo)]="likeToo" (imported)="youtubeImported.emit()" />
             } @else if (s.id === 'audio') {
               <or-button
                 block

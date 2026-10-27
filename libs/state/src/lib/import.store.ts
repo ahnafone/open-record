@@ -1,5 +1,5 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
-import type { Track } from '@open-record/models';
+import { MAX_ENRICH_BATCH, type EnrichMatch, type MetadataCandidate, type Track } from '@open-record/models';
 import { MusicSourceRegistry } from '@open-record/music-source';
 import { fold } from '@open-record/metadata-lookup';
 import {
@@ -19,9 +19,10 @@ import { ImportSessionsStore } from './import-sessions.store';
 import { LibraryStore } from './library.store';
 import { PlaylistsStore, PLAYLIST_NAME_MAX } from './playlists.store';
 import { RemoteServerPort } from './ports';
-import { isAbort, remoteErrorMessage } from './remote-errors';
-import { MetadataEnrichStore } from './metadata-enrich.store';
+import { busyRetryAfterSec, isAbort, remoteErrorMessage } from './remote-errors';
+import { ENRICH_AUTO_ACCEPT, MetadataEnrichStore, toMetadataCandidates } from './metadata-enrich.store';
 
+export type { MetadataCandidate } from '@open-record/models';
 export type {
   ImportedPlaylist,
   ImportedTrack as SpotifyImportedTrack,
@@ -54,9 +55,20 @@ export interface ImportCandidate {
   durationMatch: boolean;
 }
 
-/** One imported Spotify track and its match state. Reduced fields only (no raw payloads). */
+/**
+ * One imported track and its match state. Reduced fields only (no raw
+ * payloads). Two kinds share the job, review and progress:
+ *
+ * - Spotify (no `origin`): a placeholder matched to a YouTube result.
+ *   Review suggestions are `candidates` (tracks); fixes are
+ *   `acceptCandidate`, `skip`, `research` and `useLink`.
+ * - YouTube (`origin: 'youtube'`): the song link is the fixed audio source;
+ *   only its song details are looked up. Review suggestions are
+ *   `metaCandidates` (metadata); fixes are `acceptMetadata`, `keepOriginal`,
+ *   `skip`, `research`, and `useLink` (when `linkError` says the link failed).
+ */
 export interface ImportItem {
-  /** Placeholder track id (`spotify:...`); stable for the job. */
+  /** Placeholder track id (`spotify:...`), or the song's track id for YouTube items; stable for the job. */
   key: string;
   title: string;
   artists: string[];
@@ -66,9 +78,13 @@ export interface ImportItem {
   isrc?: string;
   spotifyId?: string;
   state: ImportItemState;
-  /** Best search results first (review and unmatched items). */
+  /** Best search results first (Spotify review and unmatched items). */
   candidates?: ImportCandidate[];
-  /** Id of the remote track that replaced the placeholder (matched items). */
+  /** Song-detail suggestions, best first (YouTube review and unmatched items). */
+  metaCandidates?: MetadataCandidate[];
+  /** YouTube items: why the song's link cannot be used (state `unmatched`; fix with `useLink`). */
+  linkError?: string;
+  /** Id of the remote track that replaced the placeholder (matched items; YouTube items after `useLink`). */
   matchId?: string;
   score?: number;
   /** Accepted or skipped by the user. */
@@ -77,7 +93,10 @@ export interface ImportItem {
   attempts?: number;
   /** Imported as a Liked Song (or "Also add to Liked Songs" was ticked): bookmarked in the library. */
   liked?: true;
-  /** A YouTube song: its key is the track id and it is already matched. */
+  /**
+   * A YouTube song: its key is the track id. `pending` until its song details
+   * are looked up (jobs from older versions stored them as `matched`).
+   */
   origin?: 'youtube';
 }
 
@@ -93,6 +112,18 @@ export interface ImportOptions {
   /** "Also add these songs to Liked Songs": every playlist track is bookmarked too. */
   likeAll?: boolean;
   /** Names the import session, e.g. the export file name. */
+  label?: string;
+}
+
+export interface ImportYoutubeOptions {
+  /** "Also add to Liked Songs": the song, or every playlist song, is bookmarked in the library. */
+  likeToo?: boolean;
+}
+
+/** Kind and name of the latest import into the job (progress panel label). */
+export interface ImportJobSource {
+  kind: 'spotify' | 'youtube';
+  /** Spotify: the export file name; YouTube: the playlist or song title. */
   label?: string;
 }
 
@@ -140,10 +171,14 @@ interface ImportJob {
   likedPlaylistsSaved?: true;
   /** Set once every `liked` item was checked to be bookmarked (later imports bookmark directly). */
   likedSaved?: true;
+  /** The latest import (label only). */
+  source?: ImportJobSource;
 }
 
 /** Pause between searches; the server allows 30 searches a minute. */
 const PACE_MS = 2_100;
+/** Pause after a song-detail lookup batch (one rate-limited request). */
+const ENRICH_PACE_MS = 3_000;
 /** Wait after a 429 (no Retry-After hint). */
 const RATE_LIMIT_WAIT_MS = 60_000;
 const BUSY_WAIT_SEC = 10;
@@ -160,6 +195,8 @@ const NO_YOUTUBE_SERVER = 'Set up a download server in Settings to import YouTub
 const NOT_YOUTUBE_SUPPORTED = 'This download server cannot import playlists. Update it, then try again.';
 const UNKNOWN_ARTIST = 'Unknown artist';
 const INVALID_LINK = 'Paste a full http:// or https:// link.';
+const LINK_UNAVAILABLE = 'This song link is unavailable. Paste another link.';
+const NOT_A_YOUTUBE_ITEM = 'Song details can only be chosen for YouTube imports.';
 
 /**
  * Spotify import: turns parsed exports into playlists and library entries
@@ -177,7 +214,7 @@ export class ImportStore {
   private readonly sessions = inject(ImportSessionsStore);
   private readonly remote = inject(RemoteServerPort, { optional: true });
   private readonly files = inject(ImportFilePort, { optional: true });
-  /** Song-detail lookup for YouTube imports; its progress shows in the same job view. */
+  /** Song-detail lookup for YouTube items (run by this queue). */
   private readonly enrich = inject(MetadataEnrichStore);
 
   private readonly _job = signal<ImportJob | null>(null);
@@ -189,11 +226,19 @@ export class ImportStore {
   readonly status = computed<ImportStatus>(() => this._job()?.status ?? 'idle');
   /** A YouTube playlist or song link is being fetched. */
   readonly importing = this._importing.asReadonly();
-  /** Song-detail lookup of YouTube imports (`idle` = nothing queued). */
-  readonly enrichStatus = this.enrich.status;
-  readonly enrichProgress = this.enrich.progress;
-  readonly enrichError = this.enrich.error;
-  readonly enrichRetryAt = this.enrich.retryAt;
+  /**
+   * @deprecated The song-detail lookup is part of the job now (`status`,
+   * `progress`, `error`, `retryAt`). Always `idle`; remove from the UI.
+   */
+  readonly enrichStatus = signal<'idle' | 'running' | 'paused' | 'done'>('idle').asReadonly();
+  /** @deprecated See `enrichStatus`. Always zero. */
+  readonly enrichProgress = signal({ total: 0, enriched: 0, unmatched: 0, pending: 0 }).asReadonly();
+  /** @deprecated See `enrichStatus`. Always null. */
+  readonly enrichError = signal<string | null>(null).asReadonly();
+  /** @deprecated See `enrichStatus`. Always null. */
+  readonly enrichRetryAt = signal<number | null>(null).asReadonly();
+  /** Kind and name of the latest import (for the progress label), or null. */
+  readonly source = computed<ImportJobSource | null>(() => this._job()?.source ?? null);
   /** Why the queue paused (user-facing), or null. */
   readonly error = computed(() => this._job()?.error ?? null);
   /** Epoch ms the queue resumes after a busy / rate-limit wait, or null. */
@@ -216,8 +261,6 @@ export class ImportStore {
   readonly needsAttention = computed(() => {
     const s = this.status();
     if (s === 'running' || s === 'paused') return true;
-    const e = this.enrich.status();
-    if (e === 'running' || e === 'paused') return true;
     const p = this.progress();
     return p.pending > 0 || p.review > 0;
   });
@@ -262,9 +305,28 @@ export class ImportStore {
   /** Startup: resume a job left running. */
   async restore(): Promise<void> {
     await this.loaded;
+    await this.migrateLegacyLookup().catch(() => undefined);
     await this.saveLikedPlaylists().catch(() => undefined);
     await this.repairMatched().catch(() => undefined);
     if (this._job()?.status === 'running') void this.run();
+  }
+
+  /**
+   * Songs still queued by the old stand-alone song-detail lookup go back to
+   * `pending` so this queue looks them up (and can send them to review).
+   */
+  private async migrateLegacyLookup(): Promise<void> {
+    const ids = new Set(await this.enrich.takeLegacyQueue());
+    const job = this._job();
+    if (!job || !ids.size) return;
+    const requeue = (i: ImportItem) => i.origin === 'youtube' && i.state === 'matched' && !i.manual && !i.matchId && ids.has(i.key);
+    if (!job.items.some(requeue)) return;
+    this._job.set({
+      ...job,
+      status: job.status === 'paused' ? 'paused' : 'running',
+      items: job.items.map((i) => (requeue(i) ? { ...i, state: 'pending' } : i)),
+    });
+    await this.persist();
   }
 
   /**
@@ -418,6 +480,7 @@ export class ImportStore {
       ...job,
       status: newItems.some((i) => i.state === 'pending') || job.status === 'running' ? 'running' : job.status,
       items: [...job.items, ...newItems].map((i) => (liked.has(i.key) && !i.liked ? { ...i, liked: true } : i)),
+      source: options.label ? { kind: 'spotify', label: options.label } : { kind: 'spotify' },
     };
     delete next.error;
     this._job.set(next);
@@ -461,11 +524,17 @@ export class ImportStore {
 
   /**
    * Import a public YouTube / YT Music playlist link (a new playlist) or a
-   * single song link (library only). Its songs join the job as matched items
-   * and the import history; their song details are looked up in the
-   * background. Throws an Error with a user-facing message.
+   * single song link (library only). Its new songs join the job as `pending`
+   * items: the queue looks up their song details, applies confident ones and
+   * sends the rest to review with metadata suggestions. With
+   * `options.likeToo` the song (or every playlist song) is bookmarked in the
+   * library. Throws an Error with a user-facing message.
    */
-  async startYoutube(url: string, signal?: AbortSignal): Promise<ImportYoutubeSummary> {
+  async startYoutube(
+    url: string,
+    signal?: AbortSignal,
+    options: ImportYoutubeOptions = {},
+  ): Promise<ImportYoutubeSummary> {
     const remote = this.remote;
     if (!remote?.configured) throw new Error(NO_YOUTUBE_SERVER);
     if (!remote.importPlaylist) throw new Error(NOT_YOUTUBE_SUPPORTED);
@@ -510,8 +579,13 @@ export class ImportStore {
         playlistId = playlist.id;
       }
 
-      this.addYoutubeItems(tracks);
+      this.addYoutubeItems(tracks, new Set(fresh.map((t) => t.id)), { kind: 'youtube', label: title }, !!options.likeToo);
       await this.persist();
+      if (options.likeToo) {
+        // First song on top of the library, like a playlist added to Library.
+        const base = Date.now();
+        await this.library.bookmarkWithoutSaving(ids.map((id, i) => ({ id: this.currentId(id), savedAt: base - i })));
+      }
       await this.sessions
         .record({
           kind: 'youtube',
@@ -523,7 +597,7 @@ export class ImportStore {
         })
         .catch(() => undefined);
 
-      await this.enrich.enqueue(fresh.map((t) => t.id));
+      if (this._job()?.status === 'running') void this.run();
       return {
         title,
         playlistId,
@@ -538,8 +612,17 @@ export class ImportStore {
     }
   }
 
-  /** One matched job item per YouTube song (keys are track ids), so the job and history show them. */
-  private addYoutubeItems(tracks: readonly Track[]): void {
+  /**
+   * One job item per YouTube song (keys are track ids). Songs new to the
+   * library wait for a song-detail lookup; songs already there are kept as
+   * they were (`matched`).
+   */
+  private addYoutubeItems(
+    tracks: readonly Track[],
+    fresh: ReadonlySet<string>,
+    source: ImportJobSource,
+    liked: boolean,
+  ): void {
     const job: ImportJob = this._job() ?? {
       version: 1,
       status: 'done',
@@ -549,6 +632,7 @@ export class ImportStore {
       likedSaved: true,
     };
     const have = new Set(job.items.map((i) => i.key));
+    const keys = new Set(tracks.map((t) => t.id));
     const items: ImportItem[] = tracks
       .filter((t) => !have.has(t.id))
       .map((t) => {
@@ -557,14 +641,26 @@ export class ImportStore {
           title: t.title,
           artists: t.artist && t.artist !== UNKNOWN_ARTIST ? [t.artist] : [],
           artist: t.artist || UNKNOWN_ARTIST,
-          state: 'matched',
+          state: fresh.has(t.id) ? 'pending' : 'matched',
           origin: 'youtube',
         };
         if (t.album) item.album = t.album;
         if (t.durationSec) item.durationMs = t.durationSec * 1000;
+        if (liked) item.liked = true;
         return item;
       });
-    this._job.set({ ...job, items: [...job.items, ...items] });
+    const pending = items.some((i) => i.state === 'pending');
+    const next: ImportJob = {
+      ...job,
+      status: pending || job.status === 'running' ? 'running' : job.status,
+      items: [
+        ...job.items.map((i) => (liked && keys.has(i.key) && !i.liked ? { ...i, liked: true as const } : i)),
+        ...items,
+      ],
+      source,
+    };
+    delete next.error;
+    this._job.set(next);
   }
 
   /** Stop matching and song-detail lookup after the current step (resume later). */
@@ -572,18 +668,16 @@ export class ImportStore {
     this.update((job) => (job.status === 'running' ? { ...job, status: 'paused' } : job));
     this.stopRunner();
     await this.persist();
-    await this.enrich.pause();
   }
 
   /** Continue matching and song-detail lookup (also retries after a pausing error). */
   async resume(): Promise<void> {
     await this.resume_();
-    if (this.enrich.status() === 'paused') await this.enrich.resume();
   }
 
   /**
-   * Stop for good: pending tracks become unmatched (placeholders stay), and
-   * song-detail lookup ends (songs keep their YouTube metadata).
+   * Stop for good: pending Spotify tracks become unmatched (placeholders
+   * stay); pending YouTube songs keep their YouTube details (`matched`).
    */
   async cancel(): Promise<void> {
     this.stopRunner();
@@ -591,26 +685,32 @@ export class ImportStore {
       ...job,
       status: 'done',
       error: undefined,
-      items: job.items.map((i) => (i.state === 'pending' ? { ...i, state: 'unmatched' } : i)),
+      items: job.items.map((i) =>
+        i.state !== 'pending' ? i : { ...i, state: i.origin === 'youtube' ? 'matched' : 'unmatched' },
+      ),
     }));
     await this.persist();
-    await this.enrich.cancel();
   }
 
-  /** Clears the finished song-detail lookup (songs and playlists stay). */
+  /** @deprecated The song-detail lookup is part of the job now; a no-op. */
   async dismissEnrichment(): Promise<void> {
-    await this.enrich.dismiss();
+    return;
   }
 
   /**
    * Use a candidate (by its track id, or any remote Track, e.g. from a manual
    * search) for a review or unmatched item: replaces the placeholder in
-   * playlists and the library. Nothing is downloaded.
+   * playlists and the library. Nothing is downloaded. For a YouTube item a
+   * string id may also name one of its `metaCandidates` (same as
+   * `acceptMetadata`); a Track replaces its link.
    */
   async acceptCandidate(key: string, candidate: string | Track): Promise<void> {
     await this.loaded;
     const item = this.item(key);
     if (!item || item.state === 'matched') return;
+    if (item.origin === 'youtube' && typeof candidate === 'string' && item.metaCandidates?.some((c) => c.id === candidate)) {
+      return this.acceptMetadata(key, candidate);
+    }
     const track =
       typeof candidate === 'string'
         ? item.candidates?.find((c) => c.track.id === candidate)?.track
@@ -622,7 +722,57 @@ export class ImportStore {
     await this.persist();
   }
 
-  /** Leave a review item unmatched (its placeholder stays). */
+  /**
+   * YouTube review or unmatched item: apply one of its `metaCandidates` (by
+   * `MetadataCandidate.id`) to the song in place (same track id; fields the
+   * user edited stay) and mark it matched. Throws a user-facing Error when the
+   * suggestion is gone or the song's link failed (use `useLink` first).
+   */
+  async acceptMetadata(key: string, candidateId: string): Promise<void> {
+    await this.loaded;
+    const item = this.item(key);
+    if (!item || item.state === 'matched') return;
+    if (item.origin !== 'youtube') throw new Error(NOT_A_YOUTUBE_ITEM);
+    if (item.linkError) throw new Error(LINK_UNAVAILABLE);
+    const candidate = item.metaCandidates?.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error('That suggestion is no longer available.');
+    await this.enrich.apply(this.currentId(key), candidate);
+    this.patchItem(key, { state: 'matched', score: candidate.score, manual: true, metaCandidates: undefined });
+    this.finishIfIdle();
+    await this.persist();
+  }
+
+  /**
+   * YouTube review or unmatched item: keep the song's YouTube details (no
+   * change to the track) and mark it matched. Throws a user-facing Error when
+   * the song's link failed (use `useLink` instead).
+   */
+  async keepOriginal(key: string): Promise<void> {
+    await this.loaded;
+    const item = this.item(key);
+    if (!item || item.state === 'matched') return;
+    if (item.origin !== 'youtube') throw new Error(NOT_A_YOUTUBE_ITEM);
+    if (item.linkError) throw new Error(LINK_UNAVAILABLE);
+    this.patchItem(key, { state: 'matched', manual: true, metaCandidates: undefined });
+    this.finishIfIdle();
+    await this.persist();
+  }
+
+  /**
+   * A YouTube item's song link cannot be played or downloaded (e.g. the video
+   * was removed): it becomes unmatched with `linkError` so the review offers
+   * "Paste another link" (`useLink`). No-op for other items.
+   */
+  async markLinkFailed(key: string, reason = LINK_UNAVAILABLE): Promise<void> {
+    await this.loaded;
+    const item = this.item(key);
+    if (!item || item.origin !== 'youtube' || item.matchId) return;
+    this.patchItem(key, { state: 'unmatched', linkError: reason, metaCandidates: undefined, manual: undefined });
+    this.finishIfIdle();
+    await this.persist();
+  }
+
+  /** Leave a review item unmatched (a Spotify placeholder stays; a YouTube song keeps its details). */
   async skip(key: string): Promise<void> {
     await this.loaded;
     const item = this.item(key);
@@ -636,7 +786,7 @@ export class ImportStore {
   async reopen(key: string): Promise<void> {
     await this.loaded;
     const item = this.item(key);
-    if (!item || item.state !== 'unmatched' || !item.candidates?.length) return;
+    if (!item || item.state !== 'unmatched' || !(item.candidates?.length || item.metaCandidates?.length)) return;
     this.patchItem(key, { state: 'review', manual: undefined });
     this.finishIfIdle();
     await this.persist();
@@ -647,7 +797,8 @@ export class ImportStore {
    * refetched). A confident match is applied as usual; otherwise the new
    * suggestions replace the old ones and the item waits in review. With no
    * results the old suggestions stay. Paced with the import queue; throws a
-   * user-facing Error on failure (the job is not paused).
+   * user-facing Error on failure (the job is not paused). For a YouTube item
+   * the song details are looked up again instead (fresh `metaCandidates`).
    */
   async research(key: string): Promise<void> {
     await this.loaded;
@@ -659,6 +810,17 @@ export class ImportStore {
     this._searching.update((s) => new Set(s).add(key));
     try {
       await Promise.all([this.library.ready(), this.playlists.ready()]);
+      if (item.origin === 'youtube') {
+        if (item.linkError) throw new Error(LINK_UNAVAILABLE);
+        const track = this.library.track(this.currentId(key));
+        if (!track) return;
+        const [match] = await this.inSearchSlot(abort.signal, () => this.enrich.lookup([track], abort.signal));
+        const current = this.item(key);
+        if (abort.signal.aborted || !current || (current.state !== 'review' && current.state !== 'unmatched')) return;
+        if (match) await this.applyLookup(current, match, true);
+        await this.persist();
+        return;
+      }
       this.aliasCache.delete(key);
       const result = await this.searchItem(item, abort.signal);
       const current = this.item(key);
@@ -675,6 +837,7 @@ export class ImportStore {
       await this.persist();
     } catch (error) {
       if (isAbort(error) || abort.signal.aborted) return;
+      if (error instanceof Error && error.message === LINK_UNAVAILABLE) throw error;
       throw new Error(remoteErrorMessage(error));
     } finally {
       this.endSearching(key, abort);
@@ -692,8 +855,10 @@ export class ImportStore {
 
   /**
    * Match a review or unmatched item to a pasted video link (YouTube or any
-   * site the server supports), resolved like a pasted link in Search. Throws
-   * a user-facing Error for a bad link or a server failure.
+   * site the server supports), resolved like a pasted link in Search. For a
+   * YouTube item (e.g. one with `linkError`) the new link replaces the song
+   * everywhere, keeping its current details. Throws a user-facing Error for a
+   * bad link or a server failure.
    */
   async useLink(key: string, url: string): Promise<void> {
     await this.loaded;
@@ -767,7 +932,7 @@ export class ImportStore {
   unmatchedCsv(): string {
     return toCsv([
       ['Track URI', 'Track Name', 'Artist Name(s)', 'Album Name', 'Duration (ms)', 'ISRC'],
-      ...this.unmatchedItems().map((i) => [
+      ...this.unmatchedItems().filter((i) => !i.origin).map((i) => [
         i.spotifyId ? `spotify:track:${i.spotifyId}` : '',
         i.title,
         i.artists.join(';'),
@@ -781,22 +946,21 @@ export class ImportStore {
   /**
    * Delete all Spotify import data: the job (items, candidates, match cache).
    * Unless `keepPlaceholders`, unmatched placeholders are also removed from
-   * playlists, saved records and the library. Matched tracks stay as normal
-   * library tracks.
+   * playlists, saved records and the library. Matched tracks and YouTube
+   * songs stay as normal library tracks.
    */
   async deleteImportData(options: { keepPlaceholders?: boolean } = {}): Promise<void> {
     await this.loaded;
     this.stopRunner();
     for (const abort of this.researchAborts.values()) abort.abort();
     this.researchAborts.clear();
-    const placeholders = (this._job()?.items ?? []).filter((i) => i.state !== 'matched').map((i) => i.key);
+    const placeholders = (this._job()?.items ?? []).filter((i) => i.state !== 'matched' && !i.origin).map((i) => i.key);
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = null;
     this._job.set(null);
     await this.storage.settings.delete(SETTINGS_KEYS.spotifyImport);
     await this.sessions.deleteKind('spotify').catch(() => undefined);
-    await this.enrich.cancel();
-    await this.enrich.dismiss();
+    await this.enrich.takeLegacyQueue();
     if (options.keepPlaceholders || !placeholders.length) return;
     await this.playlists.removeTracksEverywhere(placeholders);
     for (const id of placeholders) {
@@ -828,6 +992,10 @@ export class ImportStore {
         if (!item) {
           this.update((job) => ({ ...job, status: 'done' }));
           break;
+        }
+        if (item.origin === 'youtube') {
+          if (!(await this.runYoutubeBatch(abort.signal))) break;
+          continue;
         }
         const cached = idKeys(item)
           .map((k) => this._job()?.cache[k])
@@ -875,6 +1043,102 @@ export class ImportStore {
       // Resumed while this run was winding down after a pause.
       if (abort.signal.aborted && this._job()?.status === 'running') void this.run();
     }
+  }
+
+  /**
+   * Look up song details for the next pending YouTube items (one batched
+   * request, paced with searches). Resolves false when the run must stop
+   * (aborted or paused).
+   */
+  private async runYoutubeBatch(signal: AbortSignal): Promise<boolean> {
+    const batch = (this._job()?.items ?? [])
+      .filter((i) => i.state === 'pending' && i.origin === 'youtube')
+      .slice(0, MAX_ENRICH_BATCH);
+    const live: { item: ImportItem; track: Track }[] = [];
+    for (const item of batch) {
+      const track = this.library.track(this.currentId(item.key));
+      if (!track) {
+        // Removed from the library meanwhile: nothing to look up.
+        this.patchItem(item.key, { state: 'matched' });
+      } else if (!hasLink(track)) {
+        this.patchItem(item.key, { state: 'unmatched', linkError: LINK_UNAVAILABLE });
+      } else {
+        live.push({ item, track });
+      }
+    }
+    if (!live.length) {
+      this.schedulePersist();
+      return true;
+    }
+    if (!this.remote?.configured) {
+      this.pauseWith(NO_SERVER);
+      return false;
+    }
+    if (!this.enrich.available) {
+      // Older server without song-detail lookup: keep the YouTube details.
+      for (const { item } of live) this.patchItem(item.key, { state: 'matched' });
+      this.schedulePersist();
+      return true;
+    }
+    try {
+      const matches = await this.inSearchSlot(signal, () =>
+        this.enrich.lookup(
+          live.map((l) => l.track),
+          signal,
+        ),
+      );
+      if (signal.aborted) return false;
+      for (const [i, { item }] of live.entries()) {
+        const current = this.item(item.key);
+        if (current?.state !== 'pending') continue;
+        const match = matches[i];
+        if (match) await this.applyLookup(current, match, false);
+        else this.patchItem(item.key, { state: 'matched' });
+      }
+      this.schedulePersist();
+      await sleep(ENRICH_PACE_MS, signal);
+      return true;
+    } catch (error) {
+      if (isAbort(error) || signal.aborted) return false;
+      const name = error instanceof Error ? error.name : '';
+      const status = (error as { status?: unknown } | null)?.status;
+      if (name === 'busy') {
+        await this.wait((busyRetryAfterSec(error) ?? BUSY_WAIT_SEC) * 1000, signal);
+      } else if (name === 'HttpError' && status === 429) {
+        await this.wait(RATE_LIMIT_WAIT_MS, signal);
+      } else if (PAUSING_ERRORS.has(name)) {
+        this.pauseWith(remoteErrorMessage(error));
+        return false;
+      } else {
+        // A lookup that keeps failing gives up: the songs keep their YouTube details.
+        for (const { item } of live) {
+          const attempts = (item.attempts ?? 0) + 1;
+          this.patchItem(item.key, attempts >= MAX_ATTEMPTS ? { state: 'matched', attempts } : { attempts });
+        }
+        await sleep(ENRICH_PACE_MS, signal).catch(() => undefined);
+      }
+      return !signal.aborted;
+    }
+  }
+
+  /**
+   * Apply a song-detail lookup to a YouTube item: a confident match is
+   * applied in place and the item matched; a weaker one waits in review as a
+   * metadata suggestion. `research`: a user-started lookup outside the queue.
+   */
+  private async applyLookup(item: ImportItem, match: EnrichMatch, research: boolean): Promise<void> {
+    if (match.confidence >= ENRICH_AUTO_ACCEPT) {
+      await this.enrich.apply(this.currentId(item.key), match);
+      this.patchItem(item.key, { state: 'matched', score: match.confidence, metaCandidates: undefined, manual: undefined });
+      if (research) this.finishIfIdle();
+      return;
+    }
+    this.patchItem(item.key, {
+      state: 'review',
+      score: match.confidence,
+      metaCandidates: toMetadataCandidates(match),
+      manual: undefined,
+    });
   }
 
   /**
@@ -1010,8 +1274,12 @@ export class ImportStore {
     }
   }
 
-  /** Replace the placeholder by `candidate` everywhere and remember the match. */
+  /**
+   * Replace the placeholder by `candidate` everywhere and remember the match.
+   * A YouTube item's song is replaced the same way, keeping its current details.
+   */
   private async applyMatch(item: ImportItem, candidate: Track, score: number | undefined, manual: boolean): Promise<void> {
+    if (item.origin === 'youtube') return this.replaceYoutubeLink(item, candidate, score, manual);
     const matched: Track = { ...candidate, title: item.title, artist: item.artist };
     if (item.album) matched.album = item.album;
     if (item.isrc) matched.isrc = item.isrc;
@@ -1030,6 +1298,41 @@ export class ImportStore {
       for (const k of idKeys(item)) if (!k.startsWith('meta:')) cache[k] = matched;
       return { ...job, cache };
     });
+  }
+
+  /** A YouTube item's song now plays from `candidate` (a pasted or picked link). */
+  private async replaceYoutubeLink(
+    item: ImportItem,
+    candidate: Track,
+    score: number | undefined,
+    manual: boolean,
+  ): Promise<void> {
+    const oldId = this.currentId(item.key);
+    const current = this.library.track(oldId);
+    const matched: Track = { ...candidate };
+    if (current) {
+      matched.title = current.title;
+      matched.artist = current.artist;
+      for (const k of ['album', 'year', 'genre', 'artUrl', 'userEdited'] as const) {
+        if (current[k] !== undefined) (matched as unknown as Record<string, unknown>)[k] = current[k];
+      }
+    }
+    await this.library.addMetadataTracks([matched]);
+    if (matched.id !== oldId) {
+      await this.playlists.replaceTrackEverywhere(oldId, matched.id);
+      await this.library.replaceSaved(oldId, matched.id);
+      await this.library.removeMetadataTracks([oldId]);
+    }
+    const patch: Partial<ImportItem> = {
+      state: 'matched',
+      matchId: matched.id === item.key ? undefined : matched.id,
+      candidates: undefined,
+      metaCandidates: undefined,
+      linkError: undefined,
+    };
+    if (score !== undefined) patch.score = score;
+    if (manual) patch.manual = true;
+    this.patchItem(item.key, patch);
   }
 
   private async wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -1216,6 +1519,14 @@ function youtubeErrorMessage(error: unknown): string {
     return message.charAt(0).toUpperCase() + message.slice(1).replace(/\.?$/, '.');
   }
   return remoteErrorMessage(error);
+}
+
+/** The song still has an http(s) page link to stream or download from. */
+function hasLink(track: Track): boolean {
+  const url = track.source?.url;
+  if (url !== undefined) return /^https?:\/\/\S+$/i.test(url);
+  // Tracks without a recorded source page fall back to their provider id.
+  return track.providerId === 'remote';
 }
 
 function dedupeById(tracks: readonly Track[]): Track[] {

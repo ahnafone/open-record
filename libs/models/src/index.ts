@@ -143,8 +143,9 @@ export const ENRICH_SOURCES = ['ytmusic', 'itunes', 'deezer', 'musicbrainz'] as 
 export type EnrichSource = (typeof ENRICH_SOURCES)[number];
 
 /**
- * A confident catalogue match for one {@link EnrichQuery}: fields from the
- * highest-priority confident source, gaps filled from the others.
+ * A catalogue match for one {@link EnrichQuery}: fields from the
+ * highest-priority source, gaps filled from the others. Below the
+ * high-confidence bar it is a review suggestion (see `alternatives`).
  */
 export interface EnrichMatch {
   title: string;
@@ -157,6 +158,33 @@ export interface EnrichMatch {
   /** 0..1 score of the primary source's candidate. */
   confidence: number;
   /** Sources that agreed, primary first. */
+  sources: EnrichSource[];
+  /**
+   * Other weaker suggestions, best first, only when this match is below the
+   * server's high-confidence bar (never nested).
+   */
+  alternatives?: EnrichMatch[];
+}
+
+/**
+ * A song-detail suggestion for an imported YouTube song, shown in the import
+ * review (the song's link stays the audio source; only metadata changes).
+ * Built from an {@link EnrichMatch}; reduced fields only, safe to persist.
+ */
+export interface MetadataCandidate {
+  /** Stable within its import item (e.g. `meta:0`); pass to `ImportStore.acceptMetadata`. */
+  id: string;
+  title: string;
+  artist: string;
+  album?: string;
+  year?: number;
+  genre?: string;
+  /** https cover art. */
+  artUrl?: string;
+  durationSec?: number;
+  /** 0..1 confidence of the catalogue match. */
+  score: number;
+  /** Catalogues that agreed, primary first. */
   sources: EnrichSource[];
 }
 

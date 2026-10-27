@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import type { Track } from '@open-record/models';
 import { MusicSourceRegistry } from '@open-record/music-source';
-import { StoragePort, createInMemoryStorage } from '@open-record/storage';
+import { SETTINGS_KEYS, StoragePort, createInMemoryStorage } from '@open-record/storage';
 import { ImportStore } from './import.store';
 import { LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
@@ -128,4 +128,103 @@ describe('spotify import', () => {
     expect(library.savedIds()).toEqual([other.id]);
     await store.deleteImportData();
   }, 15_000);
+});
+
+describe('youtube import', () => {
+  const yt = (v: string, title: string, withLink = true): Track => ({
+    id: `remote:https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D${v}`,
+    providerId: 'remote',
+    title,
+    artist: 'Uploader',
+    durationSec: 200,
+    ...(withLink ? { source: { site: 'youtube', url: `https://www.youtube.com/watch?v=${v}` } } : { providerId: 'other' }),
+  });
+
+  function setup(remote: Partial<RemoteServerPort>, storage = createInMemoryStorage()) {
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: StoragePort, useValue: storage },
+        { provide: MusicSourceRegistry, useValue: new MusicSourceRegistry() },
+        { provide: RemoteServerPort, useValue: { configured: true, configure: () => undefined, ...remote } },
+      ],
+    });
+    return {
+      store: TestBed.inject(ImportStore),
+      library: TestBed.inject(LibraryStore),
+      playlists: TestBed.inject(PlaylistsStore),
+    };
+  }
+
+  it('auto-applies confident details, sends weak ones to review, keeps originals and likes playlist songs', async () => {
+    const a = yt('a', 'M83 - Midnight City (Official Video)');
+    const b = yt('b', 'some upload');
+    const c = yt('c', 'unknown thing');
+    const enrich = vi.fn(async () => [
+      { title: 'Midnight City', artist: 'M83', album: 'Hurry Up', confidence: 0.95, sources: ['ytmusic' as const] },
+      { title: 'Maybe Song', artist: 'Maybe Artist', confidence: 0.6, sources: ['itunes' as const] },
+      null,
+    ]);
+    const { store, library, playlists } = setup({
+      importPlaylist: vi.fn(async () => ({ title: 'Mix', url: 'u', site: 'youtube', tracks: [a, b, c], unavailable: 0, truncated: false })),
+      enrich,
+    });
+
+    const summary = await store.startYoutube('https://www.youtube.com/playlist?list=x', undefined, { likeToo: true });
+    expect(summary).toMatchObject({ single: false, added: 3 });
+    expect(playlists.playlists()[0].trackIds).toEqual([a.id, b.id, c.id]);
+    expect(new Set(library.savedIds())).toEqual(new Set([a.id, b.id, c.id]));
+    expect(store.source()).toEqual({ kind: 'youtube', label: 'Mix' });
+
+    await vi.waitFor(() => expect(store.progress()).toMatchObject({ matched: 2, review: 1, pending: 0 }));
+    expect(library.track(a.id)).toMatchObject({ title: 'Midnight City', artist: 'M83', album: 'Hurry Up' });
+    expect(library.track(c.id)?.title).toBe('unknown thing');
+    const [review] = store.reviewItems();
+    expect(review).toMatchObject({ key: b.id, origin: 'youtube', state: 'review' });
+    expect(review.candidates).toBeUndefined();
+    expect(review.metaCandidates?.[0]).toMatchObject({ title: 'Maybe Song', score: 0.6 });
+
+    await store.acceptMetadata(b.id, review.metaCandidates?.[0].id ?? '');
+    expect(library.track(b.id)).toMatchObject({ id: b.id, title: 'Maybe Song', artist: 'Maybe Artist' });
+    expect(store.progress()).toMatchObject({ matched: 3, review: 0 });
+    await store.deleteImportData();
+    expect(library.track(a.id)).toBeDefined();
+  });
+
+  it('a song whose link failed is unmatched and can be fixed by pasting a link', async () => {
+    const broken = yt('x', 'Lost Song', false);
+    const fixed = yt('y', 'Lost Song (re-upload)');
+    const { store, library } = setup({
+      importPlaylist: vi.fn(async () => ({ title: 'Lost Song', url: 'u', site: 'youtube', tracks: [broken], unavailable: 0, truncated: false, single: true })),
+      enrich: vi.fn(async () => [null]),
+      resolveUrl: vi.fn(async () => fixed),
+    });
+    const summary = await store.startYoutube('https://youtu.be/x', undefined, { likeToo: true });
+    expect(summary.single).toBe(true);
+    expect(library.savedIds()).toEqual([broken.id]);
+    await vi.waitFor(() => expect(store.unmatchedItems()).toHaveLength(1));
+    expect(store.unmatchedItems()[0].linkError).toBeTruthy();
+    await expect(store.keepOriginal(broken.id)).rejects.toThrow();
+
+    await store.useLink(broken.id, 'https://www.youtube.com/watch?v=y');
+    expect(store.progress()).toMatchObject({ matched: 1, unmatched: 0 });
+    expect(store.resolveId(broken.id)).toBe(fixed.id);
+    expect(library.savedIds()).toEqual([fixed.id]);
+    expect(library.track(fixed.id)?.title).toBe('Lost Song');
+    await store.deleteImportData();
+  });
+
+  it('loads jobs where youtube songs were stored as matched', async () => {
+    const storage = createInMemoryStorage();
+    const old = yt('o', 'Old');
+    await storage.settings.set(SETTINGS_KEYS.spotifyImport, {
+      version: 1,
+      status: 'done',
+      cache: {},
+      items: [{ key: old.id, title: 'Old', artists: [], artist: 'Unknown artist', state: 'matched', origin: 'youtube' }],
+    });
+    const { store } = setup({}, storage);
+    await store.ready();
+    expect(store.progress()).toMatchObject({ total: 1, matched: 1 });
+    expect(store.needsAttention()).toBe(false);
+  });
 });

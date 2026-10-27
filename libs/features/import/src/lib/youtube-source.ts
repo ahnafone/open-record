@@ -1,11 +1,11 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, inject, output, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, model, output, signal } from '@angular/core';
 import { ImportStore } from '@open-record/state';
 import { OrButton, OrToast } from '@open-record/ui';
 import { SHARED_STYLES } from './shared';
 
 /**
  * YouTube / YT Music source: paste a public playlist link (a new playlist) or a
- * single song link (library only). The songs join the same import job as every
+ * single song link (library only), optionally also added to Liked Songs. The songs join the same import job as every
  * other source; `imported` tells the import page to show that job.
  */
 @Component({
@@ -31,6 +31,10 @@ import { SHARED_STYLES } from './shared';
       />
     </div>
     <p class="status bad" id="or-yt-status" role="status">{{ error() }}</p>
+    <label class="like-too">
+      <input type="checkbox" [checked]="likeToo()" [disabled]="store.importing()" (change)="likeToo.set(!likeToo())" />
+      <span>Also add to Liked Songs</span>
+    </label>
     <div class="actions">
       <or-button variant="primary" [disabled]="!link().trim() || store.importing()" (click)="submit()">
         {{ store.importing() ? 'Importing…' : 'Import' }}
@@ -46,11 +50,13 @@ import { SHARED_STYLES } from './shared';
     `
       .field { display: grid; gap: var(--spacing-xs); }
       .field-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-muted); }
-      input { inline-size: 100%; min-block-size: var(--spacing-touch); padding: 10px; font: inherit; color: var(--color-text);
+      input[type='url'] { inline-size: 100%; min-block-size: var(--spacing-touch); padding: 10px; font: inherit; color: var(--color-text);
         background: var(--color-background); border: 1px solid var(--color-border); border-radius: var(--rounded-md); outline: none;
         transition: border-color var(--duration-fast) var(--ease-standard); }
-      input:focus, input[aria-invalid='true'] { border-color: var(--color-primary); }
+      input[type='url']:focus, input[aria-invalid='true'] { border-color: var(--color-primary); }
       input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+      .like-too { display: flex; align-items: center; gap: var(--spacing-sm); min-block-size: var(--spacing-touch); font-size: 14px; cursor: pointer; }
+      .like-too input { inline-size: 22px; block-size: 22px; margin: 0; accent-color: var(--color-primary); cursor: pointer; }
       @media (prefers-reduced-motion: reduce) { input { transition-duration: 1ms; } }
     `,
   ],
@@ -61,6 +67,8 @@ export class YoutubeSource {
 
   /** The link was imported as a job; the import page shows it. */
   readonly imported = output<void>();
+  /** "Also add to Liked Songs": the song, or every playlist song, is bookmarked too. */
+  readonly likeToo = model(false);
 
   protected readonly link = signal('');
   protected readonly error = signal('');
@@ -87,7 +95,7 @@ export class YoutubeSource {
     this.error.set('');
     const abort = (this.abort = new AbortController());
     try {
-      const summary = await this.store.startYoutube(url, abort.signal);
+      const summary = await this.store.startYoutube(url, abort.signal, { likeToo: this.likeToo() });
       this.link.set('');
       this.toast.show(summary.single ? `Added ${summary.title}` : `Imported ${summary.title}`, 3200);
       this.imported.emit();

@@ -4,6 +4,7 @@ import { RouterLink } from '@angular/router';
 import { AuthStore, ImportStore, SyncStore, type ImportSummary, type ParsedImport } from '@open-record/state';
 import { OrButton, OrSectionHead, OrToast } from '@open-record/ui';
 import { JobProgress } from './job-progress';
+import { JobSongs } from './job-songs';
 import { ReviewList } from './review-list';
 import { SHARED_STYLES } from './shared';
 import { SourceStep, type LoadedFile } from './source-step';
@@ -13,12 +14,12 @@ type Step = 'source' | 'job';
 /**
  * Import wizard: choose a source (audio files on this device; Exportify CSV,
  * pasted or picked; data-download JSON; or a YouTube / YT Music playlist or song
- * link), then follow the one import job: matching, song-detail lookup, review.
+ * link), then follow the one import job: progress, review and the songs added.
  * Parsed Spotify data stays in memory until handed to `ImportStore.start`.
  */
 @Component({
   selector: 'or-import-page',
-  imports: [JobProgress, NgTemplateOutlet, OrButton, OrSectionHead, ReviewList, RouterLink, SourceStep],
+  imports: [JobProgress, JobSongs, NgTemplateOutlet, OrButton, OrSectionHead, ReviewList, RouterLink, SourceStep],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @switch (step()) {
@@ -49,13 +50,15 @@ type Step = 'source' | 'job';
         <p class="links"><a class="text-link" routerLink="/import/sessions">Import history</a></p>
       }
       @case ('job') {
-        <or-section-head heading="Matching" />
+        <or-section-head heading="Import progress" />
         <or-job-progress />
         <ng-container *ngTemplateOutlet="syncHint" />
         <div class="actions">
           <or-button (click)="override.set('source')">Import more</or-button>
         </div>
-        <or-review-list (deleted)="override.set('source')" />
+        <or-review-list (deleted)="override.set('source')">
+          <or-job-songs />
+        </or-review-list>
       }
     }
 

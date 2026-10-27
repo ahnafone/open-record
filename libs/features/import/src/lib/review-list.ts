@@ -1,47 +1,81 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, inject, output, signal } from '@angular/core';
-import { ImportStore, PreviewPlayerService, type ImportItem } from '@open-record/state';
+import { NgTemplateOutlet } from '@angular/common';
+import type { Track } from '@open-record/models';
+import { ImportStore, LibraryStore, PreviewPlayerService, type ImportItem } from '@open-record/state';
 import {
   OrButton,
   OrDialog,
   OrEmptyState,
+  OrIcon,
+  OrIconButton,
   OrSectionHead,
   OrSpinner,
   OrToast,
 } from '@open-record/ui';
 import { LinkPaste } from './link-paste';
-import { MatchCandidates } from './match-candidates';
+import { MatchCandidates, MetaCandidates } from './match-candidates';
 import { SHARED_STYLES, downloadText } from './shared';
 
-/** Step 4: review uncertain matches, export unmatched, delete import data. */
+/**
+ * Step 4: review uncertain matches, export unmatched, delete import data.
+ * Spotify rows pick a recording; YouTube rows keep their own link (previewed
+ * here) and pick song details, keep the original, or take another link.
+ */
 @Component({
   selector: 'or-review-list',
-  imports: [LinkPaste, MatchCandidates, OrButton, OrEmptyState, OrSectionHead, OrSpinner],
+  imports: [LinkPaste, MatchCandidates, MetaCandidates, NgTemplateOutlet, OrButton, OrEmptyState, OrIcon, OrIconButton, OrSectionHead, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <or-section-head heading="To review" [level]="3" />
     @if (store.reviewItems().length) {
-      <p class="lede">Pick the right recording, or skip to leave it unmatched.</p>
+      <p class="lede">Pick the right recording or song details, or skip to leave it unmatched.</p>
       <ul class="rows">
         @for (item of store.reviewItems(); track item.key) {
+          @let searching = store.searching().has(item.key);
+          @let locked = busy() === item.key || searching;
           <li class="row">
-            <span class="title">{{ item.title }}</span>
-            <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}{{ time(item.durationMs) }}</span>
-            @let searching = store.searching().has(item.key);
-            <or-match-candidates
-              [candidates]="item.candidates ?? []"
-              [disabled]="busy() === item.key || searching"
-              (use)="accept(item, $event.id)"
-            />
-            <div class="item-actions">
-              <or-button size="sm" [disabled]="busy() === item.key || searching" (click)="skip(item)">Skip</or-button>
-              <or-button size="sm" [disabled]="busy() === item.key || searching" (click)="research(item)">
-                @if (searching) {
-                  <or-spinner [size]="14" label="Searching" />
-                }
-                Search again
-              </or-button>
-            </div>
-            <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" />
+            @if (item.origin === 'youtube') {
+              <ng-container *ngTemplateOutlet="youtubeHead; context: { $implicit: item }" />
+              @if (item.linkError) {
+                <ng-container *ngTemplateOutlet="linkFailed; context: { $implicit: item }" />
+              } @else {
+                <or-meta-candidates
+                  [candidates]="item.metaCandidates ?? []"
+                  [disabled]="locked"
+                  [pendingId]="busy() === item.key ? pendingMeta() : null"
+                  (use)="acceptMeta(item, $event.id)"
+                />
+                <div class="item-actions">
+                  <or-button size="sm" [disabled]="locked" (click)="keepOriginal(item)">Keep original</or-button>
+                  <or-button size="sm" [disabled]="locked" (click)="skip(item)">Skip</or-button>
+                  <or-button size="sm" [disabled]="locked" (click)="research(item)">
+                    @if (searching) {
+                      <or-spinner [size]="14" label="Searching" />
+                    }
+                    Search again
+                  </or-button>
+                </div>
+                <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" label="Paste another link" />
+              }
+            } @else {
+              <span class="title">{{ item.title }}</span>
+              <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}{{ time(item.durationMs) }}</span>
+              <or-match-candidates
+                [candidates]="item.candidates ?? []"
+                [disabled]="locked"
+                (use)="accept(item, $event.id)"
+              />
+              <div class="item-actions">
+                <or-button size="sm" [disabled]="locked" (click)="skip(item)">Skip</or-button>
+                <or-button size="sm" [disabled]="locked" (click)="research(item)">
+                  @if (searching) {
+                    <or-spinner [size]="14" label="Searching" />
+                  }
+                  Search again
+                </or-button>
+              </div>
+              <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" />
+            }
           </li>
         }
       </ul>
@@ -53,7 +87,7 @@ import { SHARED_STYLES, downloadText } from './shared';
     <or-section-head heading="Unmatched" [level]="3" />
     @if (store.unmatchedItems().length) {
       <p class="lede">
-        These stay as placeholders. Export them as CSV to find them elsewhere or import again later.
+        Spotify tracks stay as placeholders: export them as CSV to find them elsewhere or import again later. YouTube songs keep their original details.
       </p>
       <div class="actions">
         <or-button (click)="download()">Download CSV</or-button>
@@ -62,18 +96,33 @@ import { SHARED_STYLES, downloadText } from './shared';
       <ul class="rows">
         @for (item of store.unmatchedItems(); track item.key) {
           <li class="row">
-            <span class="title">{{ item.title }}</span>
-            <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}</span>
-            @if (item.candidates?.length) {
-              <or-button size="sm" [disabled]="busy() === item.key || store.searching().has(item.key)" (click)="reopen(item)">Review again</or-button>
+            @if (item.origin === 'youtube') {
+              <ng-container *ngTemplateOutlet="youtubeHead; context: { $implicit: item }" />
+              @if (item.linkError) {
+                <ng-container *ngTemplateOutlet="linkFailed; context: { $implicit: item }" />
+              } @else {
+                @if (item.metaCandidates?.length) {
+                  <or-button size="sm" [disabled]="busy() === item.key || store.searching().has(item.key)" (click)="reopen(item)">Review again</or-button>
+                }
+                <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" label="Paste another link" />
+              }
+            } @else {
+              <span class="title">{{ item.title }}</span>
+              <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}</span>
+              @if (item.candidates?.length) {
+                <or-button size="sm" [disabled]="busy() === item.key || store.searching().has(item.key)" (click)="reopen(item)">Review again</or-button>
+              }
+              <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" />
             }
-            <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" />
           </li>
         }
       </ul>
     } @else {
       <or-empty-state>No unmatched tracks.</or-empty-state>
     }
+
+    <!-- The job's finished songs (projected by the import page). -->
+    <ng-content />
 
     <or-section-head heading="Import data" [level]="3" />
     <p class="lede">
@@ -82,6 +131,43 @@ import { SHARED_STYLES, downloadText } from './shared';
     </p>
     <or-button variant="danger" block (click)="deleteData()">Delete import data</or-button>
     <p class="status bad" role="status">{{ error() }}</p>
+
+    <!-- A YouTube song: its current details and a preview of its own link (the fixed audio). -->
+    <ng-template #youtubeHead let-item>
+      @let track = linkTrack(item);
+      <div class="yt-head">
+        <span class="text">
+          <span class="title" [class.is-current]="!!track && preview.playingId() === track.id">{{ item.title }}</span>
+          <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}{{ time(item.durationMs) }}</span>
+          <span class="site">YouTube link</span>
+        </span>
+        @if (track && !item.linkError) {
+          @let playing = preview.playingId() === track.id;
+          @let loading = preview.loadingId() === track.id;
+          <or-icon-button
+            [icon]="loading ? null : playing ? 'pause' : 'play'"
+            [label]="'Play preview of ' + item.title"
+            [pressed]="playing"
+            (click)="togglePreview(track)"
+          >
+            @if (loading) {
+              <or-spinner [size]="18" label="Loading preview" />
+            }
+          </or-icon-button>
+        }
+      </div>
+    </ng-template>
+
+    <!-- The song's link cannot be used: pasting another one is the fix. -->
+    <ng-template #linkFailed let-item>
+      <p class="status bad link-error"><or-icon name="alert" [size]="14" />{{ item.linkError }}</p>
+      <or-link-paste [itemKey]="item.key" [disabled]="busy() === item.key" label="Paste another link" expanded />
+      @if (item.state === 'review') {
+        <div class="item-actions">
+          <or-button size="sm" [disabled]="busy() === item.key" (click)="skip(item)">Skip</or-button>
+        </div>
+      }
+    </ng-template>
   `,
   styles: [
     SHARED_STYLES,
@@ -92,6 +178,12 @@ import { SHARED_STYLES, downloadText } from './shared';
       .row:first-child { border-top: 0; }
       or-match-candidates { justify-self: stretch; }
       .title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+      .title.is-current { color: var(--color-primary); }
+      .yt-head { display: flex; align-items: center; gap: var(--spacing-sm); justify-self: stretch; }
+      .yt-head .text { display: grid; gap: 2px; flex: 1; min-inline-size: 0; }
+      .site { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-muted); }
+      or-meta-candidates { justify-self: stretch; }
+      .link-error { display: flex; align-items: center; gap: 6px; }
       .meta { font-size: 12px; color: var(--color-muted); overflow-wrap: anywhere; }
       .actions { margin: 0 0 var(--spacing-sm); }
       .item-actions { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
@@ -107,7 +199,11 @@ export class ReviewList {
   /** Emitted after the import data was deleted. */
   readonly deleted = output<void>();
 
+  private readonly library = inject(LibraryStore);
+
   protected readonly busy = signal<string | null>(null);
+  /** Metadata suggestion being applied (spinner on its button). */
+  protected readonly pendingMeta = signal<string | null>(null);
   protected readonly error = signal('');
 
   constructor() {
@@ -122,6 +218,30 @@ export class ReviewList {
 
   protected async accept(item: ImportItem, trackId: string): Promise<void> {
     await this.run(item.key, () => this.store.acceptCandidate(item.key, trackId));
+  }
+
+  /** The YouTube song's own track (its link is the audio), if still in the library. */
+  protected linkTrack(item: ImportItem): Track | undefined {
+    return this.library.track(this.store.resolveId(item.key));
+  }
+
+  protected togglePreview(track: Track): void {
+    void this.preview.toggle(track);
+  }
+
+  protected async acceptMeta(item: ImportItem, candidateId: string): Promise<void> {
+    void this.preview.stop();
+    this.pendingMeta.set(candidateId);
+    try {
+      await this.run(item.key, () => this.store.acceptMetadata(item.key, candidateId));
+    } finally {
+      this.pendingMeta.set(null);
+    }
+  }
+
+  protected async keepOriginal(item: ImportItem): Promise<void> {
+    void this.preview.stop();
+    await this.run(item.key, () => this.store.keepOriginal(item.key));
   }
 
   protected async skip(item: ImportItem): Promise<void> {

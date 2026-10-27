@@ -186,8 +186,25 @@ export function parsePlaylist(raw: unknown): RemotePlaylist {
   return playlist;
 }
 
-/** Validate one `POST /meta/enrich` result; null when absent or malformed. */
+/** Most weaker suggestions kept from one enrich result (alongside the match itself). */
+const MAX_ENRICH_ALTERNATIVES = 2;
+
+/**
+ * Validate one `POST /meta/enrich` result; null when absent or malformed.
+ * Keeps up to {@link MAX_ENRICH_ALTERNATIVES} valid weaker `alternatives`.
+ */
 export function parseEnrichMatch(raw: unknown): EnrichMatch | null {
+  const match = parseEnrichFields(raw);
+  if (!match || !isObj(raw) || !Array.isArray(raw['alternatives'])) return match;
+  const alternatives = raw['alternatives']
+    .map(parseEnrichFields)
+    .filter((m): m is EnrichMatch => !!m)
+    .slice(0, MAX_ENRICH_ALTERNATIVES);
+  if (alternatives.length) match.alternatives = alternatives;
+  return match;
+}
+
+function parseEnrichFields(raw: unknown): EnrichMatch | null {
   if (!isObj(raw)) return null;
   const title = str(raw['title']);
   const artist = str(raw['artist']);
@@ -290,8 +307,8 @@ export class RemoteClient {
   }
 
   /**
-   * `POST /meta/enrich {items}`: confident catalogue matches, one per item
-   * (null when none). A background call, so a 401 does not prompt sign-in.
+   * `POST /meta/enrich {items}`: catalogue matches, one per item (null when
+   * none); a weak match may carry `alternatives`. A background call, so a 401 does not prompt sign-in.
    */
   async enrich(items: EnrichQuery[], signal?: AbortSignal): Promise<(EnrichMatch | null)[]> {
     if (!items.length) return [];

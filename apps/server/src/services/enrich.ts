@@ -2,7 +2,7 @@
  * Catalogue metadata for songs imported from YouTube playlists. Each song is
  * looked up in YouTube Music (yt-dlp), the iTunes Search API, the Deezer
  * search API and MusicBrainz; candidates are scored against the query and
- * only confident ones are merged. Every source has its own timeout and fails
+ * confident ones are merged (weaker ones come back as review suggestions). Every source has its own timeout and fails
  * soft. Results (never raw payloads) are kept in a bounded in-memory cache.
  */
 import {
@@ -29,6 +29,10 @@ export interface EnrichCandidate {
 
 /** Scores at or above this replace the YouTube metadata. */
 export const HIGH_CONFIDENCE = 0.82;
+/** Weaker matches at or above this are returned as review suggestions. */
+export const LOW_CONFIDENCE = 0.45;
+/** Most suggestions returned per song when none is confident. */
+export const MAX_SUGGESTIONS = 3;
 export const MAX_ENRICH_FIELD = 300;
 
 const HTTP_TIMEOUT_MS = 6000;
@@ -139,21 +143,10 @@ export function scoreCandidate(
   return Math.max(0, Math.min(1, Math.round(score * 1000) / 1000));
 }
 
-/**
- * Merges confident candidates: fields come from the highest-priority source
- * (YT Music > iTunes > Deezer > MusicBrainz) and gaps are filled from the
- * others. Null when no candidate reaches {@link HIGH_CONFIDENCE}.
- */
-export function mergeCandidates(query: EnrichQuery, candidates: EnrichCandidate[]): EnrichMatch | null {
-  const best = new Map<EnrichSource, { c: EnrichCandidate; score: number }>();
-  for (const c of candidates) {
-    const score = scoreCandidate(query, c);
-    if (score < HIGH_CONFIDENCE) continue;
-    const prev = best.get(c.source);
-    if (!prev || score > prev.score) best.set(c.source, { c, score });
-  }
-  const ranked = ENRICH_SOURCES.map((s) => best.get(s)).filter((x): x is { c: EnrichCandidate; score: number } => !!x);
-  if (!ranked.length) return null;
+type Scored = { c: EnrichCandidate; score: number };
+
+/** One match from scored candidates: fields from the highest-priority source, gaps filled from the others. */
+function mergeRanked(ranked: Scored[]): EnrichMatch {
   const primary = ranked[0];
   const match: EnrichMatch = {
     title: primary.c.title,
@@ -169,6 +162,44 @@ export function mergeCandidates(query: EnrichQuery, candidates: EnrichCandidate[
     if (match.durationSec === undefined && c.durationSec) match.durationSec = c.durationSec;
   }
   return match;
+}
+
+/** Best candidate per source, in source priority order. */
+function bestPerSource(scored: Scored[]): Scored[] {
+  const best = new Map<EnrichSource, Scored>();
+  for (const x of scored) {
+    const prev = best.get(x.c.source);
+    if (!prev || x.score > prev.score) best.set(x.c.source, x);
+  }
+  return ENRICH_SOURCES.map((s) => best.get(s)).filter((x): x is Scored => !!x);
+}
+
+/**
+ * Merges confident candidates: fields come from the highest-priority source
+ * (YT Music > iTunes > Deezer > MusicBrainz) and gaps are filled from the
+ * others. When no candidate reaches {@link HIGH_CONFIDENCE}, returns the best
+ * weaker suggestion (at or above {@link LOW_CONFIDENCE}) with up to
+ * {@link MAX_SUGGESTIONS}-1 more in `alternatives`, each with its own score
+ * (the same song from several sources is merged into one). Null when nothing
+ * reaches the floor.
+ */
+export function mergeCandidates(query: EnrichQuery, candidates: EnrichCandidate[]): EnrichMatch | null {
+  const scored = candidates.map((c) => ({ c, score: scoreCandidate(query, c) }));
+  const confident = bestPerSource(scored.filter((x) => x.score >= HIGH_CONFIDENCE));
+  if (confident.length) return mergeRanked(confident);
+  const groups = new Map<string, Scored[]>();
+  for (const x of scored) {
+    if (x.score < LOW_CONFIDENCE) continue;
+    const key = `${foldForMatch(x.c.artist)}|${foldForMatch(x.c.title)}`;
+    groups.set(key, [...(groups.get(key) ?? []), x]);
+  }
+  const suggestions = [...groups.values()]
+    .map((group) => ({ ...mergeRanked(bestPerSource(group)), confidence: Math.max(...group.map((x) => x.score)) }))
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, MAX_SUGGESTIONS);
+  if (!suggestions.length) return null;
+  const [first, ...rest] = suggestions;
+  return rest.length ? { ...first, alternatives: rest } : first;
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +406,8 @@ const cacheKey = (q: EnrichQuery): string =>
 
 function remember(key: string, value: EnrichMatch | null): void {
   cache.delete(key);
-  cache.set(key, { value, until: Date.now() + (value ? HIT_TTL_MS : MISS_TTL_MS) });
+  const confident = !!value && value.confidence >= HIGH_CONFIDENCE;
+  cache.set(key, { value, until: Date.now() + (confident ? HIT_TTL_MS : MISS_TTL_MS) });
   while (cache.size > MAX_CACHE) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
@@ -387,11 +419,11 @@ async function lookupUncached(q: EnrichQuery): Promise<{ value: EnrichMatch | nu
   const settled = await Promise.allSettled(SOURCES.map((s) => withTimeout(s.fn(q), s.timeoutMs)));
   const candidates = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
   const value = mergeCandidates(q, candidates);
-  // A miss with failed sources is not cached: a retry may do better.
+  // A miss or weak match with failed sources is not cached: a retry may do better.
   return { value, complete: settled.every((r) => r.status === 'fulfilled') };
 }
 
-/** Best confident catalogue match for one song, or null. Never throws. */
+/** Best catalogue match for one song (confident, or weaker suggestions), or null. Never throws. */
 export async function enrichOne(raw: EnrichQuery): Promise<EnrichMatch | null> {
   const q: EnrichQuery = {
     title: raw.title.trim().slice(0, MAX_ENRICH_FIELD),
@@ -412,7 +444,7 @@ export async function enrichOne(raw: EnrichQuery): Promise<EnrichMatch | null> {
   if (pending) return pending;
   const promise = lookupUncached(q)
     .then(({ value, complete }) => {
-      if (value || complete) remember(key, value);
+      if (complete || (value && value.confidence >= HIGH_CONFIDENCE)) remember(key, value);
       return value;
     })
     .catch(() => null)

@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, booleanAttribute, inject, input, output } from '@angular/core';
-import type { Track } from '@open-record/models';
+import type { MetadataCandidate, Track } from '@open-record/models';
 import { PreviewPlayerService, type ImportCandidate } from '@open-record/state';
 import { OrButton, OrIconButton, OrSleeve, OrSpinner } from '@open-record/ui';
 
@@ -91,5 +91,59 @@ export class MatchCandidates {
   protected choose(track: Track): void {
     void this.preview.stop();
     this.use.emit(track);
+  }
+}
+
+/**
+ * Song-detail suggestions for an imported YouTube song: art, title, artist,
+ * album and year, match score and "Use this". No preview: the song's own
+ * link stays the audio, only its details change.
+ */
+@Component({
+  selector: 'or-meta-candidates',
+  imports: [OrButton, OrSleeve, OrSpinner],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <ul class="cands">
+      @for (c of candidates(); track c.id) {
+        <li class="cand">
+          <or-sleeve size="thumb" [src]="c.artUrl" [label]="c.title" fallbackLabel="No artwork" />
+          <span class="text">
+            <span class="ctitle">{{ c.title }}</span>
+            <span class="meta">{{ c.artist }}{{ c.album ? ' · ' + c.album : '' }}{{ c.year ? ' · ' + c.year : '' }}</span>
+            <span class="meta">{{ percent(c.score) }}% match{{ c.sources.length ? ' · ' + c.sources.join(', ') : '' }}</span>
+          </span>
+          <or-button size="sm" [disabled]="disabled()" (click)="use.emit(c)">
+            @if (pendingId() === c.id) {
+              <or-spinner [size]="14" label="Saving" />
+            }
+            Use this
+          </or-button>
+        </li>
+      }
+    </ul>
+  `,
+  styles: `
+    :host { display: block; }
+    .cands { display: grid; gap: var(--spacing-xs); margin: var(--spacing-sm) 0; padding: 0; list-style: none; }
+    .cand { display: flex; align-items: center; gap: var(--spacing-sm); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-xs) var(--spacing-md);
+      background: var(--color-surface); border: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); border-radius: var(--rounded-md); }
+    .text { display: grid; flex: 1; min-inline-size: 0; }
+    .ctitle { font-size: 14px; overflow-wrap: anywhere; }
+    .meta { font-size: 12px; color: var(--color-muted); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  `,
+})
+export class MetaCandidates {
+  readonly candidates = input.required<readonly MetadataCandidate[]>();
+  /** Another action is running: "Use this" is disabled. */
+  readonly disabled = input(false, { transform: booleanAttribute });
+  /** Suggestion being applied; shows a spinner on its button. */
+  readonly pendingId = input<string | null>(null);
+
+  /** The chosen suggestion. */
+  readonly use = output<MetadataCandidate>();
+
+  protected percent(score: number): number {
+    return Math.round(score * 100);
   }
 }

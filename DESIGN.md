@@ -498,17 +498,19 @@ overlays.
   reserved 12px coral error line and a primary Import button ("Importing…"
   while busy, plus Cancel). It is one import flow, not a separate panel: a
   successful link shows a toast and switches the page to the same job view as
-  every other source (counts, progress, review list, "Import more"). A playlist
-  link creates a playlist and its songs are matched and listed in Import
-  history as "YouTube · playlist name"; a single song link adds only that song
-  to the library (no playlist), listed as "YouTube · song title". Background
-  song-detail lookup is a "Finding song details" section inside the same job
-  panel: an uppercase muted eyebrow, a reserved status line ("N of M checked ·
-  K updated", a spinner while running, wait countdowns, or the error), a 4px
-  coral progress line, and Pause / Resume (Retry after an error) / Stop, which
-  act on matching and the lookup together. Done dismisses the lookup when it
-  has finished. Matched songs simply change their title, artist and sleeve;
-  nothing else is flagged.
+  every other source. It has an "Also add to Liked Songs" checkbox (44px
+  target). A playlist link creates a playlist; a single song link adds only
+  that song (no playlist). Both are listed in Import history as "YouTube ·
+  playlist or song title". YouTube runs through the same job as Spotify:
+  pending, then song-detail lookup, then auto-match at high confidence, else
+  review. The job view is one "Import progress" panel for every source: a
+  source label, counts (Matched, To review, Not found, Pending), a 4px coral
+  progress line and one Pause / Resume / Stop; there is no separate "Finding
+  song details" section. Finished songs appear in an "Added" list. YouTube
+  review rows show metadata suggestions (sleeve, title, artist, album / year,
+  score) instead of video suggestions, with a preview button for the song's
+  own link. Actions: Use this, Keep original, Skip, Search again and Paste
+  another link (opens a paste field; a bad link shows a coral error).
 - **Modal:** max 336px wide, max 82% tall, serif title, stacked actions.
 - **Toast:** ivory slip with ink text, slides up 10px and fades in.
 

@@ -7,7 +7,7 @@ import type { RouteOptions } from './index';
 
 /**
  * GET /meta/aliases: alternative titles/artist names from MusicBrainz (fails soft to empty lists).
- * POST /meta/enrich: confident catalogue matches (YT Music, iTunes, Deezer, MusicBrainz) for a batch of songs.
+ * POST /meta/enrich: catalogue matches (confident, else up to 3 weaker suggestions) (YT Music, iTunes, Deezer, MusicBrainz) for a batch of songs.
  */
 export const metaRoutes: FastifyPluginAsync<RouteOptions> = async (app, { config }) => {
   const rateLimit = {

@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, booleanAttribute, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, booleanAttribute, computed, inject, input, linkedSignal, signal } from '@angular/core';
 import { ImportStore, PreviewPlayerService } from '@open-record/state';
 import { OrButton, OrIcon, OrIconButton, OrSpinner } from '@open-record/ui';
 import { SHARED_STYLES } from './shared';
@@ -43,7 +43,7 @@ let nextId = 0;
       </form>
     } @else {
       <or-button size="sm" [disabled]="disabled() || pending()" (click)="open.set(true)">
-        <or-icon name="link" [size]="16" />Paste link
+        <or-icon name="link" [size]="16" />{{ label() }}
       </or-button>
     }
   `,
@@ -72,9 +72,13 @@ export class LinkPaste {
   readonly itemKey = input.required<string>();
   /** Another action on the item is running. */
   readonly disabled = input(false, { transform: booleanAttribute });
+  /** Button text while the field is closed. */
+  readonly label = input('Paste link');
+  /** Show the field open from the start (the item's own link failed). */
+  readonly expanded = input(false, { transform: booleanAttribute });
 
   protected readonly id = `or-import-link-${nextId++}`;
-  protected readonly open = signal(false);
+  protected readonly open = linkedSignal(() => this.expanded());
   protected readonly link = signal('');
   protected readonly error = signal('');
   protected readonly pending = computed(() => this.store.searching().has(this.itemKey()));
