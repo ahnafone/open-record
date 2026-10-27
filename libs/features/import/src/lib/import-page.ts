@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import { AuthStore, ImportStore, SyncStore, type ImportSummary, type ParsedImport } from '@open-record/state';
 import { OrButton, OrSectionHead, OrToast } from '@open-record/ui';
 import { JobProgress } from './job-progress';
@@ -10,21 +11,22 @@ import { SourceStep, type LoadedFile } from './source-step';
 type Step = 'source' | 'job';
 
 /**
- * Spotify import wizard: choose a source (Exportify CSV, pasted or picked;
- * data-download JSON), select playlists, then follow matching progress and
- * review. Parsed data stays in memory until handed to `ImportStore.start`.
+ * Import wizard: choose a source (audio files on this device; Exportify CSV,
+ * pasted or picked; data-download JSON; or a YouTube / YT Music playlist or song
+ * link), then follow the one import job: matching, song-detail lookup, review.
+ * Parsed Spotify data stays in memory until handed to `ImportStore.start`.
  */
 @Component({
   selector: 'or-import-page',
-  imports: [JobProgress, NgTemplateOutlet, OrButton, OrSectionHead, ReviewList, SourceStep],
+  imports: [JobProgress, NgTemplateOutlet, OrButton, OrSectionHead, ReviewList, RouterLink, SourceStep],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @switch (step()) {
       @case ('source') {
         <or-section-head heading="Choose a source" />
         <p class="lede">
-          Bring your Spotify playlists and Liked Songs. Open Record finds each song on your download server;
-          nothing is downloaded until you save it.
+          Add audio files from this device, bring your Spotify playlists and Liked Songs, or a public YouTube or YT Music playlist or song. Open
+          Record finds each song on your download server; nothing is downloaded until you save it.
         </p>
         <ng-container *ngTemplateOutlet="syncHint" />
         <or-source-step
@@ -32,6 +34,7 @@ type Step = 'source' | 'job';
           (fileAdded)="addFile($event)"
           (clear)="files.set([])"
           (filesReady)="importFiles()"
+          (youtubeImported)="override.set('job')"
           [busy]="starting()"
           [(likeToo)]="likeToo"
         />
@@ -43,6 +46,7 @@ type Step = 'source' | 'job';
             <or-button (click)="override.set('job')">Back to import progress</or-button>
           </div>
         }
+        <p class="links"><a class="text-link" routerLink="/import/sessions">Import history</a></p>
       }
       @case ('job') {
         <or-section-head heading="Matching" />
@@ -70,7 +74,11 @@ type Step = 'source' | 'job';
   styles: [
     SHARED_STYLES,
     `or-section-head:first-child { margin-top: var(--spacing-xs); }
-    .sync-hint { margin: 0 0 var(--spacing-md); }`,
+    .sync-hint { margin: 0 0 var(--spacing-md); }
+    .links { margin: var(--spacing-md) 0 0; }
+    .text-link { display: inline-flex; align-items: center; min-block-size: var(--spacing-touch); font-size: 13px; color: var(--color-text);
+      text-decoration: underline; text-underline-offset: 3px; border-radius: var(--rounded-md); }
+    .text-link:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }`,
   ],
 })
 export class ImportPage {
@@ -79,12 +87,15 @@ export class ImportPage {
   protected readonly sync = inject(SyncStore);
   private readonly toast = inject(OrToast);
 
-  /** User-chosen step; otherwise the job view when a job exists. */
+  /**
+   * User-chosen step; otherwise the job view only while matching needs the
+   * user (a finished job stays one tap away, "Back to import progress").
+   */
   protected readonly override = signal<Step | null>(null);
   protected readonly step = computed<Step>(() => {
     const o = this.override();
     if (o === 'job' && !this.store.hasJob()) return 'source';
-    return o ?? (this.store.hasJob() ? 'job' : 'source');
+    return o ?? (this.store.needsAttention() ? 'job' : 'source');
   });
 
   protected readonly files = signal<readonly LoadedFile[]>([]);
@@ -99,6 +110,14 @@ export class ImportPage {
   }));
   constructor() {
     void this.store.ready();
+  }
+
+  /** First file name (or playlist name), plus how many more. */
+  private sessionLabel(): string | undefined {
+    const names = this.files().map((f) => f.name);
+    const first = names[0] ?? this.merged().playlists[0]?.name;
+    if (!first) return undefined;
+    return names.length > 1 ? `${first} +${names.length - 1} more` : first;
   }
 
   protected addFile(file: LoadedFile): void {
@@ -117,7 +136,7 @@ export class ImportPage {
     try {
       const parsed = await load();
       if (!parsed) return;
-      const summary = await this.store.start(parsed, { likeAll: this.likeToo() });
+      const summary = await this.store.start(parsed, { likeAll: this.likeToo(), label: this.sessionLabel() });
       this.toast.show(describe(summary), 3200);
       this.override.set('job');
     } catch (error) {

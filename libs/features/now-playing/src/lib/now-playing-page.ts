@@ -1,8 +1,13 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
+  Injector,
+  afterNextRender,
+  booleanAttribute,
   computed,
   inject,
+  input,
   signal,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
@@ -15,9 +20,11 @@ import {
   AuthStore,
 } from '@open-record/state';
 import {
+  OrButton,
   OrEmptyState,
   OrIcon,
   OrIconButton,
+  OrModal,
   OrSectionHead,
   OrSleeve,
   OrSlider,
@@ -29,8 +36,10 @@ import { injectTrackArt } from './track-art';
 
 interface UpNextRow {
   readonly track: Track;
-  /** Index into `PlayerStore.queue()`, for `playAt`. */
+  /** Index into `PlayerStore.queue()`, for `playAt` and `removeUpcoming`. */
   readonly queueIndex: number;
+  /** Added with "Play next". */
+  readonly playNext: boolean;
 }
 
 /** `m:ss` (or `h:mm:ss`) for seek times. */
@@ -46,15 +55,18 @@ export function formatTime(totalSec: number): string {
  * Now Playing: large sleeve over a disc that spins while playing, title,
  * artist, album, tags (imported, licence, year, genre), a reserved status
  * line, the seek bar, the transport row, the track credit and the up-next
- * queue. The shell's top bar already carries the screen's h1.
+ * queue. The shell's top bar already carries the screen's h1. As the desktop
+ * side panel (`panel`), the seek and transport rows are left to the player bar.
  */
 @Component({
   selector: 'or-now-playing-page',
   imports: [
     RouterLink,
+    OrButton,
     OrEmptyState,
     OrIcon,
     OrIconButton,
+    OrModal,
     OrSectionHead,
     OrSleeve,
     OrSlider,
@@ -110,6 +122,7 @@ export function formatTime(totalSec: number): string {
         </div>
       </div>
 
+      @if (!panel()) {
       <div class="seek">
         <span class="time">{{ fmt(shownPosition()) }}</span>
         <or-slider
@@ -126,6 +139,7 @@ export function formatTime(totalSec: number): string {
         />
         <span class="time">{{ fmt(seekMax()) }}</span>
       </div>
+      }
 
       <div class="status" aria-live="polite">
         @if (player.isLoading()) {
@@ -137,6 +151,7 @@ export function formatTime(totalSec: number): string {
         }
       </div>
 
+      @if (!panel()) {
       <div class="transport">
         <or-icon-button
           variant="transport"
@@ -183,6 +198,7 @@ export function formatTime(totalSec: number): string {
           (click)="toggleSaved(track)"
         />
       </div>
+      }
 
       @if (track.credit) {
         <p class="note">{{ track.credit }}</p>
@@ -196,24 +212,55 @@ export function formatTime(totalSec: number): string {
               <button
                 type="button"
                 class="row-main"
-                [attr.aria-label]="'Play ' + row.track.title + ' by ' + row.track.artist"
+                [attr.aria-label]="
+                  'Play ' +
+                  row.track.title +
+                  ' by ' +
+                  row.track.artist +
+                  (row.playNext ? ', queued to play next' : '')
+                "
                 (click)="player.playAt(row.queueIndex)"
               >
                 <or-sleeve size="thumb" [src]="art(row.track)" />
                 <span class="row-txt">
                   <span class="row-title">{{ row.track.title }}</span>
                   <span class="row-artist">{{ row.track.artist }}</span>
+                  @if (row.playNext) {
+                    <span class="row-tags"><or-tag>Play next</or-tag></span>
+                  }
                 </span>
                 @if (row.track.durationSec) {
                   <span class="time">{{ fmt(row.track.durationSec) }}</span>
                 }
               </button>
+              <or-icon-button
+                icon="more"
+                data-upnext-options
+                [label]="'Options for ' + row.track.title"
+                (click)="optionsFor.set(row)"
+              />
             </li>
           }
         </ol>
       } @else {
         <or-empty-state>Nothing else is queued after this record.</or-empty-state>
       }
+
+      <or-modal
+        [open]="!!optionsFor()"
+        [heading]="optionsFor()?.track?.title ?? 'Record'"
+        (dismissed)="optionsFor.set(null)"
+      >
+        <div orModalActions>
+          @if (optionsFor()?.playNext === false) {
+            <or-button block (click)="playNextFromOptions()">Play next</or-button>
+          }
+          <or-button block variant="danger" (click)="removeFromOptions()">
+            Remove from queue
+          </or-button>
+          <or-button block (click)="optionsFor.set(null)">Close</or-button>
+        </div>
+      </or-modal>
       </div>
       </div>
     } @else {
@@ -348,6 +395,16 @@ export function formatTime(totalSec: number): string {
       padding: 0;
       display: grid;
     }
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--spacing-xxs);
+    }
+    .row-tags {
+      display: flex;
+      margin-top: var(--spacing-xxs);
+    }
     .row + .row {
       border-top: 1px solid
         color-mix(in srgb, var(--color-border) 32%, transparent);
@@ -439,6 +496,14 @@ export class NowPlayingPage {
   private readonly offline = inject(OfflineStore);
   protected readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+  private readonly injector = inject(Injector);
+
+  /** Hosted as the desktop side panel: the player bar owns seek and transport. */
+  readonly panel = input(false, { transform: booleanAttribute });
+
+  /** Up next row whose options modal is open. */
+  protected readonly optionsFor = signal<UpNextRow | null>(null);
 
   /** Slider value while the user drags; null follows playback. */
   protected readonly scrub = signal<number | null>(null);
@@ -475,17 +540,64 @@ export class NowPlayingPage {
     }
   });
 
-  /** Upcoming tracks mapped back to their queue indices for `playAt`. */
-  protected readonly upNext = computed<UpNextRow[]>(() => {
-    const queue = this.player.queue();
-    const used = new Set<number>([this.player.currentIndex()]);
-    return this.player.upcoming().flatMap((track) => {
-      const queueIndex = queue.findIndex((t, i) => t === track && !used.has(i));
-      if (queueIndex < 0) return [];
-      used.add(queueIndex);
-      return [{ track, queueIndex }];
-    });
-  });
+  /** Upcoming tracks ("Play next" picks first) with their queue indices. */
+  protected readonly upNext = computed<readonly UpNextRow[]>(() =>
+    this.player.upcomingEntries(),
+  );
+
+  /** Options: move a normal-order row into the "Play next" list. */
+  protected async playNextFromOptions(): Promise<void> {
+    const row = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!row || row.playNext) return;
+    try {
+      if (!this.player.removeUpcoming(row.queueIndex)) return;
+      await this.player.playNext([row.track]);
+      this.toast.show(`“${row.track.title}” plays next`);
+      // The row moved (and was re-rendered): focus its options button.
+      const at = this.upNext().filter((r) => r.playNext).length - 1;
+      this.focusOptions(at);
+    } catch {
+      this.toast.show('Could not queue that record. Try again.');
+    }
+  }
+
+  /** Options: drop the row from the queue (by queue index, not id). */
+  protected removeFromOptions(): void {
+    const row = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!row) return;
+    const at = this.upNext().findIndex((r) => r.queueIndex === row.queueIndex);
+    if (!this.player.removeUpcoming(row.queueIndex)) {
+      this.toast.show('Could not remove that record');
+      return;
+    }
+    this.toast.show(`Removed “${row.track.title}” from the queue`);
+    // The row (and its options button) is gone; move focus somewhere sane.
+    this.focusOptions(at);
+  }
+
+  /** After render, focus the `index`-th row's options (clamped), else the list. */
+  private focusOptions(index: number): void {
+    afterNextRender(
+      () => {
+        const root = this.host.nativeElement;
+        const buttons = root.querySelectorAll<HTMLElement>(
+          '[data-upnext-options] button',
+        );
+        const button = buttons[Math.min(Math.max(index, 0), buttons.length - 1)];
+        if (button) {
+          button.focus();
+          return;
+        }
+        // Queue emptied: focus the empty-state note so focus is not lost.
+        const empty = root.querySelector<HTMLElement>('or-empty-state');
+        empty?.setAttribute('tabindex', '-1');
+        empty?.focus();
+      },
+      { injector: this.injector },
+    );
+  }
 
   protected isImported(track: Track): boolean {
     return this.library.isImported(track);

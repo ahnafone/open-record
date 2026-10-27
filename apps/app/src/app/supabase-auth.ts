@@ -1,6 +1,11 @@
 import { Capacitor } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
-import { AuthPort, type AuthProjectConfig, type AuthUser } from '@open-record/state';
+import {
+  AuthPort,
+  type AuthProfile,
+  type AuthProjectConfig,
+  type AuthUser,
+} from '@open-record/state';
 import type { Session, SupabaseClient, SupportedStorage } from '@supabase/supabase-js';
 
 /** Preferences key for the last project the download server offered (offline start). */
@@ -131,6 +136,25 @@ export class SupabaseAuth extends AuthPort {
     if (error) throw friendly(error);
   }
 
+  async verifyPassword(password: string): Promise<void> {
+    const client = await this.requireClient();
+    const { data: current } = await client.auth.getSession();
+    const user = current.session?.user;
+    if (!user?.email) throw new Error('Sign in to change your password.');
+    // Re-authenticate as the signed-in account. A wrong password leaves the
+    // existing session untouched; a match just refreshes it.
+    const { data, error } = await client.auth.signInWithPassword({
+      email: user.email,
+      password,
+    });
+    if (error) {
+      if (error.code === 'invalid_credentials' || /invalid login credentials/i.test(error.message))
+        throw new Error('Current password is incorrect.');
+      throw friendly(error);
+    }
+    if (data.user.id !== user.id) throw new Error('Current password is incorrect.');
+  }
+
   async signUp(email: string, password: string): Promise<{ needsConfirmation: boolean }> {
     const client = await this.requireClient();
     const { data, error } = await client.auth.signUp({ email, password });
@@ -160,6 +184,48 @@ export class SupabaseAuth extends AuthPort {
     const redirectTo = Capacitor.isNativePlatform() ? undefined : `${window.location.origin}/`;
     const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo });
     if (error) throw friendly(error);
+  }
+
+  async profile(): Promise<AuthProfile | null> {
+    const client = await this.ensureClient();
+    if (!client) return null;
+    // getUser asks the server (not the cached session), so dates are current.
+    const { data, error } = await client.auth.getUser();
+    if (error) throw friendly(error);
+    const user = data.user;
+    if (!user) return null;
+    return {
+      id: user.id,
+      email: user.email,
+      createdAt: user.created_at || undefined,
+      lastSignInAt: user.last_sign_in_at || undefined,
+      emailConfirmedAt: user.email_confirmed_at || undefined,
+    };
+  }
+
+  async updateEmail(email: string): Promise<void> {
+    const client = await this.requireClient();
+    const emailRedirectTo = Capacitor.isNativePlatform() ? undefined : `${window.location.origin}/`;
+    const { error } = await client.auth.updateUser({ email }, { emailRedirectTo });
+    if (error) throw friendly(error);
+  }
+
+  async signOutEverywhere(): Promise<void> {
+    const client = await this.requireClient();
+    // Global scope revokes every refresh token of this user (needs the server).
+    const { error } = await client.auth.signOut({ scope: 'global' });
+    if (error) throw friendly(error);
+  }
+
+  async deleteAccount(): Promise<void> {
+    const client = await this.requireClient();
+    // SQL function (security definer) deletes only the caller's own account.
+    const { error } = await client.rpc('delete_own_account');
+    if (error?.code === 'PGRST202')
+      throw new Error('Deleting accounts is not set up on this server yet.');
+    if (error) throw friendly(error);
+    // The user is gone server-side; clear this device's session regardless.
+    await client.auth.signOut({ scope: 'local' }).catch(() => undefined);
   }
 
   async accessToken(): Promise<string | null> {
@@ -223,11 +289,11 @@ export class SupabaseAuth extends AuthPort {
     await this.dropClient();
 
     const { createClient } = await import('@supabase/supabase-js');
-    // A reset link lands with `type=recovery` in the URL; the library signs the
-    // user in from it and emits PASSWORD_RECOVERY, which can fire before the
-    // store listens, so remember it too.
-    const fromResetLink =
-      !Capacitor.isNativePlatform() && /[#?&]type=recovery\b/.test(window.location.href);
+    // A reset link lands with recovery tokens in the URL; the library verifies
+    // them, signs the user in and only then emits PASSWORD_RECOVERY (after this
+    // listener is attached). Never trust a bare `type=recovery` in the URL: on a
+    // signed-in device it would unlock "set password" without the current one.
+    // An event fired before the store listens is replayed by `onRecovery`.
     const client = createClient(project.url, project.anonKey, {
       auth: {
         storage: sessionStorage,
@@ -246,7 +312,6 @@ export class SupabaseAuth extends AuthPort {
     this.stopListening = () => data.subscription.unsubscribe();
     this.client = client;
     this.clientFor = id;
-    if (fromResetLink) this.notifyRecovery();
     return client;
   }
 

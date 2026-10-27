@@ -4,6 +4,8 @@ import { COLLECTIONS } from './migrations';
 import {
   ImportedTrack,
   ImportedTracksRepository,
+  ImportSession,
+  ImportSessionsRepository,
   PlaylistRepository,
   QueueState,
   QueueStateRepository,
@@ -88,6 +90,23 @@ export class DocumentStorage extends StoragePort {
       const record: SavedRecord = { trackId, savedAt: savedAt ?? Date.now() };
       await db.put(COLLECTIONS.savedRecords, trackId, record);
     },
+    addMany: async (entries) => {
+      const db = await this.db();
+      const seen = new Set(
+        (await db.getAll<SavedRecord>(COLLECTIONS.savedRecords)).map(
+          (r) => r.trackId,
+        ),
+      );
+      const now = Date.now();
+      const fresh: [string, SavedRecord][] = [];
+      for (const { trackId, savedAt } of entries) {
+        if (seen.has(trackId)) continue;
+        seen.add(trackId);
+        fresh.push([trackId, { trackId, savedAt: savedAt ?? now }]);
+      }
+      await db.putMany(COLLECTIONS.savedRecords, fresh);
+      return fresh.map(([id]) => id);
+    },
     remove: async (trackId) =>
       (await this.db()).delete(COLLECTIONS.savedRecords, trackId),
     replace: async (oldId, newId) => {
@@ -138,5 +157,21 @@ export class DocumentStorage extends StoragePort {
       (await this.db()).put(COLLECTIONS.settings, key, value),
     delete: async (key: string) =>
       (await this.db()).delete(COLLECTIONS.settings, key),
+  };
+
+  readonly importSessions: ImportSessionsRepository = {
+    list: async () => {
+      const all = await (
+        await this.db()
+      ).getAll<ImportSession>(COLLECTIONS.importSessions);
+      return all.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    get: async (id) =>
+      (await this.db()).get<ImportSession>(COLLECTIONS.importSessions, id),
+    save: async (session) =>
+      (await this.db()).put(COLLECTIONS.importSessions, session.id, session),
+    delete: async (id) =>
+      (await this.db()).delete(COLLECTIONS.importSessions, id),
+    clear: async () => (await this.db()).clear(COLLECTIONS.importSessions),
   };
 }

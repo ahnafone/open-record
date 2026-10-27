@@ -21,6 +21,7 @@ export interface ScreenData {
     | 'playlist'
     | 'now-playing'
     | 'settings'
+    | 'account'
     | 'import';
   root: boolean;
   /** Top-bar title for non-root screens (the playlist screen uses its name). */
@@ -84,12 +85,58 @@ export const appRoutes: Route[] = [
       import('@open-record/features/settings').then((m) => m.SettingsPage),
   },
   {
-    path: 'import',
-    title: 'Import from Spotify · Open Record',
+    path: 'account',
+    title: 'Account · Open Record',
+    data: {
+      screen: 'account',
+      root: false,
+      title: 'Account',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/account').then((m) => m.AccountPage),
+  },
+  {
+    path: 'import/sessions',
+    title: 'Import history · Open Record',
     data: {
       screen: 'import',
       root: false,
-      title: 'Import from Spotify',
+      title: 'Import history',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/settings').then(
+        (m) => m.ImportSessionsPage,
+      ),
+  },
+  {
+    path: 'import/sessions/:id',
+    title: 'Import session · Open Record',
+    data: {
+      screen: 'import',
+      root: false,
+      title: 'Import session',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/settings').then((m) => m.ImportSessionPage),
+  },
+  {
+    path: 'downloads/failed',
+    title: 'Fix failed downloads · Open Record',
+    data: {
+      screen: 'settings',
+      root: false,
+      title: 'Fix failed downloads',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/import').then((m) => m.FailedDownloadsPage),
+  },
+  {
+    path: 'import',
+    title: 'Import playlists & files · Open Record',
+    data: {
+      screen: 'import',
+      root: false,
+      title: 'Import playlists & files',
     } satisfies ScreenData,
     canActivate: [requireAccount],
     loadComponent: () =>

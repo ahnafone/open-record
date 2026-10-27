@@ -57,10 +57,10 @@ export class AbortedError extends RemoteError {
   }
 }
 
-/** Error name of {@link RemoteBusyError}: the server's resolve queue is full (HTTP 503). */
+/** Error name of {@link RemoteBusyError}: the server's resolve queue is full (HTTP 503) or it rate limited us (HTTP 429). */
 export const BUSY_ERROR_NAME = 'busy';
 
-/** The server is busy (HTTP 503 + Retry-After). Retry later; `retryAfterSec` is the server's hint. */
+/** The server is busy or rate limited (HTTP 503/429 + Retry-After). Retry later; `retryAfterSec` is the server's hint. */
 export class RemoteBusyError extends RemoteError {
   override name = BUSY_ERROR_NAME;
 

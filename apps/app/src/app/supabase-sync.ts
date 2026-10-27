@@ -1,5 +1,6 @@
 import {
   SyncPort,
+  type SyncImportSession,
   type SyncLibraryItem,
   type SyncPlaylist,
   type SyncSnapshot,
@@ -51,6 +52,24 @@ interface PlaylistTrackRow {
   added_at: string | null;
 }
 
+interface ImportSessionRow {
+  id: string;
+  kind: SyncImportSession['kind'] | null;
+  label: string | null;
+  created_at: string;
+  added: number;
+  skipped: number;
+  failed: number;
+  track_ids: string[] | null;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+/** Column limits of public.import_sessions. */
+const MAX_SESSION_LABEL = 300;
+const MAX_SESSION_TRACKS = 10000;
+const SESSION_KINDS: ReadonlySet<string> = new Set(['files', 'spotify', 'youtube']);
+
 const LIBRARY_COLUMNS =
   'track_id,provider_id,title,artist,album,year,genre,duration_sec,art_url,isrc,spotify_id,source_site,source_url,source_id,saved,saved_at,updated_at,deleted_at';
 
@@ -73,7 +92,7 @@ export class SupabaseSync extends SyncPort {
 
   async pull(): Promise<SyncSnapshot> {
     const client = await this.requireClient();
-    const [library, playlists, tracks] = await Promise.all([
+    const [library, playlists, tracks, sessions] = await Promise.all([
       pageAll<LibraryRow>(client, 'library_items', LIBRARY_COLUMNS, ['track_id']),
       pageAll<PlaylistRow>(
         client,
@@ -86,6 +105,12 @@ export class SupabaseSync extends SyncPort {
         'playlist_tracks',
         'playlist_id,position,track_id,added_at',
         ['playlist_id', 'position'],
+      ),
+      pageAll<ImportSessionRow>(
+        client,
+        'import_sessions',
+        'id,kind,label,created_at,added,skipped,failed,track_ids,updated_at,deleted_at',
+        ['id'],
       ),
     ]);
     const trackIds = new Map<string, string[]>();
@@ -108,6 +133,7 @@ export class SupabaseSync extends SyncPort {
       playlists: playlists.map((p) =>
         fromPlaylistRow(p, trackIds.get(p.id) ?? [], addedAt.get(p.id)),
       ),
+      importSessions: sessions.flatMap((r) => fromSessionRow(r) ?? []),
     };
   }
 
@@ -141,6 +167,13 @@ export class SupabaseSync extends SyncPort {
               return at !== undefined && Number.isFinite(at) && at > 0 ? iso(at) : null;
             }),
       });
+      if (error) throw new Error(error.message);
+    }
+    const sessionRows = changes.importSessions.map((s) => toSessionRow(s, userId));
+    for (let i = 0; i < sessionRows.length; i += CHUNK) {
+      const { error } = await client
+        .from('import_sessions')
+        .upsert(sessionRows.slice(i, i + CHUNK), { onConflict: 'user_id,id' });
       if (error) throw new Error(error.message);
     }
   }
@@ -253,4 +286,60 @@ function fromPlaylistRow(
   if (r.deleted_at) p.deletedAt = ms(r.deleted_at);
   else if (addedAt && Object.keys(addedAt).length) p.addedAt = addedAt;
   return p;
+}
+
+const count = (n: number) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+
+function toSessionRow(
+  s: SyncImportSession,
+  userId: string,
+): ImportSessionRow & { user_id: string } {
+  // A tombstone carries no metadata (kind and label are nullable then).
+  const live = !s.deletedAt;
+  return {
+    user_id: userId,
+    id: s.id,
+    kind: live ? s.kind : null,
+    label: live ? s.label.slice(0, MAX_SESSION_LABEL) || 'Import' : null,
+    created_at: iso(s.createdAt),
+    added: live ? count(s.added) : 0,
+    skipped: live ? count(s.skipped) : 0,
+    failed: live ? count(s.failed) : 0,
+    track_ids: live ? s.trackIds.slice(0, MAX_SESSION_TRACKS) : [],
+    updated_at: iso(s.updatedAt),
+    deleted_at: s.deletedAt ? iso(s.deletedAt) : null,
+  };
+}
+
+/** Untrusted row: null when a live row is malformed. */
+function fromSessionRow(r: ImportSessionRow): SyncImportSession | null {
+  const updatedAt = ms(r.updated_at);
+  const createdAt = ms(r.created_at);
+  if (!Number.isFinite(updatedAt)) return null;
+  if (r.deleted_at)
+    return {
+      id: r.id,
+      kind: 'files',
+      label: '',
+      createdAt: Number.isFinite(createdAt) ? createdAt : updatedAt,
+      added: 0,
+      skipped: 0,
+      failed: 0,
+      trackIds: [],
+      updatedAt,
+      deletedAt: ms(r.deleted_at),
+    };
+  if (!r.kind || !SESSION_KINDS.has(r.kind) || !r.label || !Number.isFinite(createdAt))
+    return null;
+  return {
+    id: r.id,
+    kind: r.kind,
+    label: r.label,
+    createdAt,
+    added: count(r.added),
+    skipped: count(r.skipped),
+    failed: count(r.failed),
+    trackIds: (r.track_ids ?? []).filter((id): id is string => typeof id === 'string'),
+    updatedAt,
+  };
 }

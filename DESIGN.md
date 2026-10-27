@@ -404,8 +404,17 @@ overlays.
 - **Inputs and search:** inputs use the background colour with a full-opacity
   border; focus and `aria-invalid` switch the border to coral. Errors appear
   below in 12px coral text with reserved height so the layout does not jump.
-- **Top bar:** brand mark (a 30px disc with a coral spindle), serif wordmark
-  and uppercase tagline.
+- **Top bar:** on root screens a menu icon button, brand mark (a 30px disc
+  with a coral spindle), serif wordmark and uppercase tagline; pushed screens
+  show a back button and serif title. There is no top-right Settings button.
+- **Drawer (phone):** the menu button opens the desktop sidebar content
+  (tabs, playlists, Account, Import, Settings) as a modal panel sliding in from the
+  left, min(280px, 85vw), over the `rgba(9,11,14,.68)` scrim, 200ms standard
+  easing (1ms with reduced motion). Focus is trapped; Escape, a scrim tap,
+  any link or button inside, or navigation closes it.
+- **Back (Android):** hardware or gesture Back closes the drawer, then an open
+  dialog, then the Now Playing panel; otherwise it returns to the previous
+  in-app screen, then to Browse, and on Browse minimises the app.
 - **Listening booth (Browse hero):** a surface card with an ivory sleeve
   overlapping a grooved disc that spins while playing, followed by serif
   title and muted subtitle.
@@ -424,13 +433,31 @@ overlays.
   Album, Source, Date added, Duration) with header buttons that sort the view
   ascending, descending, then back to the custom playlist order
   (`aria-sort`); Play, Shuffle and row taps follow the displayed order, and
-  Move up/down only appear in custom order.
+  Move up/down only appear in custom order. The options menu also has Play
+  next.
 - **Missing artwork:** a designed fallback, a grooved disc with an ivory centre
   label; never a broken-image icon or a fake sleeve.
 - **Now Playing:** large sleeve over a disc, artist in muted 15px, a status
   line (loading spinner or coral error), a seek slider (4px track, coral
   fill, 16px coral thumb ringed in background colour) with tabular times, and
   a transport row of 52px circular buttons around a 68px coral play button.
+- **Download progress:** under auto-download switches while songs download:
+  12px muted "Downloading · N left" and tabular "X of Y on device" over a 4px
+  coral bar (`role="progressbar"`); hidden when idle. On Android it
+  keeps downloading with the screen off via a foreground notification
+  ("Downloading · N left", low importance, gone when idle). Settings shows a
+  phone-only Device storage list (downloads, space used, free space, Android
+  download location) below Audio quality.
+- **List filter:** Library (saved and imported records) and Playlist pages
+  have a filter field styled like the Search field (48px surface well, coral
+  border on focus) with a 44px clear button; it matches every word against
+  title, artist and album, ignoring case and accents. A reserved 12px muted
+  status line shows "N of M records match"; no matches use the dashed empty
+  state. Play, Shuffle and row taps follow the filtered order, and Move
+  up/down are hidden while a filter is active.
+- **Long lists:** track lists render 40 rows and add 40 more when a sentinel
+  nears the viewport (`lazyWindow` + `orLoadMore` in `@open-record/ui`); the
+  window resets when the filter or sort changes.
 - **Mini player:** surface strip above the tab bar with a 2px coral progress
   line on its top edge, a 44px ivory-framed thumbnail, title and artist.
 - **Tab bar:** three equal tabs, 48px tall; the current tab has text-colour
@@ -438,6 +465,50 @@ overlays.
 - **Playlists and collaborators:** surface cards with serif names and muted
   meta; member rows include a role select. An informational banner uses the
   coral tint. Empty states use a dashed border and centred muted copy.
+- **Fix failed downloads:** the muted status line under auto-download
+  switches shows "N couldn't be downloaded" as an underlined text link (44px
+  hit area) to a pushed "Fix failed downloads" page (also linked from
+  Settings). Failed songs use the record-row pattern with a coral failed tag
+  holding the short reason and a small "Fix link" button. The Fix link modal
+  lists suggestions (sleeve, title, artist, duration, preview, "Use this",
+  with a spinner while a candidate is checked) above a paste field for a
+  YouTube / YT Music link; a failed check shows a coral inline error in a
+  reserved status line and saves nothing.
+- **Import history:** the Import page links to a pushed Import history
+  page instead of listing imported records. It also holds a danger "Clear
+  imported files" button (confirmation dialog) for audio files. Every import
+  (audio files, a Spotify export, or a YouTube playlist or song) is a surface
+  card with a serif label ("Audio files · date", "Spotify · file name" or
+  "YouTube · playlist or song title"), date and muted counts (added, skipped,
+  failed; Spotify and YouTube runs show live match counts, e.g. "12 tracks ·
+  9 matched · 2 to review · 1 not found", while the import job holds their
+  tracks). The
+  Import page opens on Choose a source unless matching still needs the user
+  (running, paused, pending or review items). A session page lists its records with the record-row pattern
+  (tap to play; Edit and Remove for imported files) and a Delete session
+  danger button that removes only the history entry.
+- **Audio files source:** the first Import source card, "Audio files on this
+  device", opens a "Choose audio files" default button that copies picked
+  files into the library at once, with a toast and no matching step. The
+  Import page also links to Import history. On phones, Settings links to
+  Import playlists & files (hidden on desktop, where the sidebar has Import).
+- **YouTube playlist or song import:** the last Import source card, "YouTube
+  or YT Music playlist or song", opens a "Playlist or song link" field
+  (Search-field styling, coral border on focus or `aria-invalid`) with a
+  reserved 12px coral error line and a primary Import button ("Importing…"
+  while busy, plus Cancel). It is one import flow, not a separate panel: a
+  successful link shows a toast and switches the page to the same job view as
+  every other source (counts, progress, review list, "Import more"). A playlist
+  link creates a playlist and its songs are matched and listed in Import
+  history as "YouTube · playlist name"; a single song link adds only that song
+  to the library (no playlist), listed as "YouTube · song title". Background
+  song-detail lookup is a "Finding song details" section inside the same job
+  panel: an uppercase muted eyebrow, a reserved status line ("N of M checked ·
+  K updated", a spinner while running, wait countdowns, or the error), a 4px
+  coral progress line, and Pause / Resume (Retry after an error) / Stop, which
+  act on matching and the lookup together. Done dismisses the lookup when it
+  has finished. Matched songs simply change their title, artist and sleeve;
+  nothing else is flagged.
 - **Modal:** max 336px wide, max 82% tall, serif title, stacked actions.
 - **Toast:** ivory slip with ink text, slides up 10px and fades in.
 
@@ -480,24 +551,34 @@ At 900px and wider (`DESKTOP_MEDIA_QUERY`, `OrViewport.isDesktop` in
 nothing changes.
 
 - **Sidebar (248px):** brand mark and wordmark, nav links (Browse, Search,
-  Library, then Import from Spotify and Settings) and the user's playlists in
-  serif. Links are 44px tall with an 8px radius; hover is surface-raised, the
+  Library), the user's playlists in serif, and at the foot an Account row (the
+  email in smaller text) with an Import row and a Settings row beneath. The
+  Import row opens the Import page (Spotify, Exportify, YouTube, audio files).
+  Links are 44px tall with an 8px radius; hover is surface-raised, the
   current link sits on surface with a coral icon.
 - **Content:** scrolls on its own with 16px top and 24px side padding. Crate
   rails become `auto-fill` grids (min 168px cards, 128px sleeves); record rows
   flow into `auto-fill` columns (min 360px) at 64px; playlist cards in 280px
   columns. The listening booth puts the sleeve left and details right. The top
-  bar only appears on pushed screens (back plus serif title). Settings and
+  bar only appears on pushed screens (back plus serif title). Settings, Account and
   Import cap their content at 800px.
 - **Player bar:** full width across the bottom, surface with a hairline top
-  border: 56px sleeve, title and artist; shuffle, previous, a 44px coral play
-  button, next and repeat over a seek bar with tabular times; volume (mute
-  button plus slider) and a Now Playing toggle (`aria-pressed`).
+  border and 8px of top padding so controls never touch the edge: 56px
+  sleeve, title and artist; shuffle, previous, a 44px coral play button,
+  next and repeat over a seek bar with tabular times; a save-to-library
+  bookmark toggle, volume (mute button plus slider) and a Now Playing
+  toggle (`aria-pressed`).
 - **Now Playing:** a 360px side panel beside the content, toggled from the
-  player bar. The `/now-playing` route becomes two columns (sticky sleeve left,
+  player bar. It shows art, details and Up next only; transport controls live
+  in the player bar. Up next rows have an options menu (Play next, Remove from
+  queue), and tracks marked Play next play before the normal queue. The `/now-playing` route becomes two columns (sticky sleeve left,
   details and queue right).
 - **Keyboard:** Space play/pause, Left/Right seek 5s, Shift+Left/Right
   previous/next, M mute, / search. Ignored while typing or in a dialog.
+- **Account:** a pushed page (opened from the sidebar Account row or Settings)
+  with the profile (joined date, account age, last sign-in), library and
+  playlist stats, Sync now, change password (current password required), change email, Sign out, Sign out
+  of all devices and Delete account (confirmation dialog, danger button).
 - **Import:** a dashed-border drop zone accepts Exportify `.csv` and Spotify
   `.json`; it turns coral (10% tint) while a file is dragged over.
 - Desktop rows may be denser than phone rows but keep 44px controls, the same

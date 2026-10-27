@@ -15,5 +15,10 @@ describe('track row format', () => {
     expect(downloadState('saving')?.label).toBe('Downloading');
     expect(downloadState('failed')?.kind).toBe('failed');
     expect(downloadState(undefined)).toBeNull();
+    expect(downloadState('failed')?.label).toBe('Failed');
+    expect(
+      downloadState('failed', 'Server error: ERROR: [youtube] x: Sign in to confirm your age')?.label,
+    ).toBe('Age-restricted');
+    expect(downloadState('failed', 'Server is busy, try again in 5s.')?.label).toBe('Server busy');
   });
 });

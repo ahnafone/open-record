@@ -2,6 +2,8 @@
 export {
   normalizeBaseUrl,
   parseAliases,
+  parseEnrichMatch,
+  parsePlaylist,
   parseSearchResult,
   parseStream,
   RemoteClient,
@@ -42,12 +44,14 @@ export {
 } from './lib/errors';
 export {
   REMOTE_PROVIDER_ID,
+  playlistEntryToTrack,
   RemoteProvider,
   remoteTrackId,
   toRemoteTrack,
   UNKNOWN_ARTIST,
   urlFromRemoteTrackId,
   type ArtistLookup,
+  type ImportedPlaylist,
   type RemoteProviderOptions,
 } from './lib/remote-provider';
 export {

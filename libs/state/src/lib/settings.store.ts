@@ -7,9 +7,12 @@ import {
 } from '@angular/core';
 import {
   DEFAULT_AUDIO_QUALITY,
+  DEFAULT_DOWNLOAD_LOCATION,
   isAudioQuality,
+  isDownloadLocation,
   parsePairingLink,
   type AudioQuality,
+  type DownloadLocation,
 } from '@open-record/models';
 import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
 import { RemoteServerPort } from './ports';
@@ -85,6 +88,9 @@ export class SettingsStore {
   private readonly _autoDownload = signal<AutoDownloadSettings>(
     DEFAULT_AUTO_DOWNLOAD_SETTINGS,
   );
+  private readonly _downloadLocation = signal<DownloadLocation>(
+    DEFAULT_DOWNLOAD_LOCATION,
+  );
   private testAbort?: AbortController;
 
   /** True once the stored settings have been read. */
@@ -116,6 +122,9 @@ export class SettingsStore {
   readonly autoDownloadOnMobileData = computed(
     () => this._autoDownload().mobileData,
   );
+
+  /** Where new downloads are written (existing files stay where they are). */
+  readonly downloadLocation = this._downloadLocation.asReadonly();
 
   private loaded: Promise<void>;
 
@@ -176,6 +185,20 @@ export class SettingsStore {
   async setAutoDownload(patch: Partial<AutoDownloadSettings>): Promise<void> {
     await this.loaded;
     await this.persist(this._autoDownload, SETTINGS_KEYS.autoDownload, patch);
+  }
+
+  /** Change where new downloads go; persists, rolling back if the write fails. */
+  async setDownloadLocation(location: DownloadLocation): Promise<void> {
+    await this.loaded;
+    const before = this._downloadLocation();
+    if (location === before) return;
+    this._downloadLocation.set(location);
+    try {
+      await this.storage.settings.set(SETTINGS_KEYS.downloadLocation, location);
+    } catch (err) {
+      this._downloadLocation.set(before);
+      throw err;
+    }
   }
 
   private async persist<T extends object>(
@@ -294,6 +317,7 @@ export class SettingsStore {
     this.apply(stored ?? NO_SERVER, false);
     this._quality.set(await this.readQuality());
     this._autoDownload.set(await this.readAutoDownload());
+    this._downloadLocation.set(await this.readDownloadLocation());
     this._hydrated.set(true);
   }
 
@@ -326,7 +350,20 @@ export class SettingsStore {
         mobileData: raw?.mobileData === true,
       };
     } catch {
-      return DEFAULT_AUTO_DOWNLOAD_SETTINGS;
+      // A failed read must not silently switch auto-download off: keep what
+      // is loaded (the defaults on first read).
+      return this._autoDownload();
+    }
+  }
+
+  private async readDownloadLocation(): Promise<DownloadLocation> {
+    try {
+      const raw = await this.storage.settings.get<string>(
+        SETTINGS_KEYS.downloadLocation,
+      );
+      return isDownloadLocation(raw) ? raw : DEFAULT_DOWNLOAD_LOCATION;
+    } catch {
+      return DEFAULT_DOWNLOAD_LOCATION;
     }
   }
 }

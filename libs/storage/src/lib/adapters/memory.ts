@@ -50,6 +50,14 @@ export class InMemoryBackend implements StorageBackend, MigrationTarget {
     this.table(collection).set(key, structuredClone(value));
   }
 
+  async putMany<T>(
+    collection: CollectionName,
+    entries: readonly (readonly [string, T])[],
+  ): Promise<void> {
+    const table = this.table(collection);
+    for (const [key, value] of entries) table.set(key, structuredClone(value));
+  }
+
   async delete(collection: CollectionName, key: string): Promise<void> {
     this.table(collection).delete(key);
   }

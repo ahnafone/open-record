@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
+import { splitStoredPath, withDownloadLocation, type DownloadLocation } from '@open-record/models';
 import { openDB, type IDBPDatabase } from 'idb';
 
 /** A user-picked audio file, before it is copied into app storage. */
@@ -48,7 +49,21 @@ function toBase64(data: Uint8Array): string {
   return btoa(binary);
 }
 
-/** Native store: `Directory.Data/imported/`, served to the web view via `convertFileSrc`. */
+function directoryOf(location: DownloadLocation): Directory {
+  return location === 'external' ? Directory.External : Directory.Data;
+}
+
+/** Resolve a stored path (maybe `external:`-prefixed) to its Filesystem location. */
+function locate(stored: string): { path: string; directory: Directory } {
+  const { location, path } = splitStoredPath(stored);
+  return { path, directory: directoryOf(location) };
+}
+
+/**
+ * Native store: `Directory.Data/imported/`, served to the web view via
+ * `convertFileSrc`. Downloads may also live in `Directory.External/imported/`
+ * (stored paths prefixed `external:`); reads, deletes and listing cover both.
+ */
 export class NativeFileStore implements LocalFileStore {
   private dirReady?: Promise<void>;
 
@@ -91,23 +106,28 @@ export class NativeFileStore implements LocalFileStore {
     return data.byteLength;
   }
 
-  async url(path: string): Promise<string> {
-    const { uri } = await Filesystem.getUri({ path, directory: Directory.Data });
+  async url(stored: string): Promise<string> {
+    const { uri } = await Filesystem.getUri(locate(stored));
     return Capacitor.convertFileSrc(uri);
   }
 
-  async remove(path: string): Promise<void> {
-    await Filesystem.deleteFile({ path, directory: Directory.Data }).catch(() => undefined);
+  async remove(stored: string): Promise<void> {
+    await Filesystem.deleteFile(locate(stored)).catch(() => undefined);
   }
 
   async list(): Promise<StoredFileEntry[]> {
+    const [data, external] = await Promise.all([this.listIn('data'), this.listIn('external')]);
+    return [...data, ...external];
+  }
+
+  private async listIn(location: DownloadLocation): Promise<StoredFileEntry[]> {
     try {
-      const { files } = await Filesystem.readdir({ path: IMPORT_DIR, directory: Directory.Data });
+      const { files } = await Filesystem.readdir({ path: IMPORT_DIR, directory: directoryOf(location) });
       return files
         .filter((f) => f.type === 'file')
-        .map((f) => ({ path: `${IMPORT_DIR}/${f.name}`, sizeBytes: f.size }));
+        .map((f) => ({ path: withDownloadLocation(`${IMPORT_DIR}/${f.name}`, location), sizeBytes: f.size }));
     } catch {
-      return []; // folder not created yet
+      return []; // folder not created yet, or no external storage
     }
   }
 }

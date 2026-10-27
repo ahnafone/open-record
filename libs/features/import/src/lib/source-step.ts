@@ -10,11 +10,12 @@ import {
   viewChild,
   type ElementRef,
 } from '@angular/core';
-import { ImportStore, type ParsedImport } from '@open-record/state';
+import { ImportStore, LibraryStore, type ParsedImport } from '@open-record/state';
 import { OrButton, OrIcon, OrToast } from '@open-record/ui';
 import { SHARED_STYLES } from './shared';
+import { YoutubeSource } from './youtube-source';
 
-export type ImportSource = 'exportify' | 'json';
+export type ImportSource = 'audio' | 'exportify' | 'json' | 'youtube';
 export interface LoadedFile {
   name: string;
   parsed: ParsedImport;
@@ -26,6 +27,11 @@ export const EXPORTIFY_URL = 'https://exportify.app';
 
 const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
   {
+    id: 'audio',
+    title: 'Audio files on this device',
+    hint: 'Add audio files from this device. They are copied into the app and play like any other record.',
+  },
+  {
     id: 'exportify',
     title: 'Exportify (CSV)',
     hint: 'A free site that exports your Spotify playlists as CSV. Copy the text and paste it here, or pick the .csv file.',
@@ -35,12 +41,17 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
     title: 'Spotify data download (JSON)',
     hint: 'Spotify > Privacy > Download your data. Unzip it first, then pick the playlist and library .json files.',
   },
+  {
+    id: 'youtube',
+    title: 'YouTube or YT Music playlist or song',
+    hint: 'Paste the link of a public or unlisted playlist (made into a new playlist) or of a single song (added to your library). Song details are tidied up in the background.',
+  },
 ];
 
 /** Step 1: choose where the playlists come from. */
 @Component({
   selector: 'or-source-step',
-  imports: [OrButton, OrIcon],
+  imports: [OrButton, OrIcon, YoutubeSource],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     '(dragenter)': 'onDragOver($event)',
@@ -70,6 +81,21 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
         </button>
         @if (source() === s.id) {
           <div class="detail">
+            @if (s.id === 'youtube') {
+              <or-youtube-source (imported)="youtubeImported.emit()" />
+            } @else if (s.id === 'audio') {
+              <or-button
+                block
+                [disabled]="!library.canImport || importing()"
+                [ariaLabel]="importing() ? 'Importing audio files' : ''"
+                (click)="importAudio()"
+              >
+                <or-icon name="plus" [size]="20" />{{ importing() ? 'Importing…' : 'Choose audio files' }}
+              </or-button>
+              @if (!library.canImport) {
+                <p class="note">Importing is not available on this device.</p>
+              }
+            } @else {
             @if (s.id === 'exportify') {
               <ol class="steps">
                 <li>Open Exportify.</li>
@@ -138,6 +164,7 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
                 <or-button (click)="clear.emit()">Clear all</or-button>
               }
             </div>
+            }
           </div>
         }
       }
@@ -191,12 +218,16 @@ const SOURCES: readonly { id: ImportSource; title: string; hint: string }[] = [
 })
 export class SourceStep {
   protected readonly store = inject(ImportStore);
+  protected readonly library = inject(LibraryStore);
   private readonly toast = inject(OrToast);
+  protected readonly importing = signal(false);
   protected readonly sources = SOURCES;
 
   readonly files = input<readonly LoadedFile[]>([]);
   readonly fileAdded = output<LoadedFile>();
   readonly filesReady = output<void>();
+  /** A YouTube link was imported into the job (the page switches to the job view). */
+  readonly youtubeImported = output<void>();
   readonly busy = input(false);
   readonly clear = output<void>();
 
@@ -228,6 +259,32 @@ export class SourceStep {
   protected onPasteInput(): void {
     this.hasPaste.set(!!this.pasteInput()?.nativeElement.value.trim().length);
     if (this.error()) this.error.set('');
+  }
+
+  /** Copy picked audio files into the library (no matching step: they are playable at once). */
+  protected async importAudio(): Promise<void> {
+    if (!this.library.canImport || this.importing()) return;
+    this.importing.set(true);
+    try {
+      const { imported, failures } = await this.library.importFiles();
+      const n = imported.length;
+      const f = failures.length;
+      if (n && f) {
+        this.toast.show(
+          `Imported ${n} record${n === 1 ? '' : 's'}; ${f} file${f === 1 ? '' : 's'} failed`,
+          3200,
+        );
+      } else if (n) {
+        this.toast.show(`Imported ${n} record${n === 1 ? '' : 's'}`);
+      } else if (f) {
+        const name = f === 1 ? failures[0].fileName : `${f} files`;
+        this.toast.show(`Could not import ${name}`, 3200);
+      }
+    } catch {
+      this.toast.show('Could not import files. Try again.');
+    } finally {
+      this.importing.set(false);
+    }
   }
 
   protected describe(p: ParsedImport): string {

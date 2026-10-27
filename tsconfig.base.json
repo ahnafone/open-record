@@ -41,6 +41,9 @@
       ],
       "@open-record/features/settings": [
         "./libs/features/settings/src/index.ts"
+      ],
+      "@open-record/features/account": [
+        "./libs/features/account/src/index.ts"
       ]
     }
   },

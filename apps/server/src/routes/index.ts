@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { ServerConfig } from '../config';
 import { appConfigRoutes, healthRoutes, pingRoutes } from './health';
 import { metaRoutes } from './meta';
+import { playlistRoutes } from './playlist';
 import { searchRoutes } from './search';
 import { streamRoutes } from './stream';
 
@@ -23,4 +24,5 @@ export const routes: FastifyPluginAsync<RouteOptions>[] = [
   searchRoutes,
   streamRoutes,
   metaRoutes,
+  playlistRoutes,
 ];

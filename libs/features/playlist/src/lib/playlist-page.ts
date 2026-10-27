@@ -9,7 +9,7 @@ import {
   input,
   signal,
 } from '@angular/core';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import type { Track } from '@open-record/models';
 import {
   AutoDownloadStore,
@@ -19,16 +19,21 @@ import {
   PlaylistsStore,
   REMOTE_PROVIDER_ID,
   downloadState,
+  filterWords,
   formatDuration,
   sourceLabel,
+  trackMatches,
 } from '@open-record/state';
 import {
+  OrDownloadProgress,
   OrButton,
   OrDialog,
   OrDisc,
   OrEmptyState,
+  OrFilterField,
   OrIcon,
   OrIconButton,
+  OrLoadMore,
   OrModal,
   OrSectionHead,
   OrSleeve,
@@ -36,6 +41,7 @@ import {
   OrSwitch,
   OrTag,
   OrToast,
+  lazyWindow,
 } from '@open-record/ui';
 import { AddRecordsDialog } from './add-records-dialog';
 import { RenamePlaylistDialog } from './rename-playlist-dialog';
@@ -323,15 +329,21 @@ const ROW_STYLES = `
  * management (add, reorder, remove), rename, visibility and delete. The top
  * bar already carries the name as the page's h1, so the header uses an h2.
  */
+/** Stable empty id list (download counts are memoized per array). */
+const NO_IDS: readonly string[] = [];
+
 @Component({
   selector: 'or-playlist-page',
   imports: [
+    OrDownloadProgress,
     AddRecordsDialog,
     OrButton,
     OrDisc,
     OrEmptyState,
+    OrFilterField,
     OrIcon,
     OrIconButton,
+    OrLoadMore,
     OrModal,
     OrSectionHead,
     OrSleeve,
@@ -339,6 +351,7 @@ const ROW_STYLES = `
     OrSwitch,
     OrTag,
     RenamePlaylistDialog,
+    RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -386,16 +399,51 @@ const ROW_STYLES = `
         (checkedChange)="setAutoDownload($event)"
       />
       <p class="auto-note" role="status">
-        @if (pl.autoDownload && autoDownload.waitingForWifi()) {
-          Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+        @if (pl.autoDownload) {
+          @if (autoDownload.waitingForWifi()) {
+            Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+          } @else {
+            @if (autoDownload.pauseReason(); as paused) {
+            {{ paused }}
+          } @else if (autoDownload.failedCount(pl.trackIds); as n) {
+            <a class="failed-link" routerLink="/downloads/failed">{{ n }} couldn’t be downloaded</a>
+          }
+          }
         }
       </p>
+      @if (playlistProgress(); as p) {
+        <or-download-progress
+          label="Playlist download progress"
+          [saved]="p.saved"
+          [total]="p.total"
+          [fraction]="playlistFraction"
+        />
+      }
 
       <or-section-head heading="Records" [level]="3" />
+      @if (tracks().length) {
+        <or-filter-field
+          class="filter"
+          label="Filter this playlist"
+          placeholder="Filter by title, artist or album"
+          describedBy="or-playlist-filter-status"
+          [(value)]="query"
+        />
+        <p id="or-playlist-filter-status" class="filter-status" role="status">
+          @if (filtering()) {
+            {{ rows().length }} of {{ countLabel() }} match
+          }
+        </p>
+      }
       @if (rows().length) {
-        <div class="tracks" role="table" [attr.aria-label]="'Records in ' + pl.name">
+        <div
+          class="tracks"
+          role="table"
+          [attr.aria-label]="'Records in ' + pl.name"
+          [attr.aria-rowcount]="rows().length + 1"
+        >
           <div class="head-group" role="rowgroup">
-            <div class="row head-row" role="row">
+            <div class="row head-row" role="row" aria-rowindex="1">
               <div
                 class="c-num"
                 role="columnheader"
@@ -432,16 +480,21 @@ const ROW_STYLES = `
             </div>
           </div>
           <div class="body-group" role="rowgroup">
-            @for (row of rows(); track row.key; let i = $index) {
+            @for (row of rowWindow.items(); track row.key; let i = $index) {
               @let t = row.track;
               @let current = player.isCurrent(t.id);
               @let playing = current && player.isPlaying();
               @let saved = library.isSaved(t.id);
               @let status = offline.status(t.id);
-              @let state = downloadState(status);
+              @let state = downloadState(status, offline.error(t.id));
               @let imported = library.isImported(t);
               @let streamOnly = !status && t.providerId === remoteId;
-              <div class="row track" role="row" [class.is-current]="current">
+              <div
+                class="row track"
+                role="row"
+                [class.is-current]="current"
+                [attr.aria-rowindex]="i + 2"
+              >
                 <div class="c-num" role="cell">
                   <!-- Pointer shortcut; the title button is the accessible play control. -->
                   <button
@@ -493,7 +546,7 @@ const ROW_STYLES = `
                                 <or-tag><or-spinner [size]="12" />{{ state.label }}</or-tag>
                               }
                               @case ('failed') {
-                                <or-tag class="tag-failed" icon="alert">{{ state.label }}</or-tag>
+                                <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ state.label }}</or-tag>
                               }
                             }
                           } @else if (streamOnly) {
@@ -533,6 +586,16 @@ const ROW_STYLES = `
             }
           </div>
         </div>
+        @if (rowWindow.hasMore()) {
+          <div
+            class="sentinel"
+            orLoadMore
+            [loadMoreKey]="rowWindow.items().length"
+            (loadMore)="rowWindow.grow()"
+          ></div>
+        }
+      } @else if (filtering()) {
+        <or-empty-state>No records match “{{ query().trim() }}”.</or-empty-state>
       } @else {
         <or-empty-state>This crate is empty. Add records to fill it.</or-empty-state>
       }
@@ -551,8 +614,9 @@ const ROW_STYLES = `
         (dismissed)="optionsFor.set(null)"
       >
         <div orModalActions>
-          <!-- Reordering only makes sense in the playlist's own order. -->
-          @if (!sort()) {
+          <or-button block (click)="playNext()">Play next</or-button>
+          <!-- Reordering only makes sense in the playlist's own, unfiltered order. -->
+          @if (!sort() && !filtering()) {
             <or-button block [disabled]="optionIndex() <= 0" (click)="move(-1)">
               Move up
             </or-button>
@@ -593,6 +657,35 @@ const ROW_STYLES = `
     .auto {
       margin-top: var(--spacing-sm);
     }
+    .filter {
+      margin-block-start: var(--spacing-xs);
+    }
+    /* Reserved so the list does not jump when the count appears. */
+    .filter-status {
+      margin: var(--spacing-xxs) 0 var(--spacing-xs);
+      min-block-size: 18px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .sentinel {
+      block-size: 1px;
+    }
+
+    /* Link-style button to Fix failed downloads; 44px tall hit area. */
+    .failed-link {
+      display: inline-flex;
+      align-items: center;
+      min-block-size: var(--spacing-touch);
+      margin-block: calc((18px - var(--spacing-touch)) / 2);
+      color: var(--color-text);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      border-radius: var(--rounded-md);
+    }
+    .failed-link:hover { color: var(--color-primary); }
+    .failed-link:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
     /* Reserved so the list does not jump when the note appears. */
     .auto-note {
       margin: 0;
@@ -657,6 +750,19 @@ export class PlaylistPage {
   protected readonly library = inject(LibraryStore);
   protected readonly offline = inject(OfflineStore);
   protected readonly autoDownload = inject(AutoDownloadStore);
+  /**
+   * Download counts for this playlist; null when nothing is downloading.
+   * Status-only, so progress ticks do not re-check the whole list.
+   */
+  protected readonly playlistProgress = computed(() => {
+    const c = this.autoDownload.countsFor(this.playlist()?.trackIds ?? NO_IDS);
+    return c.downloading ? c : null;
+  });
+  /** Live 0-1 fraction, read only by the progress bar. */
+  protected readonly playlistFraction = computed(
+    () =>
+      this.autoDownload.progressFor(this.playlist()?.trackIds ?? NO_IDS).fraction,
+  );
   protected readonly art = injectTrackArt();
   protected readonly player = inject(PlayerStore);
   private readonly dialog = inject(OrDialog);
@@ -693,6 +799,10 @@ export class PlaylistPage {
   protected readonly downloadState = downloadState;
   /** `null` is the playlist's custom order. */
   protected readonly sort = signal<SortState | null>(null);
+  /** Filter text over title, artist and album (component state only). */
+  protected readonly query = signal('');
+  private readonly words = computed(() => filterWords(this.query()));
+  protected readonly filtering = computed(() => this.words().length > 0);
 
   /** Rows in playlist order; formatted once per playlist change, not per check. */
   private readonly baseRows = computed<Row[]>(() => {
@@ -709,9 +819,12 @@ export class PlaylistPage {
       };
     });
   });
-  /** Rows in display order (what Play, Shuffle and row taps play). */
+  /** Rows in display order, filtered (what Play, Shuffle and row taps play). */
   protected readonly rows = computed<Row[]>(() => {
-    const rows = this.baseRows();
+    const words = this.words();
+    const rows = words.length
+      ? this.baseRows().filter((r) => trackMatches(r.track, words))
+      : this.baseRows();
     const sort = this.sort();
     if (!sort) return rows;
     const dir = sort.dir === 'asc' ? 1 : -1;
@@ -730,6 +843,11 @@ export class PlaylistPage {
     });
   });
   private readonly displayedTracks = computed(() => this.rows().map((r) => r.track));
+  /** Rendered rows; back to the first page when the filter or sort changes. */
+  protected readonly rowWindow = lazyWindow(
+    this.rows,
+    () => `${this.words().join(' ')}|${this.sort()?.key}|${this.sort()?.dir}`,
+  );
 
   /** Header click: ascending, then descending, then back to custom order. */
   protected cycleSort(key: SortKey): void {
@@ -777,7 +895,11 @@ export class PlaylistPage {
   protected async play(shuffle: boolean): Promise<void> {
     const tracks = this.displayedTracks();
     if (!tracks.length) {
-      this.toast.show('This playlist has no records yet');
+      this.toast.show(
+        this.filtering()
+          ? 'No records match your filter'
+          : 'This playlist has no records yet',
+      );
       return;
     }
     const start = shuffle ? Math.floor(Math.random() * tracks.length) : 0;
@@ -829,6 +951,19 @@ export class PlaylistPage {
       this.toast.show(`Playlist is now ${next}`);
     } catch {
       this.toast.show('Could not change visibility. Try again.');
+    }
+  }
+
+  /** Queue the optioned record right after the current one. */
+  protected async playNext(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!track) return;
+    try {
+      await this.player.playNext([track]);
+      this.toast.show(`“${track.title}” plays next`);
+    } catch {
+      this.toast.show('Could not queue that record. Try again.');
     }
   }
 

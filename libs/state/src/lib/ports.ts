@@ -1,6 +1,7 @@
 import { InjectionToken } from '@angular/core';
-import type { AudioQuality, DownloadSite, Track } from '@open-record/models';
+import type { AudioQuality, DownloadLocation, DownloadSite, EnrichMatch, EnrichQuery, Track } from '@open-record/models';
 import type { MetadataFetch } from '@open-record/metadata-lookup';
+import type { ImportSessionKind } from '@open-record/storage';
 
 /**
  * Ports the app provides through Angular DI. State may not import provider
@@ -70,13 +71,39 @@ export abstract class RemoteServerPort {
     query: { artist: string; title: string; isrc?: string },
     signal?: AbortSignal,
   ): Promise<{ titles: string[]; artists: string[] }>;
+  /**
+   * A public YouTube / YT Music playlist, or one song, as remote Tracks (metadata only).
+   * Optional; rejects with the provider's typed errors.
+   */
+  importPlaylist?(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    title: string;
+    url: string;
+    site: string;
+    tracks: Track[];
+    /** Private or deleted entries that were left out. */
+    unavailable: number;
+    /** The playlist was longer than the server's cap. */
+    truncated: boolean;
+    /** A single song link: `tracks` holds one song and no playlist is created. */
+    single?: boolean;
+  }>;
+  /**
+   * Confident catalogue matches (null when none) for up to
+   * `MAX_ENRICH_BATCH` songs. Optional; rejects with typed errors so
+   * background jobs can pause.
+   */
+  enrich?(items: EnrichQuery[], signal?: AbortSignal): Promise<(EnrichMatch | null)[]>;
 }
 
 /**
  * Stream and save-to-device for the self-hosted server (the `remote` music
  * source). Implemented by the app over `libs/providers/remote`; state only
  * depends on this shape. `sourceFile` must be a store-relative path under the
- * local media store (e.g. `imported/<key>.audio.m4a`), as `LocalMediaPort.remove`
+ * local media store (e.g. `imported/<key>.audio.m4a`, or `external:imported/...`
+ * when saved to external storage), as `LocalMediaPort.remove`
  * expects.
  */
 export abstract class StreamResolverPort {
@@ -98,6 +125,11 @@ export abstract class StreamResolverPort {
       artworkUrl?: string;
     };
   }>;
+  /**
+   * Optional: checks that a page URL resolves to a working stream without
+   * downloading it (server link plus a tiny ranged fetch). Rejects when it cannot.
+   */
+  probe?(pageUrl: string, signal?: AbortSignal): Promise<void>;
   /** Download the page's audio into app storage under `opts.id`. */
   abstract saveToDevice(
     pageUrl: string,
@@ -107,8 +139,24 @@ export abstract class StreamResolverPort {
       signal?: AbortSignal;
       /** Download quality; omitted = highest. */
       quality?: AudioQuality;
+      /** Where the file is written on native; omitted = app data. */
+      location?: DownloadLocation;
     },
   ): Promise<{ sourceFile: string; sizeBytes: number; mimeType?: string }>;
+}
+
+/**
+ * Free and total space on the volume behind a download location. Provided
+ * by the app on native platforms; resolves `null` when it cannot tell.
+ */
+export abstract class DeviceStoragePort {
+  /** Running in the native app (downloads are files on the device). */
+  abstract readonly native: boolean;
+  /** Locations new downloads can go to here (Android: data + external; else data). */
+  abstract readonly locations: readonly DownloadLocation[];
+  abstract space(
+    location: DownloadLocation,
+  ): Promise<{ freeBytes: number; totalBytes?: number } | null>;
 }
 
 /**
@@ -168,6 +216,15 @@ export interface AuthUser {
   email?: string;
 }
 
+/** Account details for the Account page (ISO timestamps; missing when unknown). */
+export interface AuthProfile {
+  id: string;
+  email?: string;
+  createdAt?: string;
+  lastSignInAt?: string;
+  emailConfirmedAt?: string;
+}
+
 /**
  * Optional accounts (Supabase Auth). The app provides it over
  * `@supabase/supabase-js`; without it, or with no project available, the app
@@ -191,10 +248,27 @@ export abstract class AuthPort {
   abstract resetPassword(email: string): Promise<void>;
   /** Calls `listener` when the user arrives from a reset link (a recovery session); returns an unsubscribe function. */
   abstract onRecovery(listener: () => void): () => void;
-  /** Set a new password for the signed-in (recovery) session. */
+  /**
+   * Set a new password for the signed-in session without checking the old
+   * one. `AuthStore` only calls it during reset-link recovery or right after
+   * `verifyPassword` succeeded.
+   */
   abstract updatePassword(password: string): Promise<void>;
+  /**
+   * Check `password` against the signed-in account (re-authenticates with its
+   * email). Rejects with "Current password is incorrect." when it does not match.
+   */
+  abstract verifyPassword(password: string): Promise<void>;
   /** Current access token (refreshed when needed), or null when signed out. */
   abstract accessToken(): Promise<string | null>;
+  /** Fresh details of the signed-in account from the server, or null when signed out. */
+  abstract profile(): Promise<AuthProfile | null>;
+  /** Start an email change (the project emails a confirmation link). */
+  abstract updateEmail(email: string): Promise<void>;
+  /** Sign out on every device (revokes all refresh tokens), then clear this device. */
+  abstract signOutEverywhere(): Promise<void>;
+  /** Permanently delete the signed-in account and its synced data, then clear this device's session. */
+  abstract deleteAccount(): Promise<void>;
 }
 
 /**
@@ -248,9 +322,28 @@ export interface SyncPlaylist {
   deletedAt?: number;
 }
 
+/**
+ * One synced import-history session: label, counts and track ids only (never
+ * raw Spotify payloads). `updatedAt` is the sync clock; `deletedAt` marks a
+ * tombstone (its other fields are placeholders).
+ */
+export interface SyncImportSession {
+  id: string;
+  kind: ImportSessionKind;
+  label: string;
+  createdAt: number;
+  added: number;
+  skipped: number;
+  failed: number;
+  trackIds: string[];
+  updatedAt: number;
+  deletedAt?: number;
+}
+
 export interface SyncSnapshot {
   library: SyncLibraryItem[];
   playlists: SyncPlaylist[];
+  importSessions: SyncImportSession[];
 }
 
 /**
@@ -263,6 +356,21 @@ export abstract class SyncPort {
   abstract userId(): Promise<string | null>;
   /** Every row of the account, tombstones included. */
   abstract pull(): Promise<SyncSnapshot>;
-  /** Upsert these items and playlists (tombstones included). */
+  /** Upsert these items, playlists and import sessions (tombstones included). */
   abstract push(changes: SyncSnapshot): Promise<void>;
+}
+
+/**
+ * Keeps downloads running while the app is in the background or the screen
+ * is off (Android: a foreground service with an ongoing notification plus
+ * wake and Wi-Fi locks). Provided by the app on Android only; without it
+ * downloads run only while the app is in the foreground. Methods never reject.
+ */
+export abstract class BackgroundWorkPort {
+  /** Hold the device awake and show `text` in an ongoing notification. */
+  abstract start(options: { title: string; text: string }): Promise<void>;
+  /** Change the notification text while held. */
+  abstract update(options: { text: string }): Promise<void>;
+  /** Release the hold and remove the notification. */
+  abstract stop(): Promise<void>;
 }

@@ -143,6 +143,29 @@ describe('PlayerEngine', () => {
     expect(player.currentIndex()).toBe(tracks.findIndex((t) => t.id === ids()));
   });
 
+  it('plays "play next" items first, in the order added, then resumes', async () => {
+    const { player, ids } = setup();
+    await player.setQueue(tracks.slice(0, 4), { startIndex: 1 }); // b
+    player.playNext([track('x')]);
+    player.playNext([track('y')]);
+    const upcoming = () =>
+      player.upcomingEntries().map((e) => e.track.id + (e.playNext ? '*' : ''));
+    expect(upcoming()).toEqual(['x*', 'y*', 'c', 'd']);
+
+    // Remove a normal item and a play-next item by queue index.
+    const at = (id: string) =>
+      player.upcomingEntries().find((e) => e.track.id === id)?.queueIndex ?? -1;
+    expect(player.removeUpcoming(at('d'))).toBe(true);
+    player.playNext([track('z')]);
+    expect(player.removeUpcoming(at('y'))).toBe(true);
+    expect(upcoming()).toEqual(['x*', 'z*', 'c']);
+
+    const played: string[] = [];
+    while (await player.next()) played.push(ids() ?? '');
+    expect(played).toEqual(['x', 'z', 'c']);
+    expect(player.upcomingEntries().some((e) => e.playNext)).toBe(false);
+  });
+
   it('skips failing tracks and exposes the error', async () => {
     const { player, ids, fake } = setup();
     fake.failOn.add('b');
@@ -168,9 +191,51 @@ describe('PlayerEngine', () => {
     const { player, fake } = setup();
     ['a', 'b', 'c'].forEach((id) => fake.failOn.add(id));
     player.setRepeat('all');
-    await player.setQueue(tracks.slice(0, 3));
-    await flush();
+    vi.useFakeTimers();
+    try {
+      await player.setQueue(tracks.slice(0, 3));
+      // Chained skips are spaced out: the second waits ~1s.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fake.loaded.length).toBe(2);
+      await vi.advanceTimersByTimeAsync(1000);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(player.status()).toBe('error');
     expect(fake.loaded.length).toBe(3);
+  });
+
+  it('does not skip on a busy server or while loading paused (startup restore)', async () => {
+    const fake = new FakeEngine();
+    let resolves = 0;
+    const busy = Object.assign(new Error('busy'), { name: 'busy' });
+    const player = new PlayerEngine(
+      fake,
+      async () => {
+        resolves++;
+        throw busy;
+      },
+      {
+        transientError: (err) =>
+          err === busy ? 'Server is busy, try again in 5s.' : undefined,
+      },
+    );
+    await player.setQueue(tracks.slice(0, 3));
+    await flush();
+    expect(resolves).toBe(1);
+    expect(player.current()?.id).toBe('a');
+    expect(player.error()).toMatchObject({
+      message: 'Server is busy, try again in 5s.',
+      transient: true,
+    });
+
+    // Restoring a saved queue paused must not walk (and autoplay) the queue.
+    const offline = new PlayerEngine(new FakeEngine(), async () => {
+      throw new Error('offline');
+    });
+    await offline.setQueue(tracks.slice(0, 3), { autoplay: false });
+    await flush();
+    expect(offline.current()?.id).toBe('a');
+    expect(offline.status()).toBe('error');
   });
 });

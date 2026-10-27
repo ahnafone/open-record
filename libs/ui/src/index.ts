@@ -23,6 +23,7 @@ export { OrSleeve, type SleeveSize, type SleeveSrc } from './lib/sleeve/sleeve';
 export { OrSectionHead } from './lib/section-head/section-head';
 export { OrEmptyState } from './lib/empty-state/empty-state';
 export { OrModal } from './lib/modal/modal';
+export { tabbables } from './lib/modal/focusable';
 export {
   OrDialog,
   OrConfirmDialog,
@@ -31,9 +32,17 @@ export {
 export { OrToast, OrToastHost } from './lib/toast/toast';
 export { OrSlider } from './lib/slider/slider';
 export { OrProgressLine } from './lib/progress-line/progress-line';
+export { OrDownloadProgress } from './lib/download-progress/download-progress';
 export { OrSpinner } from './lib/spinner/spinner';
 export {
   OrViewport,
   DESKTOP_MIN_WIDTH,
   DESKTOP_MEDIA_QUERY,
 } from './lib/viewport/viewport';
+export { OrFilterField } from './lib/filter-field/filter-field';
+export {
+  OrLoadMore,
+  LAZY_PAGE_SIZE,
+  lazyWindow,
+  type LazyWindow,
+} from './lib/lazy-list/lazy-list';

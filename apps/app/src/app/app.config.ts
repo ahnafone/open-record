@@ -5,7 +5,7 @@ import {
   provideAppInitializer,
   provideBrowserGlobalErrorListeners,
 } from '@angular/core';
-import { provideRouter, withComponentInputBinding } from '@angular/router';
+import { provideRouter, withComponentInputBinding, withRouterConfig } from '@angular/router';
 import { MusicSourceRegistry } from '@open-record/music-source';
 import { providePlayer } from '@open-record/player';
 import { CatalogProvider } from '@open-record/providers/catalog';
@@ -19,6 +19,8 @@ import {
 import {
   AuthPort,
   AuthStore,
+  BackgroundWorkPort,
+  DeviceStoragePort,
   ImportFilePort,
   LocalMediaPort,
   METADATA_FETCH,
@@ -28,10 +30,14 @@ import {
   SettingsStore,
   StreamResolverPort,
   SyncPort,
+  isBusy,
   provideState,
+  remoteErrorMessage,
 } from '@open-record/state';
 import { StoragePort, provideStorage } from '@open-record/storage';
 import { appRoutes } from './app.routes';
+import { createBackgroundWork } from './background-work';
+import { createDeviceStorage } from './device-storage';
 import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
@@ -121,8 +127,15 @@ export const appConfig: ApplicationConfig = {
         lastUrl = url;
       });
     }),
-    // Route params (e.g. playlist `:id`) bind to component inputs.
-    provideRouter(appRoutes, withComponentInputBinding()),
+    // Route params (e.g. playlist `:id`) bind to component inputs. 'computed'
+    // stamps each history entry with a page index (ɵrouterPageId) that
+    // survives Back/popstate, which App uses to tell if there is an in-app
+    // entry to go back to.
+    provideRouter(
+      appRoutes,
+      withComponentInputBinding(),
+      withRouterConfig({ canceledNavigationResolution: 'computed' }),
+    ),
     { provide: MusicSourceRegistry, useValue: sources },
     { provide: LocalMediaPort, useValue: local },
     // Spotify import: picks an Exportify .csv or data-download .json as text.
@@ -132,6 +145,10 @@ export const appConfig: ApplicationConfig = {
     { provide: PairingScannerPort, useValue: new PlatformPairingScanner() },
     { provide: StreamResolverPort, useValue: remote.streams },
     { provide: NetworkStatusPort, useFactory: createNetworkStatus },
+    // Free space for Settings > Device storage (native plugin; null on web).
+    { provide: DeviceStoragePort, useFactory: createDeviceStorage },
+    // Android: foreground service so downloads continue with the screen off (null elsewhere).
+    { provide: BackgroundWorkPort, useFactory: createBackgroundWork },
     { provide: AuthPort, useValue: supabase },
     // Library + playlist metadata sync for signed-in users (same client).
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
@@ -148,6 +165,8 @@ export const appConfig: ApplicationConfig = {
         track.providerId === REMOTE_PROVIDER_ID
           ? remote.resolveSaved(track.id)
           : sources.resolve(track),
+      // Busy / rate limited: stay on the track with a retry hint (no skip).
+      transientError: (err) => (isBusy(err) ? remoteErrorMessage(err) : undefined),
     }),
     provideState(),
   ],

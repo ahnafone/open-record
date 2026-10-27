@@ -15,14 +15,10 @@ const NAV: readonly NavItem[] = [
   { path: '/library', label: 'Library', icon: 'bookmark' },
 ];
 
-const MORE: readonly NavItem[] = [
-  { path: '/import', label: 'Import from Spotify', icon: 'upload' },
-  { path: '/settings', label: 'Settings', icon: 'settings' },
-];
-
 /**
- * Desktop sidebar (900px+): brand, the three tab destinations, import and
- * settings, then the user's playlists. Replaces the phone tab bar.
+ * Desktop sidebar (900px+): brand, the three tab destinations, the user's
+ * playlists, then the account row, Import and Settings at the bottom. Replaces the
+ * phone tab bar.
  */
 @Component({
   selector: 'or-sidebar',
@@ -39,15 +35,6 @@ const MORE: readonly NavItem[] = [
     <nav aria-label="Main">
       <ul class="nav">
         @for (item of nav; track item.path) {
-          <li>
-            <a class="link" [routerLink]="item.path" routerLinkActive="active" ariaCurrentWhenActive="page">
-              <or-icon [name]="item.icon" [size]="22" />{{ item.label }}
-            </a>
-          </li>
-        }
-      </ul>
-      <ul class="nav">
-        @for (item of more; track item.path) {
           <li>
             <a class="link" [routerLink]="item.path" routerLinkActive="active" ariaCurrentWhenActive="page">
               <or-icon [name]="item.icon" [size]="22" />{{ item.label }}
@@ -76,23 +63,54 @@ const MORE: readonly NavItem[] = [
         <p class="empty">Make one from your Library.</p>
       }
     </section>
-    @if (auth.available) {
-      <div class="account">
+    <nav class="account" aria-label="Account">
+      @if (auth.available) {
         @if (auth.user(); as user) {
-          <a class="link" routerLink="/settings" [attr.title]="user.email">
-            <or-icon name="users" [size]="22" /><span class="acct-text">{{ user.email }}</span>
+          <a
+            class="link small"
+            routerLink="/account"
+            routerLinkActive="active"
+            ariaCurrentWhenActive="page"
+            [attr.title]="user.email"
+            [attr.aria-label]="'Account, ' + (user.email || 'signed in')"
+          >
+            <or-icon name="users" [size]="20" /><span class="acct-text">{{
+              user.email || 'Account'
+            }}</span>
           </a>
         } @else if (!auth.accountsReady()) {
-          <a class="link" routerLink="/settings" title="Accounts are not set up on this server">
-            <or-icon name="users" [size]="22" />Sign in
+          <a
+            class="link small"
+            routerLink="/account"
+            routerLinkActive="active"
+            ariaCurrentWhenActive="page"
+            title="Accounts are not set up on this server"
+          >
+            <or-icon name="users" [size]="20" />Sign in
           </a>
         } @else {
-          <button type="button" class="link signin" (click)="signIn()">
-            <or-icon name="users" [size]="22" />Sign in / Sign up
+          <button type="button" class="link small signin" (click)="signIn()">
+            <or-icon name="users" [size]="20" />Sign in / Sign up
           </button>
         }
-      </div>
-    }
+      }
+      <a
+        class="link small"
+        routerLink="/import"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <or-icon name="upload" [size]="20" />Import
+      </a>
+      <a
+        class="link small"
+        routerLink="/settings"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <or-icon name="settings" [size]="20" />Settings
+      </a>
+    </nav>
   `,
   styles: `
     :host {
@@ -169,10 +187,6 @@ const MORE: readonly NavItem[] = [
       display: grid;
       gap: var(--spacing-xxs);
     }
-    .nav + .nav {
-      padding-top: var(--spacing-sm);
-      border-top: 1px solid color-mix(in srgb, var(--color-border) 32%, transparent);
-    }
     .link {
       display: flex;
       align-items: center;
@@ -198,7 +212,13 @@ const MORE: readonly NavItem[] = [
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
     }
+    .link.small {
+      gap: var(--spacing-sm);
+      font-size: 13px;
+    }
     .account {
+      display: grid;
+      gap: var(--spacing-xxs);
       padding-top: var(--spacing-sm);
       border-top: 1px solid color-mix(in srgb, var(--color-border) 32%, transparent);
     }
@@ -279,7 +299,6 @@ export class OrSidebar {
   protected readonly playlists = inject(PlaylistsStore);
   protected readonly auth = inject(AuthStore);
   protected readonly nav = NAV;
-  protected readonly more = MORE;
 
   protected signIn(): void {
     this.auth.promptSignIn('Sign in to like songs and import your library.');

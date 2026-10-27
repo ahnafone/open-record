@@ -45,6 +45,12 @@ export interface TrackSource {
   url: string;
   /** The site's own id for the item, when known. */
   id?: string;
+  /**
+   * The title and uploader as the source showed them, kept when catalogue
+   * metadata replaced `title`/`artist` (e.g. YouTube playlist imports).
+   */
+  originalTitle?: string;
+  originalArtist?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +84,80 @@ export interface RemoteSearchResult {
   thumbnailUrl?: string;
   url: string;
   site: string;
+}
+
+/** Most entries `POST /playlist` returns; longer playlists are cut (`truncated`). */
+export const MAX_PLAYLIST_ENTRIES = 500;
+
+/** One video of a public YouTube / YT Music playlist (`POST /playlist`). */
+export interface RemotePlaylistEntry {
+  /** The 11-character video id. */
+  id: string;
+  /** Canonical watch URL (youtube.com or music.youtube.com). */
+  url: string;
+  site: string;
+  /** Best track title (YT Music track name, else the cleaned video title). */
+  title: string;
+  /** Best artist guess; empty when unknown. */
+  artist: string;
+  /** The video title exactly as YouTube shows it. */
+  originalTitle: string;
+  /** Channel / uploader name. */
+  uploader?: string;
+  album?: string;
+  durationSec?: number;
+  thumbnailUrl?: string;
+}
+
+/** `POST /playlist {url}`: a public playlist's flat entry list, or one song (metadata only). */
+export interface RemotePlaylist {
+  /** The playlist id (`list=`), or the video id for a single song. */
+  id: string;
+  title: string;
+  /** Canonical playlist URL. */
+  url: string;
+  site: string;
+  uploader?: string;
+  entries: RemotePlaylistEntry[];
+  /** Private, deleted or otherwise unplayable entries that were left out. */
+  unavailable: number;
+  /** True when the playlist had more than {@link MAX_PLAYLIST_ENTRIES} entries. */
+  truncated: boolean;
+  /** The link was a single song: `entries` holds just that song and no playlist is made. */
+  single?: boolean;
+}
+
+/** Most songs per `POST /meta/enrich` call. */
+export const MAX_ENRICH_BATCH = 10;
+
+/** One song to look up in public catalogues (`POST /meta/enrich`). */
+export interface EnrichQuery {
+  title: string;
+  artist: string;
+  durationSec?: number;
+  album?: string;
+}
+
+/** Catalogues `POST /meta/enrich` consults, highest priority first. */
+export const ENRICH_SOURCES = ['ytmusic', 'itunes', 'deezer', 'musicbrainz'] as const;
+export type EnrichSource = (typeof ENRICH_SOURCES)[number];
+
+/**
+ * A confident catalogue match for one {@link EnrichQuery}: fields from the
+ * highest-priority confident source, gaps filled from the others.
+ */
+export interface EnrichMatch {
+  title: string;
+  artist: string;
+  album?: string;
+  year?: number;
+  genre?: string;
+  artUrl?: string;
+  durationSec?: number;
+  /** 0..1 score of the primary source's candidate. */
+  confidence: number;
+  /** Sources that agreed, primary first. */
+  sources: EnrichSource[];
 }
 
 /** Track fields the user may edit on imported tracks. */
@@ -114,3 +194,4 @@ export interface Member {
 }
 
 export * from './lib/pairing';
+export * from './lib/download-location';

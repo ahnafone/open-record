@@ -117,6 +117,8 @@ StreamResponse = {
 | `GET /search?q=&source=` | `source`: `youtube` (default), `ytmusic`, `soundcloud`, `bandcamp`, `audiomack`, `mixcloud`; `q` max 200 chars | `{ results: SearchResult[] }` (max 15) |
 | `POST /resolve` | `{ url }` | `SearchResult` (metadata only, `yt-dlp -J --no-playlist`) |
 | `POST /stream` | `{ url, quality? }` | `StreamResponse` (`yt-dlp -J --no-playlist -f bestaudio[ext=m4a]/bestaudio/best` by default). Optional `quality` picks a lower-bitrate format (Highest, High ~160, Medium ~128, Low ~64 kbps); an invalid value returns `400`. Untested on device. |
+| `POST /playlist` | `{ url }`: a public or unlisted `youtube.com/playlist?list=`, `youtube.com/watch?v=…&list=`, `music.youtube.com/playlist?list=` or `music.youtube.com/browse/VL…` link, or a single song link: `youtube.com/watch?v=…`, `music.youtube.com/watch?v=…` or `youtu.be/…` (no `list=`; the 11-character id is validated) | `RemotePlaylist` `{ id, title, url, site, uploader?, entries, unavailable, truncated, single? }`. Playlists: `yt-dlp -J --flat-playlist`, first 500 entries. Song links: `yt-dlp -J --no-playlist` on a canonical watch URL, one entry, `single: true`. Each entry: `{ id, url, site, title, artist, originalTitle, uploader?, durationSec?, thumbnailUrl? }`. Private playlists or songs return `403`, missing ones `404`, anything else on the allow-list `400`. Metadata only: nothing is downloaded. |
+| `POST /meta/enrich` | `{ items: [{ title, artist?, album?, durationSec? }] }`, 1 to 10 items, fields max 300 chars | `{ results: (EnrichMatch \| null)[] }` in item order. `EnrichMatch = { title, artist, album?, year?, genre?, artUrl?, durationSec?, confidence, sources }`; `null` when no catalogue match reaches 0.82 confidence. |
 
 - **`/stream` links are tied to this server.** The source issues them for the
   server's public IP and they expire (usually within hours; `expiresAt` says
@@ -129,7 +131,18 @@ StreamResponse = {
   yt-dlp cannot search; paste a link into `/resolve` or `/stream` instead.
   `ytmusic` searches the Songs shelf of `music.youtube.com/search`; for speed
   it returns flat results, so `artist` and `durationSec` are often empty.
-- Playlists are refused (`400`); use a single track link.
+- `/resolve` and `/stream` refuse playlists (`400`); use a single track link.
+  Only `/playlist` reads playlists, and it returns metadata only.
+- **`/meta/enrich`** looks each song up in YT Music (via yt-dlp), iTunes Search,
+  Deezer and MusicBrainz in parallel. No API keys are used. Every source has its
+  own timeout (6 to 25 s), and a source that fails or times out is skipped, so
+  it never fails the batch. Candidates are scored on title, artist, duration and
+  version words (live, remix and similar). Fields are merged in the priority
+  YT Music > iTunes > Deezer > MusicBrainz, with lower sources filling gaps.
+  MusicBrainz calls share one 1 request/second queue with `/meta/aliases` and
+  send a descriptive `User-Agent`. Results (including misses) are kept in an
+  in-memory LRU cache (2000 entries; hits for 7 days, misses for 6 hours). Only
+  the merged match is returned; raw third-party payloads are never stored.
 
 ### Load safeguards
 
@@ -160,6 +173,14 @@ Each request is one short yt-dlp run, so the server bounds how many run at once:
   if that matters to you.
 - `/stream` only forwards `User-Agent`, `Referer` and `Origin` from yt-dlp's
   headers; cookies and everything else are dropped.
+- `/playlist` uses a strict allow-list: `http`/`https`, no credentials or port,
+  hosts `youtube.com`, `www.youtube.com`, `m.youtube.com`, `music.youtube.com`
+  and `youtu.be` (short links, songs only) only, and either a well-formed `list`
+  id or a well-formed 11-character video id. yt-dlp never sees the link you
+  sent: the server rebuilds a canonical URL from the id.
+- `/meta/enrich` only calls fixed public API hosts (`itunes.apple.com`,
+  `api.deezer.com`, `musicbrainz.org`), never follows redirects, caps response
+  size, and accepts `https` artwork links only.
 
 ## Reaching it from your phone
 
@@ -245,12 +266,17 @@ src/
     health.ts      GET /health, GET /app-config (public), GET /ping (authed)
     search.ts      GET /search, POST /resolve
     stream.ts      POST /stream
+    playlist.ts    POST /playlist
+    meta.ts        GET /meta/aliases, POST /meta/enrich
     errors.ts      service error -> HTTP response (incl. 503 + Retry-After)
   services/        non-HTTP logic used by routes
     ytdlp.ts       yt-dlp runner, search targets, result and stream mapping
     resolve-limiter.ts  concurrency cap and bounded wait queue
     stream-cache.ts     TTL link cache, in-flight de-duplication, token rate-limit key
     url-guard.ts   URL validation / SSRF guard
+    playlist.ts    playlist and song link allow-list, flat-playlist and single-song mapping
+    enrich.ts      catalogue lookups, scoring, merge and LRU cache
+    musicbrainz.ts paced (1 req/s) MusicBrainz client shared by aliases and enrich
     token-store.ts access token from env, <dataDir>/token, or generated (0600)
     network.ts     picks the LAN URL for the banner (PUBLIC_URL, HOST, LAN IPv4)
     banner.ts      startup banner: URL, terminal QR

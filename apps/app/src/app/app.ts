@@ -10,6 +10,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
   viewChild,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
@@ -20,10 +21,12 @@ import {
   Router,
   RouterOutlet,
 } from '@angular/router';
-import { filter, map } from 'rxjs';
+import { filter, map, take } from 'rxjs';
+import { Capacitor } from '@capacitor/core';
 import { AuthStore, LibraryStore, PlayerStore, PlaylistsStore } from '@open-record/state';
 import { OrToastHost, OrViewport } from '@open-record/ui';
 import type { ScreenData } from './app.routes';
+import { OrDrawer } from './shell/drawer';
 import { OrMiniPlayer } from './shell/mini-player';
 import { OrPlayerBar } from './shell/player-bar';
 import { OrSidebar } from './shell/sidebar';
@@ -41,7 +44,7 @@ const DEFAULT_SCREEN: ScreenState = {
 };
 
 /** Screens whose content is capped to a readable width on desktop. */
-const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'import']);
+const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'account', 'import']);
 
 /**
  * App shell: top bar, scrolling screen host (`router-outlet`) and a dock with
@@ -61,6 +64,7 @@ const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'import']);
     OrToastHost,
     OrSidebar,
     OrPlayerBar,
+    OrDrawer,
   ],
   selector: 'or-root',
   host: {
@@ -82,12 +86,18 @@ export class App {
   private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthStore);
 
-  /** The "Sign in to continue" modal, loaded with the settings chunk on first use. */
+  /** The "Sign in to continue" modal, loaded with the account chunk on first use. */
   protected readonly signInPrompt = signal<Type<unknown> | null>(null);
 
   private readonly screenHost =
     viewChild<ElementRef<HTMLElement>>('screenHost');
   private readonly dock = viewChild.required<ElementRef<HTMLElement>>('dock');
+
+  /** History page index of the app's first screen (set on the first NavigationEnd). */
+  private startPageId: number | null = null;
+
+  /** Phone: the navigation drawer (sidebar content) is open. */
+  protected readonly drawerOpen = signal(false);
 
   /** Desktop: the user opened the Now Playing side panel. */
   private readonly nowPlayingOpen = signal(false);
@@ -132,15 +142,37 @@ export class App {
 
     effect(() => {
       if (!this.auth.signInPrompt() || this.signInPrompt()) return;
-      void import('@open-record/features/settings').then((m) =>
+      void import('@open-record/features/account').then((m) =>
         this.signInPrompt.set(m.OrSignInPrompt),
       );
     });
 
     // A password reset link signs the user in; take them to the new-password form.
     effect(() => {
-      if (this.auth.recovering()) void this.router.navigateByUrl('/settings');
+      if (this.auth.recovering()) void this.router.navigateByUrl('/account');
     });
+
+    this.router.events
+      .pipe(
+        filter((e) => e instanceof NavigationEnd),
+        take(1),
+      )
+      .subscribe(() => (this.startPageId = this.pageId()));
+
+    // Navigating (links, back, popstate) or growing to desktop closes the drawer.
+    effect(() => {
+      this.screen();
+      this.isDesktop();
+      untracked(() => this.drawerOpen.set(false));
+    });
+
+    // Android hardware / gesture Back (native only).
+    if (Capacitor.isNativePlatform()) {
+      const handle = import('@capacitor/app').then(({ App: CapApp }) =>
+        CapApp.addListener('backButton', () => this.onHardwareBack(CapApp)),
+      );
+      this.destroyRef.onDestroy(() => void handle.then((h) => h.remove()));
+    }
 
     effect(() => {
       if (!this.panelShown() || this.nowPlayingPanel()) return;
@@ -234,11 +266,57 @@ export class App {
     }
   }
 
+  /**
+   * Android Back: close the drawer, then any open modal (as Escape), then the
+   * Now Playing panel or page; otherwise step back through in-app history,
+   * then to Browse; on Browse with nothing behind it, minimise the app.
+   */
+  private onHardwareBack(capApp: { minimizeApp(): Promise<void> }): void {
+    if (this.drawerOpen()) {
+      this.drawerOpen.set(false);
+      return;
+    }
+    const modals = this.document.querySelectorAll<HTMLElement>('[aria-modal="true"]');
+    const modal = modals[modals.length - 1];
+    if (modal) {
+      const active = this.document.activeElement;
+      const target = active instanceof HTMLElement && modal.contains(active) ? active : modal;
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+      return;
+    }
+    if (this.panelShown()) {
+      this.nowPlayingOpen.set(false);
+      return;
+    }
+    if (this.canGoBack()) {
+      this.location.back();
+      return;
+    }
+    if (this.screen().data.screen !== 'browse') {
+      void this.router.navigateByUrl('/browse', { replaceUrl: true });
+      return;
+    }
+    void capApp.minimizeApp();
+  }
+
+  /**
+   * The router (canceledNavigationResolution 'computed') stamps each history
+   * entry with a page index that Back/popstate keeps; an index above the one
+   * the app started on means an in-app entry is behind this one.
+   */
+  private canGoBack(): boolean {
+    return this.startPageId !== null && this.pageId() > this.startPageId;
+  }
+
+  private pageId(): number {
+    const state = this.location.getState() as { ɵrouterPageId?: number } | null;
+    return state?.ɵrouterPageId ?? 0;
+  }
+
   protected back(): void {
-    // The router stamps each history entry with its navigationId; the app's
-    // first entry is 1, so anything later has an in-app entry behind it.
-    const state = this.location.getState() as { navigationId?: number } | null;
-    if ((state?.navigationId ?? 1) > 1) this.location.back();
+    if (this.canGoBack()) this.location.back();
     else void this.router.navigateByUrl('/browse', { replaceUrl: true });
   }
 }

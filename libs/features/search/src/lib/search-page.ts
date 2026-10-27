@@ -262,7 +262,7 @@ const ROW_STYLES = `
           @let current = player.isCurrent(t.id);
           @let saved = library.isSaved(t.id);
           @let status = offline.status(t.id);
-          @let state = downloadState(status);
+          @let state = downloadState(status, offline.error(t.id));
           @let source = sourceLabel(t.source?.site);
           @let streamOnly = !status && t.providerId === remoteId;
           <li class="record" [class.is-current]="current">
@@ -307,7 +307,7 @@ const ROW_STYLES = `
                           <or-tag><or-spinner [size]="12" />{{ state.label }}</or-tag>
                         }
                         @case ('failed') {
-                          <or-tag class="tag-failed" icon="alert">{{ state.label }}</or-tag>
+                          <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ state.label }}</or-tag>
                         }
                       }
                     } @else if (streamOnly) {

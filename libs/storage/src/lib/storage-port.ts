@@ -10,6 +10,8 @@ export interface QueueState {
   positionSec: number;
   shuffle: boolean;
   repeat: RepeatMode;
+  /** Ids waiting in the "Play next" list, in play order. Absent when empty. */
+  playNextIds?: string[];
 }
 
 export interface SavedRecord {
@@ -59,6 +61,13 @@ export interface SavedRecordsRepository {
   has(trackId: string): Promise<boolean>;
   /** No-op when already saved. `savedAt` (epoch ms) defaults to now. */
   add(trackId: string, savedAt?: number): Promise<void>;
+  /**
+   * Bookmark several tracks in one write. Ids already saved (or repeated)
+   * are skipped. Resolves to the ids that were newly saved, in input order.
+   */
+  addMany(
+    entries: readonly { trackId: string; savedAt?: number }[],
+  ): Promise<string[]>;
   remove(trackId: string): Promise<void>;
   /** Re-keys a bookmark to another track id, keeping its savedAt (no-op when `oldId` is not saved). */
   replace(oldId: string, newId: string): Promise<void>;
@@ -71,6 +80,34 @@ export interface ImportedTracksRepository {
   save(imported: ImportedTrack): Promise<void>;
   delete(trackId: string): Promise<void>;
   /** Delete every imported-track record. */
+  clear(): Promise<void>;
+}
+
+export type ImportSessionKind = 'files' | 'spotify' | 'youtube';
+
+/**
+ * One import run (audio files, a Spotify export or a public YouTube
+ * playlist). Holds counts and track ids only; never raw third-party payloads.
+ */
+export interface ImportSession {
+  id: string;
+  kind: ImportSessionKind;
+  /** Epoch milliseconds. */
+  createdAt: number;
+  label: string;
+  added: number;
+  skipped: number;
+  failed: number;
+  /** Track ids added or referenced by the run, in import order. */
+  trackIds: string[];
+}
+
+export interface ImportSessionsRepository {
+  /** Newest first. */
+  list(): Promise<ImportSession[]>;
+  get(id: string): Promise<ImportSession | undefined>;
+  save(session: ImportSession): Promise<void>;
+  delete(id: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -96,6 +133,7 @@ export abstract class StoragePort {
   abstract readonly importedTracks: ImportedTracksRepository;
   abstract readonly queueState: QueueStateRepository;
   abstract readonly settings: SettingsRepository;
+  abstract readonly importSessions: ImportSessionsRepository;
   /** Delete every record in every collection (keeps the schema). */
   abstract clearAll(): Promise<void>;
   /** Resolves once the store is open and migrated; rejects on failure. */

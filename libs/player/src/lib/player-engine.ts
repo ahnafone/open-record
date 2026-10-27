@@ -23,6 +23,8 @@ export interface PlayerError {
   trackId: string;
   code: EngineError['code'] | 'resolve';
   message: string;
+  /** Temporary (e.g. server busy): the player stays on the track to retry. */
+  transient?: boolean;
 }
 
 export interface PlayerEngineOptions {
@@ -41,6 +43,24 @@ export interface PlayerEngineOptions {
    * Default: the same resolver as the current track.
    */
   resolveNeighbour?: (track: Track) => Promise<PlayableSource | undefined>;
+  /**
+   * Classifies a resolve failure as temporary (server busy / rate limited).
+   * Return the message to show to stay on the track instead of skipping (a
+   * skip would just hit the same limit on every track); `undefined` otherwise.
+   */
+  transientError?: (err: unknown) => string | undefined;
+}
+
+/** Minimum gap between automatic skips after consecutive failures. */
+export const MIN_AUTO_SKIP_MS = 1000;
+
+/** A track as it will play, with where it sits in the queue. */
+export interface UpcomingEntry {
+  readonly track: Track;
+  /** Index into `queue()`, for `playAt` and `removeUpcoming`. */
+  readonly queueIndex: number;
+  /** Added with "Play next": plays before the normal order resumes. */
+  readonly playNext: boolean;
 }
 
 export interface SetQueueOptions {
@@ -66,6 +86,12 @@ export class PlayerEngine {
   private readonly _order = signal<readonly number[]>([]);
   /** Position within `_order`; -1 when nothing is loaded. */
   private readonly _cursor = signal(-1);
+  /**
+   * Queue indices added with "Play next" that have not played yet, in the
+   * order added. Invariant: they sit in `_order` right after the cursor, so
+   * `next()` takes them first and then the normal order resumes unchanged.
+   */
+  private readonly _playNext = signal<readonly number[]>([]);
   private readonly _status = signal<PlayerStatus>('idle');
   private readonly _position = signal(0);
   private readonly _duration = signal(0);
@@ -98,12 +124,24 @@ export class PlayerEngine {
   readonly current = computed<Track | null>(
     () => this._queue()[this.currentIndex()] ?? null,
   );
-  /** Tracks in the order they will play. */
-  readonly upcoming = computed(() =>
-    this._order()
+  /** `upcoming` with queue indices and the play-next flag. */
+  readonly upcomingEntries = computed<UpcomingEntry[]>(() => {
+    const queue = this._queue();
+    const pending = new Set(this._playNext());
+    return this._order()
       .slice(this._cursor() + 1)
-      .map((i) => this._queue()[i]),
+      .map((queueIndex) => ({
+        track: queue[queueIndex],
+        queueIndex,
+        playNext: pending.has(queueIndex),
+      }));
+  });
+  /** Tracks in the order they will play (play-next items first). */
+  readonly upcoming = computed(() =>
+    this.upcomingEntries().map((e) => e.track),
   );
+  /** Queue indices waiting in the play-next list, in play order. */
+  readonly playNextIndices = this._playNext.asReadonly();
   readonly isPlaying = computed(() => this._status() === 'playing');
   readonly hasNext = computed(() => this.peek(1) !== -1);
   readonly hasPrevious = computed(() => this.peek(-1) !== -1);
@@ -121,6 +159,9 @@ export class PlayerEngine {
   private failedToken = -1;
   /** `${loadToken}|${trackId}` of the last preload, so it runs once per track. */
   private preloadKey = '';
+  private readonly transientError?: (err: unknown) => string | undefined;
+  /** When the last error-driven skip happened (rate limit for skip chains). */
+  private lastAutoSkip = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly engine: AudioEngine,
@@ -130,6 +171,7 @@ export class PlayerEngine {
     this.random = options.random ?? Math.random;
     this.artResolver = options.resolveArt;
     this.neighbourResolver = options.resolveNeighbour;
+    this.transientError = options.transientError;
     this._skipOnError.set(options.skipOnError ?? true);
     this.canSetVolume = typeof engine.setVolume === 'function';
     engine.setListener({
@@ -164,6 +206,7 @@ export class PlayerEngine {
       tracks.length - 1,
     );
     this._queue.set([...tracks]);
+    this._playNext.set([]);
     if (!tracks.length) {
       await this.clear();
       return;
@@ -183,11 +226,78 @@ export class PlayerEngine {
     );
   }
 
+  /**
+   * Play `tracks` after the current one, before the normal order resumes.
+   * Repeated calls append, so they play in the order added. With nothing
+   * loaded this is a plain `add`.
+   */
+  playNext(tracks: readonly Track[]): void {
+    if (!tracks.length) return;
+    const current = this.currentIndex();
+    if (current < 0) {
+      this.add(tracks);
+      return;
+    }
+    // Physically after the current track (or the last pending item), so the
+    // unshuffled queue order and a restored queue read naturally.
+    const pending = this._playNext();
+    const at = Math.max(current, ...pending) + 1;
+    const n = tracks.length;
+    const shift = (i: number) => (i >= at ? i + n : i);
+    const added = tracks.map((_, k) => at + k);
+    this._queue.update((q) => [...q.slice(0, at), ...tracks, ...q.slice(at)]);
+    this._order.update((o) => [...o.map(shift), ...added]);
+    this._playNext.set([...pending.map(shift), ...added]);
+    this.placePending();
+    this.refreshNeighbours();
+  }
+
+  /**
+   * Mark existing queue entries as play-next (e.g. restoring a saved queue).
+   * Ignores the current track, unknown and duplicate indices.
+   */
+  markPlayNext(queueIndices: readonly number[]): void {
+    const current = this.currentIndex();
+    const len = this._queue().length;
+    const next = [...this._playNext()];
+    for (const i of queueIndices) {
+      if (i >= 0 && i < len && i !== current && !next.includes(i)) next.push(i);
+    }
+    if (next.length === this._playNext().length) return;
+    this._playNext.set(next);
+    this.placePending();
+    this.refreshNeighbours();
+  }
+
+  /**
+   * Remove a queue entry (play-next or normal order) by queue index. The
+   * current track cannot be removed this way. Returns whether it was removed.
+   */
+  removeUpcoming(queueIndex: number): boolean {
+    if (
+      queueIndex < 0 ||
+      queueIndex >= this._queue().length ||
+      queueIndex === this.currentIndex()
+    ) {
+      return false;
+    }
+    const pos = this._order().indexOf(queueIndex);
+    const shift = (i: number) => (i > queueIndex ? i - 1 : i);
+    this._queue.update((q) => q.filter((_, i) => i !== queueIndex));
+    this._order.update((o) => o.filter((i) => i !== queueIndex).map(shift));
+    this._playNext.update((p) =>
+      p.filter((i) => i !== queueIndex).map(shift),
+    );
+    if (pos >= 0 && pos < this._cursor()) this._cursor.update((c) => c - 1);
+    this.refreshNeighbours();
+    return true;
+  }
+
   /** Jump to a queue index (not order position) and play it. */
   async playAt(queueIndex: number, autoplay = true): Promise<void> {
     const cursor = this._order().indexOf(queueIndex);
     if (cursor < 0) return;
-    this._cursor.set(cursor);
+    this.moveTo(cursor);
     await this.loadCurrent(autoplay);
   }
 
@@ -196,6 +306,7 @@ export class PlayerEngine {
     this._queue.set([]);
     this._order.set([]);
     this._cursor.set(-1);
+    this._playNext.set([]);
     this._status.set('idle');
     this._position.set(0);
     this._duration.set(0);
@@ -241,7 +352,7 @@ export class PlayerEngine {
   async next(): Promise<boolean> {
     const target = this.peek(1);
     if (target === -1) return false;
-    this._cursor.set(target);
+    this.moveTo(target);
     await this.loadCurrent(true);
     return true;
   }
@@ -253,7 +364,7 @@ export class PlayerEngine {
       await this.seek(0);
       return;
     }
-    this._cursor.set(target);
+    this.moveTo(target);
     await this.loadCurrent(true);
   }
 
@@ -274,6 +385,7 @@ export class PlayerEngine {
     const current = this.currentIndex();
     this.rebuildOrder(current < 0 ? 0 : current);
     if (current < 0) this._cursor.set(-1);
+    else this.placePending();
     this.refreshNeighbours();
   }
 
@@ -343,6 +455,34 @@ export class PlayerEngine {
     return -1;
   }
 
+  /**
+   * Move the cursor. Landing on a play-next item consumes it; the rest of the
+   * play-next list is then kept right after the new cursor.
+   */
+  private moveTo(cursor: number): void {
+    this._cursor.set(cursor);
+    const at = this._order()[cursor];
+    if (this._playNext().includes(at)) {
+      this._playNext.update((p) => p.filter((i) => i !== at));
+    }
+    this.placePending();
+  }
+
+  /** Re-establish the invariant: pending play-next items follow the cursor. */
+  private placePending(): void {
+    const pending = this._playNext();
+    const cursor = this._cursor();
+    if (!pending.length || cursor < 0) return;
+    const order = this._order();
+    const set = new Set(pending);
+    const rest = order.filter((i) => !set.has(i));
+    const pos = rest.indexOf(order[cursor]);
+    const next = [...rest.slice(0, pos + 1), ...pending, ...rest.slice(pos + 1)];
+    if (next.every((v, i) => v === order[i])) return;
+    this._order.set(next);
+    this._cursor.set(pos);
+  }
+
   private rebuildOrder(currentQueueIndex: number): void {
     const all = this._queue().map((_, i) => i);
     if (!this._shuffle()) {
@@ -382,7 +522,7 @@ export class PlayerEngine {
   private async handleSkipped(direction: SkipDirection): Promise<void> {
     const target = this.peek(direction === 'next' ? 1 : -1);
     if (target === -1) return;
-    this._cursor.set(target);
+    this.moveTo(target);
     await this.loadCurrent(true);
   }
 
@@ -411,11 +551,14 @@ export class PlayerEngine {
     try {
       media = await this.toMedia(track);
     } catch (err) {
+      const transient = this.transientError?.(err);
       await this.fail(
-        {
-          code: 'resolve',
-          message: errorMessage(err, 'Could not find this record.'),
-        },
+        transient
+          ? { code: 'resolve', message: transient, transient: true }
+          : {
+              code: 'resolve',
+              message: errorMessage(err, 'Could not find this record.'),
+            },
         token,
       );
       return;
@@ -450,13 +593,25 @@ export class PlayerEngine {
     this._error.set({ trackId: track.id, ...err });
     this._status.set('error');
     this.failures++;
+    // Only skip when the user wants sound (a paused restore stays put) and
+    // the failure is not temporary (busy: every track would fail the same).
     if (
-      this._skipOnError() &&
-      this.failures < this._queue().length &&
-      this.peek(1) !== -1
+      !this._skipOnError() ||
+      !this.playIntent ||
+      err.transient ||
+      this.failures >= this._queue().length ||
+      this.peek(1) === -1
     ) {
-      await this.next();
+      return;
     }
+    // Never chain skips faster than MIN_AUTO_SKIP_MS.
+    const wait = this.lastAutoSkip + MIN_AUTO_SKIP_MS - Date.now();
+    if (wait > 0) {
+      await new Promise<void>((r) => setTimeout(r, wait));
+      if (token !== this.loadToken) return;
+    }
+    this.lastAutoSkip = Date.now();
+    await this.next();
   }
 
   private async toMedia(track: Track): Promise<EngineMedia> {

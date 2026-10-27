@@ -6,7 +6,7 @@ import { AccountSection } from './account-section';
 /**
  * App-shell "Sign in to continue" modal, opened by `AuthStore.requireAccount`
  * / `promptSignIn` when a signed-out user tries an account-only action. It
- * reuses the Settings account form and closes itself once signed in.
+ * reuses the Account sign-in form and closes itself once signed in.
  */
 @Component({
   selector: 'or-sign-in-prompt',

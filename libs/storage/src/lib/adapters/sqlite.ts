@@ -81,6 +81,24 @@ export class SqliteBackend implements StorageBackend, MigrationTarget {
     );
   }
 
+  async putMany<T>(
+    collection: CollectionName,
+    entries: readonly (readonly [string, T])[],
+  ): Promise<void> {
+    if (!entries.length) return;
+    const sql = `INSERT INTO ${table(collection)} (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+    await this.conn.beginTransaction();
+    try {
+      for (const [key, value] of entries)
+        await this.conn.run(sql, [key, JSON.stringify(value)], false);
+      await this.conn.commitTransaction();
+    } catch (err) {
+      await this.conn.rollbackTransaction();
+      throw err;
+    }
+  }
+
   async delete(collection: CollectionName, key: string): Promise<void> {
     await this.conn.run(`DELETE FROM ${table(collection)} WHERE key = ?`, [
       key,

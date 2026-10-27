@@ -7,13 +7,15 @@ import {
   output,
   signal,
 } from '@angular/core';
-import { LibraryStore, PlayerStore } from '@open-record/state';
+import type { Track } from '@open-record/models';
+import { AuthStore, LibraryStore, PlayerStore } from '@open-record/state';
 import {
   OrIcon,
   OrIconButton,
   OrSleeve,
   OrSlider,
   OrSpinner,
+  OrToast,
 } from '@open-record/ui';
 
 /** `m:ss` (or `h:mm:ss`); same as Now Playing's, kept here so the shell does not pull that chunk. */
@@ -111,6 +113,14 @@ function formatTime(totalSec: number): string {
     </div>
 
     <div class="side">
+      @if (player.current(); as track) {
+        <or-icon-button
+          icon="bookmark"
+          [label]="saved() ? 'Remove from library' : 'Save to library'"
+          [pressed]="saved()"
+          (click)="toggleSaved(track)"
+        />
+      }
       @if (player.canSetVolume) {
         <or-icon-button
           [icon]="player.muted() || player.volume() === 0 ? 'volume-off' : 'volume'"
@@ -144,8 +154,8 @@ function formatTime(totalSec: number): string {
       grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
       align-items: center;
       gap: var(--spacing-md);
-      min-height: 84px;
-      padding: var(--spacing-xs) var(--spacing-md);
+      min-height: 92px;
+      padding: var(--spacing-sm) var(--spacing-md);
       background: var(--color-surface);
       border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
     }
@@ -246,6 +256,8 @@ function formatTime(totalSec: number): string {
 export class OrPlayerBar {
   protected readonly player = inject(PlayerStore);
   private readonly library = inject(LibraryStore);
+  private readonly auth = inject(AuthStore);
+  private readonly toast = inject(OrToast);
 
   /** Whether the Now Playing panel (or page) is showing. */
   readonly panelOpen = input(false);
@@ -270,6 +282,10 @@ export class OrPlayerBar {
     () => this.player.duration() > 0 && !this.player.isLoading(),
   );
   protected readonly shown = computed(() => this.scrub() ?? this.player.position());
+  protected readonly saved = computed(() => {
+    const id = this.player.current()?.id;
+    return id ? this.library.isSaved(id) : false;
+  });
   protected readonly volumePct = computed(() => Math.round(this.player.volume() * 100));
 
   protected async commitSeek(sec: number): Promise<void> {
@@ -277,6 +293,21 @@ export class OrPlayerBar {
       await this.player.seek(sec);
     } finally {
       this.scrub.set(null);
+    }
+  }
+
+  /** Same flow as Now Playing: saving needs an account, removing does not. */
+  protected async toggleSaved(track: Track): Promise<void> {
+    if (!this.library.isSaved(track.id) && !this.auth.requireAccount()) return;
+    try {
+      const nowSaved = await this.library.toggleSaved(track.id);
+      this.toast.show(
+        nowSaved
+          ? `Saved “${track.title}” to your library`
+          : `Removed “${track.title}” from your library`,
+      );
+    } catch {
+      this.toast.show('Could not update your library');
     }
   }
 }

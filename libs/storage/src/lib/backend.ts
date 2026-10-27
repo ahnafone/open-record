@@ -19,6 +19,11 @@ export interface StorageBackend {
   /** Values in key order. */
   getAll<T>(collection: CollectionName): Promise<T[]>;
   put<T>(collection: CollectionName, key: string, value: T): Promise<void>;
+  /** Write several entries in one transaction (all or nothing where supported). */
+  putMany<T>(
+    collection: CollectionName,
+    entries: readonly (readonly [string, T])[],
+  ): Promise<void>;
   delete(collection: CollectionName, key: string): Promise<void>;
   clear(collection: CollectionName): Promise<void>;
   close(): Promise<void>;

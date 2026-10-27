@@ -1,4 +1,15 @@
-import type { AudioQuality, DownloadSite, RemoteSearchResult } from '@open-record/models';
+import {
+  ENRICH_SOURCES,
+  MAX_ENRICH_BATCH,
+  type AudioQuality,
+  type DownloadSite,
+  type EnrichMatch,
+  type EnrichQuery,
+  type EnrichSource,
+  type RemotePlaylist,
+  type RemotePlaylistEntry,
+  type RemoteSearchResult,
+} from '@open-record/models';
 import { AuthError, HttpError, ProtocolError, RemoteBusyError, RemoteConfigError } from './errors';
 import { createFetchTransport, type HttpRequest, type HttpTransport } from './transport';
 
@@ -125,6 +136,80 @@ export function parseAliases(raw: unknown): TrackAliases {
   return { titles: strList(raw['titles']), artists: strList(raw['artists']) };
 }
 
+const httpUrl = (v: unknown): string | undefined => {
+  const s = str(v);
+  return s && /^https?:\/\//i.test(s) ? s : undefined;
+};
+
+function parsePlaylistEntry(raw: unknown): RemotePlaylistEntry | null {
+  if (!isObj(raw)) return null;
+  const id = str(raw['id']);
+  const url = httpUrl(raw['url']);
+  const title = str(raw['title']);
+  if (!id || !url || !title) return null;
+  const entry: RemotePlaylistEntry = {
+    id,
+    url,
+    site: str(raw['site']) ?? 'youtube',
+    title,
+    artist: str(raw['artist']) ?? '',
+    originalTitle: str(raw['originalTitle']) ?? title,
+  };
+  const uploader = str(raw['uploader']);
+  if (uploader) entry.uploader = uploader;
+  const album = str(raw['album']);
+  if (album) entry.album = album;
+  const duration = num(raw['durationSec']);
+  if (duration && duration > 0) entry.durationSec = duration;
+  const thumb = httpUrl(raw['thumbnailUrl']);
+  if (thumb) entry.thumbnailUrl = thumb;
+  return entry;
+}
+
+/** Validate a `POST /playlist` response (a playlist, or a single song when `single` is set). */
+export function parsePlaylist(raw: unknown): RemotePlaylist {
+  if (!isObj(raw) || !Array.isArray(raw['entries'])) throw new ProtocolError('Unexpected playlist response from the server.');
+  const url = httpUrl(raw['url']);
+  if (!url) throw new ProtocolError('Unexpected playlist response from the server.');
+  const playlist: RemotePlaylist = {
+    id: str(raw['id']) ?? url,
+    title: str(raw['title']) ?? 'YouTube playlist',
+    url,
+    site: str(raw['site']) ?? 'youtube',
+    entries: raw['entries'].map(parsePlaylistEntry).filter((e): e is RemotePlaylistEntry => e !== null),
+    unavailable: Math.max(0, Math.trunc(num(raw['unavailable']) ?? 0)),
+    truncated: raw['truncated'] === true,
+  };
+  const uploader = str(raw['uploader']);
+  if (uploader) playlist.uploader = uploader;
+  if (raw['single'] === true) playlist.single = true;
+  return playlist;
+}
+
+/** Validate one `POST /meta/enrich` result; null when absent or malformed. */
+export function parseEnrichMatch(raw: unknown): EnrichMatch | null {
+  if (!isObj(raw)) return null;
+  const title = str(raw['title']);
+  const artist = str(raw['artist']);
+  const confidence = num(raw['confidence']);
+  if (!title || !artist || confidence === undefined) return null;
+  const sources = Array.isArray(raw['sources'])
+    ? raw['sources'].filter((s): s is EnrichSource => (ENRICH_SOURCES as readonly unknown[]).includes(s))
+    : [];
+  const match: EnrichMatch = { title, artist, confidence, sources };
+  const album = str(raw['album']);
+  if (album) match.album = album;
+  const year = num(raw['year']);
+  if (year && year > 0) match.year = Math.trunc(year);
+  const genre = str(raw['genre']);
+  if (genre) match.genre = genre;
+  const art = httpUrl(raw['artUrl']);
+  if (art) match.artUrl = art;
+  const duration = num(raw['durationSec']);
+  if (duration && duration > 0) match.durationSec = duration;
+  return match;
+}
+
 function serverMessage(data: unknown, status: number): string {
   if (isObj(data)) {
     const msg = str(data['error']) ?? str(data['message']);
@@ -199,6 +284,24 @@ export class RemoteClient {
     return parseAliases(await this.call({ method: 'GET', path: `/meta/aliases?${params}`, signal, timeoutMs: 30_000, prompt: false }));
   }
 
+  /** `POST /playlist {url}`: a public YouTube / YT Music playlist's entries, or one song (metadata only). */
+  async playlist(url: string, signal?: AbortSignal): Promise<RemotePlaylist> {
+    return parsePlaylist(await this.call({ method: 'POST', path: '/playlist', body: { url: url.trim() }, signal, timeoutMs: 90_000 }));
+  }
+
+  /**
+   * `POST /meta/enrich {items}`: confident catalogue matches, one per item
+   * (null when none). A background call, so a 401 does not prompt sign-in.
+   */
+  async enrich(items: EnrichQuery[], signal?: AbortSignal): Promise<(EnrichMatch | null)[]> {
+    if (!items.length) return [];
+    if (items.length > MAX_ENRICH_BATCH) throw new RangeError(`at most ${MAX_ENRICH_BATCH} items per call`);
+    const data = await this.call({ method: 'POST', path: '/meta/enrich', body: { items }, signal, timeoutMs: 120_000, prompt: false });
+    if (!isObj(data) || !Array.isArray(data['results'])) throw new ProtocolError('Unexpected enrich response from the server.');
+    const results = data['results'];
+    return items.map((_, i) => parseEnrichMatch(results[i]));
+  }
+
   /** `POST /resolve {url}`: info for a pasted link. */
   async resolve(url: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
     const result = parseSearchResult(await this.call({ method: 'POST', path: '/resolve', body: { url: url.trim() }, signal }));
@@ -210,7 +313,7 @@ export class RemoteClient {
    * `POST /stream {url, quality?}`: a direct audio link for a page. Nothing is
    * proxied; the bytes come from the source. `quality` is omitted when
    * undefined (the server then picks the highest). Rejects with
-   * {@link RemoteBusyError} on 503.
+   * {@link RemoteBusyError} on 503 or 429.
    */
   async streamUrl(pageUrl: string, signal?: AbortSignal, quality?: AudioQuality): Promise<RemoteStream> {
     const body: { url: string; quality?: AudioQuality } = { url: pageUrl.trim() };
@@ -260,7 +363,8 @@ export class RemoteClient {
       if (authed && opts.prompt !== false) this.auth.onUnauthorized?.();
       throw new AuthError(res.status);
     }
-    if (res.status === 503) throw new RemoteBusyError(retryAfterSec(res.headers['retry-after']));
+    // 503: resolve queue full; 429: rate limited. Both carry Retry-After.
+    if (res.status === 503 || res.status === 429) throw new RemoteBusyError(retryAfterSec(res.headers['retry-after']));
     if (res.status < 200 || res.status >= 300) throw new HttpError(res.status, serverMessage(res.data, res.status));
     return res.data;
   }

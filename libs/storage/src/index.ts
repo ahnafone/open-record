@@ -18,6 +18,9 @@ export { StoragePort } from './lib/storage-port';
 export type {
   ImportedTrack,
   ImportedTracksRepository,
+  ImportSession,
+  ImportSessionKind,
+  ImportSessionsRepository,
   PlaylistRepository,
   QueueState,
   QueueStateRepository,

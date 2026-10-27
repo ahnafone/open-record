@@ -1,4 +1,15 @@
-import type { AudioQuality, DownloadSite, PlayableSource, RemoteSearchResult, Track, TrackSource } from '@open-record/models';
+import type {
+  AudioQuality,
+  DownloadSite,
+  EnrichMatch,
+  EnrichQuery,
+  PlayableSource,
+  RemotePlaylist,
+  RemotePlaylistEntry,
+  RemoteSearchResult,
+  Track,
+  TrackSource,
+} from '@open-record/models';
 import { RemoteClient, type RemoteAuthOptions, type RemoteConfig, type TrackAliasQuery, type TrackAliases } from './client';
 import { createLinkCache } from './link-cache';
 import { RemoteConfigError, RemoteError } from './errors';
@@ -69,6 +80,37 @@ export function toRemoteTrack(result: RemoteSearchResult): Track {
   if (result.durationSec) track.durationSec = Math.round(result.durationSec);
   if (result.thumbnailUrl) track.artUrl = result.thumbnailUrl;
   return track;
+}
+
+/** A playlist entry as a remote Track, keeping the title/uploader YouTube showed. */
+export function playlistEntryToTrack(entry: RemotePlaylistEntry): Track {
+  const track = toRemoteTrack({
+    id: entry.id,
+    title: entry.title,
+    artist: entry.artist,
+    url: entry.url,
+    site: entry.site,
+    durationSec: entry.durationSec,
+    thumbnailUrl: entry.thumbnailUrl,
+  });
+  if (track.source) {
+    track.source.originalTitle = entry.originalTitle;
+    if (entry.uploader) track.source.originalArtist = entry.uploader;
+  }
+  if (entry.album) track.album = entry.album;
+  return track;
+}
+
+/** A fetched public playlist with its entries as Tracks. */
+export interface ImportedPlaylist {
+  title: string;
+  url: string;
+  site: string;
+  tracks: Track[];
+  unavailable: number;
+  truncated: boolean;
+  /** A single song link (one track, no playlist). */
+  single: boolean;
 }
 
 export interface RemoteProviderOptions extends RemoteAuthOptions {
@@ -181,6 +223,25 @@ export class RemoteProvider {
     } catch {
       return { titles: [], artists: [] };
     }
+  }
+
+  /** A public YouTube / YT Music playlist (or one song) as Tracks (server `POST /playlist`). Rejects like `resolveUrl`. */
+  async importPlaylist(url: string, signal?: AbortSignal): Promise<ImportedPlaylist> {
+    const list: RemotePlaylist = await this.client.playlist(url, signal);
+    return {
+      title: list.title,
+      url: list.url,
+      site: list.site,
+      tracks: list.entries.map(playlistEntryToTrack),
+      unavailable: list.unavailable,
+      truncated: list.truncated,
+      single: list.single === true,
+    };
+  }
+
+  /** Catalogue matches for up to 10 songs (server `POST /meta/enrich`). Rejects on errors so callers can pause. */
+  async enrich(items: EnrichQuery[], signal?: AbortSignal): Promise<(EnrichMatch | null)[]> {
+    return this.client.enrich(items, signal);
   }
 
   /** A pasted link as a Track (server `POST /resolve`). */

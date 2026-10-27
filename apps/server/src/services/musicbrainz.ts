@@ -213,16 +213,19 @@ export interface AliasLookup {
   lookup(query: AliasQuery): Promise<TrackAliases>;
 }
 
-/** Aliases service with a 1 req/s serialized queue and a bounded TTL cache. */
-export function createAliasLookup(options: AliasLookupOptions = {}): AliasLookup {
+/** GET a MusicBrainz JSON document through a 1 req/s serialized queue. */
+export type PacedJson = (url: string) => Promise<unknown>;
+
+/**
+ * A serialized MusicBrainz fetcher: each request starts at least
+ * `minIntervalMs` after the previous one, the queue is bounded, redirects
+ * are refused and bodies are size-capped.
+ */
+export function createPacedJson(options: AliasLookupOptions = {}): PacedJson {
   // Read the global lazily so it can be swapped (tests) after the module loads.
   const fetchFn: AliasFetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
   const now = options.now ?? Date.now;
   const interval = options.minIntervalMs ?? MIN_INTERVAL_MS;
-  const cache = new Map<string, { value: TrackAliases; until: number }>();
-  const inflight = new Map<string, Promise<TrackAliases>>();
-
-  // Serialized queue: each request starts at least `interval` after the previous one.
   let tail: Promise<void> = Promise.resolve();
   let lastStart = -Infinity;
   let queued = 0;
@@ -243,7 +246,7 @@ export function createAliasLookup(options: AliasLookupOptions = {}): AliasLookup
     return run;
   };
 
-  const getJson = (url: string): Promise<unknown> =>
+  return (url: string): Promise<unknown> =>
     paced(async () => {
       const res = await fetchFn(url, {
         headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
@@ -257,6 +260,18 @@ export function createAliasLookup(options: AliasLookupOptions = {}): AliasLookup
       if (text.length > MAX_JSON_BYTES) throw new Error('response too large');
       return JSON.parse(text) as unknown;
     });
+}
+
+/** Process-wide MusicBrainz queue shared by aliases and enrichment (keeps us at 1 req/s overall). */
+export const musicBrainzJson: PacedJson = createPacedJson();
+
+/** Aliases service with a 1 req/s serialized queue and a bounded TTL cache. */
+export function createAliasLookup(options: AliasLookupOptions = {}): AliasLookup {
+  const now = options.now ?? Date.now;
+  const custom = options.fetch || options.now || options.minIntervalMs !== undefined;
+  const getJson = custom ? createPacedJson(options) : musicBrainzJson;
+  const cache = new Map<string, { value: TrackAliases; until: number }>();
+  const inflight = new Map<string, Promise<TrackAliases>>();
 
   const fetchAliases = async (q: AliasQuery): Promise<{ value: TrackAliases; ok: boolean }> => {
     try {

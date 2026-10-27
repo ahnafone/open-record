@@ -9,12 +9,14 @@ import {
 import type { Playlist } from '@open-record/models';
 import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
 import { AuthStore } from './auth.store';
+import { ImportSessionsStore, type ImportSession } from './import-sessions.store';
 import { ImportStore } from './import.store';
 import { LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
 import {
   NetworkStatusPort,
   SyncPort,
+  type SyncImportSession,
   type SyncLibraryItem,
   type SyncPlaylist,
   type SyncTrack,
@@ -23,6 +25,7 @@ import {
   contentHash,
   emptyLedger,
   fromSyncTrack,
+  importSessionContent,
   mergeRecords,
   playlistContent,
   readLedger,
@@ -40,6 +43,12 @@ export type SyncStatus = 'off' | 'idle' | 'syncing' | 'error';
 
 /** Foreground resumes closer together than this do not sync again. */
 const RESUME_THROTTLE_MS = 60_000;
+/** Wait after a local library or playlist change before syncing it. */
+const CHANGE_DEBOUNCE_MS = 3_000;
+/** While the app is open and visible, check the cloud copy this often. */
+const POLL_MS = 60_000;
+
+type SessionContent = Omit<SyncImportSession, 'updatedAt' | 'deletedAt'>;
 
 /** What a library entry's hash covers (`savedAt` only orders, it is not compared). */
 interface LibraryContent {
@@ -49,13 +58,15 @@ interface LibraryContent {
 
 /**
  * Account sync: keeps the signed-in user's library metadata (Spotify
- * placeholders, matched tracks, bookmarks) and playlists in step with the
+ * placeholders, matched tracks, bookmarks), playlists and import history in
+ * step with the
  * cloud copy behind `SyncPort`. Metadata only: audio and device files never
  * leave the device. Conflicts resolve last-write-wins per record; deletions
  * travel as tombstones.
  *
  * Runs on sign-in, when the network comes back, when the app returns to the
- * foreground, after an import finishes matching, and on `syncNow()`. A no-op
+ * foreground, after an import finishes matching, when import history changes
+ * here (so deleted sessions leave the account too), and on `syncNow()`. A no-op
  * when signed out or when no `SyncPort` is provided.
  */
 @Injectable({ providedIn: 'root' })
@@ -66,6 +77,7 @@ export class SyncStore {
   private readonly library = inject(LibraryStore);
   private readonly playlists = inject(PlaylistsStore);
   private readonly imports = inject(ImportStore);
+  private readonly sessions = inject(ImportSessionsStore);
   private readonly network = inject(NetworkStatusPort, { optional: true });
 
   private readonly _running = signal(false);
@@ -113,6 +125,40 @@ export class SyncStore {
       importStatus = next;
       if (finished) untracked(() => void this.syncNow());
     });
+    // Saves, unsaves, new tracks or playlist edits made here (or applied from
+    // the cloud, which settles after one quiet pass).
+    let firstRun = true;
+    effect(() => {
+      this.library.savedIds();
+      this.library.metadataIds();
+      this.playlists.playlists();
+      if (firstRun) {
+        firstRun = false;
+        return;
+      }
+      untracked(() => {
+        if (this.started && this.enabled()) this.scheduleChangeSync();
+      });
+    });
+    // Import history changed on this device (recorded, repointed, deleted).
+    let sessionChanges = this.sessions.changes();
+    effect(() => {
+      const next = this.sessions.changes();
+      if (next === sessionChanges) return;
+      sessionChanges = next;
+      untracked(() => void this.syncNow());
+    });
+  }
+
+  private changeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Library or playlist changed on this device: sync soon (batched). */
+  private scheduleChangeSync(): void {
+    if (this.changeTimer) clearTimeout(this.changeTimer);
+    this.changeTimer = setTimeout(() => {
+      this.changeTimer = null;
+      void this.syncNow();
+    }, CHANGE_DEBOUNCE_MS);
   }
 
   /** Begin syncing (called once at app start). */
@@ -123,6 +169,12 @@ export class SyncStore {
     this.network?.onChange((state) => {
       if (state.connected) void this.syncNow();
     });
+    // Pick up changes made on other devices while this one stays open.
+    if (typeof setInterval === 'function')
+      setInterval(() => {
+        if (typeof document === 'undefined' || document.visibilityState === 'visible')
+          void this.syncNow();
+      }, POLL_MS);
     if (typeof document !== 'undefined')
       document.addEventListener('visibilitychange', () => {
         if (
@@ -181,7 +233,11 @@ export class SyncStore {
     if (!port) return;
     const userId = await port.userId();
     if (!userId || userId !== this.auth.user()?.id) return;
-    await Promise.all([this.library.ready(), this.playlists.ready()]);
+    await Promise.all([
+      this.library.ready(),
+      this.playlists.ready(),
+      this.sessions.load(),
+    ]);
 
     const stored = await this.readLedger();
     const ledger = stored?.userId === userId ? stored : emptyLedger(userId);
@@ -227,6 +283,19 @@ export class SyncStore {
       );
     }
 
+    const sessionLedger = ledger.importSessions ?? {};
+    const localSessions = new Map<string, SyncImportSession>();
+    for (const [id, s] of stampLocal(this.sessionContent(), sessionLedger, now, {
+      firstSync,
+    })) {
+      localSessions.set(
+        id,
+        s.content
+          ? { ...s.content, updatedAt: s.updatedAt }
+          : tombstoneSession(id, s.updatedAt, s.deletedAt ?? now),
+      );
+    }
+
     // ---- Merge with the cloud copy ----
     const remote = await port.pull();
     const lMerge = mergeRecords(
@@ -239,20 +308,36 @@ export class SyncStore {
       new Map(remote.playlists.map((p) => [p.id, p])),
       (a, b) => playlistHash(a) === playlistHash(b),
     );
+    const sMerge = mergeRecords(
+      localSessions,
+      new Map(remote.importSessions.map((s) => [s.id, s])),
+      (a, b) => sessionHash(a) === sessionHash(b),
+    );
     // First-sync clocks of 0 only lose ties; uploads carry a real time.
     for (const i of lMerge.push) if (!i.updatedAt) i.updatedAt = now;
-    if (lMerge.push.length || pMerge.push.length)
-      await port.push({ library: lMerge.push, playlists: pMerge.push });
+    for (const s of sMerge.push) if (!s.updatedAt) s.updatedAt = now;
+    if (lMerge.push.length || pMerge.push.length || sMerge.push.length)
+      await port.push({
+        library: lMerge.push,
+        playlists: pMerge.push,
+        importSessions: sMerge.push,
+      });
 
     // ---- Apply what the cloud won ----
     await this.applyLibrary(lMerge.apply);
     await this.applyPlaylists(pMerge.apply);
+    await this.sessions.applySynced({
+      save: sMerge.apply.filter((s) => !s.deletedAt).map(fromSyncSession),
+      remove: sMerge.apply.filter((s) => s.deletedAt).map((s) => s.id),
+    });
 
     // ---- Remember what is now agreed ----
     const libClock = new Map<string, SyncLibraryItem>(localLib);
     for (const i of lMerge.apply) libClock.set(i.trackId, i);
     const plClock = new Map<string, SyncPlaylist>(localPl);
     for (const p of pMerge.apply) plClock.set(p.id, p);
+    const sessionClock = new Map<string, SyncImportSession>(localSessions);
+    for (const s of sMerge.apply) sessionClock.set(s.id, s);
 
     const after = await this.collectLibrary();
     const afterPl = new Map(
@@ -267,6 +352,7 @@ export class SyncStore {
         ...nextLedger(after.content, libClock, contentHash),
       },
       playlists: nextLedger(afterPl, plClock, (p) => contentHash(p)),
+      importSessions: nextLedger(this.sessionContent(), sessionClock, contentHash),
     };
     await this.storage.settings.set(
       SETTINGS_KEYS.syncState,
@@ -300,6 +386,13 @@ export class SyncStore {
       content.set(id, { track: toSyncTrack(track), saved: saved.has(id) });
     }
     return { content, savedAt, referenced };
+  }
+
+  /** Import history as it syncs (labels, counts and track ids only). */
+  private sessionContent(): Map<string, SessionContent> {
+    return new Map(
+      this.sessions.sessions().map((s) => [s.id, importSessionContent(s)]),
+    );
   }
 
   private async applyLibrary(items: readonly SyncLibraryItem[]): Promise<void> {
@@ -393,6 +486,38 @@ function tombstonePlaylist(id: string, updatedAt: number, deletedAt: number): Sy
     updatedAt,
     deletedAt,
   };
+}
+
+function tombstoneSession(id: string, updatedAt: number, deletedAt: number): SyncImportSession {
+  return {
+    id,
+    kind: 'files',
+    label: '',
+    createdAt: deletedAt,
+    added: 0,
+    skipped: 0,
+    failed: 0,
+    trackIds: [],
+    updatedAt,
+    deletedAt,
+  };
+}
+
+function fromSyncSession(s: SyncImportSession): ImportSession {
+  return {
+    id: s.id,
+    kind: s.kind,
+    createdAt: s.createdAt,
+    label: s.label,
+    added: s.added,
+    skipped: s.skipped,
+    failed: s.failed,
+    trackIds: [...new Set(s.trackIds)],
+  };
+}
+
+function sessionHash(s: SyncImportSession): string {
+  return s.deletedAt ? '' : contentHash(importSessionContent(s));
 }
 
 function libraryHash(i: SyncLibraryItem): string {

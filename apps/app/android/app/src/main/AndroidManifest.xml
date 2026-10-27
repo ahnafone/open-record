@@ -21,6 +21,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Keeps downloads running with the screen off (BackgroundWorkPlugin). -->
+        <service
+            android:name=".DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -37,4 +43,8 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Background playback notification (Android 13+); request at runtime. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Downloads with the screen off: foreground service + wake and Wi-Fi locks. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 </manifest>

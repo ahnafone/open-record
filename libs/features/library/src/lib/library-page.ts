@@ -4,6 +4,7 @@ import {
   ElementRef,
   Injector,
   afterNextRender,
+  computed,
   inject,
   signal,
 } from '@angular/core';
@@ -18,22 +19,29 @@ import {
   PlaylistsStore,
   REMOTE_PROVIDER_ID,
   SettingsStore,
+  SyncStore,
   downloadState,
+  filterTracks,
   formatDuration,
   sourceLabel,
 } from '@open-record/state';
 import {
+  OrDownloadProgress,
   OrButton,
   OrEmptyState,
+  OrFilterField,
   OrIcon,
   OrIconButton,
+  OrLoadMore,
   OrSectionHead,
   OrSleeve,
   OrSpinner,
   OrSwitch,
   OrTag,
   OrToast,
+  lazyWindow,
 } from '@open-record/ui';
+import { AddFromPlaylistDialog } from './add-from-playlist-dialog';
 import { NewPlaylistDialog } from './new-playlist-dialog';
 import { injectTrackArt } from './track-art';
 
@@ -159,13 +167,17 @@ const ROW_STYLES = `
 @Component({
   selector: 'or-library-page',
   imports: [
+    OrDownloadProgress,
     NgTemplateOutlet,
     RouterLink,
+    AddFromPlaylistDialog,
     NewPlaylistDialog,
     OrButton,
     OrEmptyState,
+    OrFilterField,
     OrIcon,
     OrIconButton,
+    OrLoadMore,
     OrSectionHead,
     OrSleeve,
     OrSpinner,
@@ -178,10 +190,33 @@ const ROW_STYLES = `
       <span class="eyebrow">Your shelves</span>
       <h1 class="display">Library</h1>
       <p class="lede">Saved sides and the playlists you make.</p>
-      <a class="import-link" routerLink="/import">Import from Spotify</a>
     </header>
 
-    <or-section-head heading="Saved records" />
+    @if (library.status() === 'ready' && hasRecords()) {
+      <or-filter-field
+        class="filter"
+        label="Filter your records"
+        placeholder="Filter by title, artist or album"
+        describedBy="or-library-filter-status"
+        [(value)]="query"
+      />
+      <p id="or-library-filter-status" class="filter-status" role="status">
+        @if (filtering()) {
+          {{ matchLabel() }}
+        }
+      </p>
+    }
+
+    <or-section-head heading="Saved records">
+      <or-button
+        size="sm"
+        [disabled]="library.status() !== 'ready'"
+        (click)="addFromPlaylistOpen.set(true)"
+      >
+        <or-icon name="plus" [size]="18" />
+        Add Songs from Playlist
+      </or-button>
+    </or-section-head>
     <or-switch
       label="Auto-download"
       description="Keep every saved record on this device for offline play."
@@ -189,10 +224,26 @@ const ROW_STYLES = `
       (checkedChange)="setAutoDownload($event)"
     />
     <p class="auto-note" role="status">
-      @if (settings.autoDownloadLibrary() && autoDownload.waitingForWifi()) {
-        Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+      @if (settings.autoDownloadLibrary()) {
+        @if (autoDownload.waitingForWifi()) {
+          Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+        } @else {
+          @if (autoDownload.pauseReason(); as paused) {
+            {{ paused }}
+          } @else if (autoDownload.failedCount(library.savedIds()); as n) {
+            <a class="failed-link" routerLink="/downloads/failed">{{ n }} couldn’t be downloaded</a>
+          }
+        }
       }
     </p>
+    @if (libraryProgress(); as p) {
+      <or-download-progress
+        label="Library download progress"
+        [saved]="p.saved"
+        [total]="p.total"
+        [fraction]="libraryFraction"
+      />
+    }
     @switch (library.status()) {
       @case ('loading') {
         <p class="status">Loading your records…</p>
@@ -203,34 +254,54 @@ const ROW_STYLES = `
         </p>
       }
       @default {
-        @if (library.savedRecords(); as saved) {
-          @if (saved.length) {
-            <ul class="crate" aria-label="Saved records">
-              @for (t of saved; track t.id) {
-                <ng-container
-                  *ngTemplateOutlet="row; context: { $implicit: t, list: saved, tag: true }"
-                />
-              }
-            </ul>
-          } @else {
-            <or-empty-state>
-              Nothing saved yet. Tap the bookmark on any record to keep it here.
-            </or-empty-state>
+        @let saved = savedShown();
+        @if (saved.length) {
+          <ul class="crate" aria-label="Saved records">
+            @for (t of savedWindow.items(); track t.id; let i = $index) {
+              <ng-container
+                *ngTemplateOutlet="row; context: { $implicit: t, list: saved, pos: i + 1 }"
+              />
+            }
+          </ul>
+          @if (savedWindow.hasMore()) {
+            <div
+              class="sentinel"
+              orLoadMore
+              [loadMoreKey]="savedWindow.items().length"
+              (loadMore)="savedWindow.grow()"
+            ></div>
           }
+        } @else if (filtering() && library.savedRecords().length) {
+          <or-empty-state>No saved records match “{{ query().trim() }}”.</or-empty-state>
+        } @else {
+          <or-empty-state>
+            Nothing saved yet. Tap the bookmark on any record to keep it here.
+          </or-empty-state>
         }
       }
     }
 
-    @if (library.status() === 'ready' && library.importedTracks(); as imported) {
+    @if (library.status() === 'ready' && library.importedTracks().length) {
+      @let imported = importedShown();
+      <or-section-head heading="Imported" />
       @if (imported.length) {
-        <or-section-head heading="Imported" />
         <ul class="crate" aria-label="Imported records">
-          @for (t of imported; track t.id) {
+          @for (t of importedWindow.items(); track t.id; let i = $index) {
             <ng-container
-              *ngTemplateOutlet="row; context: { $implicit: t, list: imported, tag: false }"
+              *ngTemplateOutlet="row; context: { $implicit: t, list: imported, pos: i + 1 }"
             />
           }
         </ul>
+        @if (importedWindow.hasMore()) {
+          <div
+            class="sentinel"
+            orLoadMore
+            [loadMoreKey]="importedWindow.items().length"
+            (loadMore)="importedWindow.grow()"
+          ></div>
+        }
+      } @else {
+        <or-empty-state>No imported records match “{{ query().trim() }}”.</or-empty-state>
       }
     }
 
@@ -285,14 +356,19 @@ const ROW_STYLES = `
       Saved records and playlists live on this device. No account, no server.
     </p>
 
-    <ng-template #row let-t let-list="list" let-tag="tag">
+    <ng-template #row let-t let-list="list" let-pos="pos">
       @let current = player.isCurrent(t.id);
       @let saved = library.isSaved(t.id);
       @let status = offline.status(t.id);
-      @let state = downloadState(status);
+      @let state = downloadState(status, offline.error(t.id));
       @let source = sourceLabel(t.source?.site);
       @let streamOnly = !status && t.providerId === remoteId;
-      <li class="record" [class.is-current]="current">
+      <li
+        class="record"
+        [class.is-current]="current"
+        [attr.aria-setsize]="list.length"
+        [attr.aria-posinset]="pos"
+      >
         <button
           class="record-main"
           type="button"
@@ -317,8 +393,6 @@ const ROW_STYLES = `
                   <or-icon name="disc" [size]="13" />
                   {{ player.isPlaying() ? 'On the turntable' : 'Paused' }}
                 </span>
-              } @else if (tag && library.isImported(t)) {
-                <or-tag ivory>Imported</or-tag>
               }
               @if (source) {
                 <or-tag>{{ source }}</or-tag>
@@ -332,7 +406,7 @@ const ROW_STYLES = `
                     <or-tag><or-spinner [size]="12" />{{ state.label }}</or-tag>
                   }
                   @case ('failed') {
-                    <or-tag class="tag-failed" icon="alert">{{ state.label }}</or-tag>
+                    <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ state.label }}</or-tag>
                   }
                 }
               } @else if (streamOnly) {
@@ -363,6 +437,10 @@ const ROW_STYLES = `
       [(open)]="dialogOpen"
       (created)="onCreated($event)"
     />
+    <or-add-from-playlist-dialog
+      [(open)]="addFromPlaylistOpen"
+      (added)="onAddedFromPlaylist()"
+    />
   `,
   // Two sheets so each stays inside the per-stylesheet budget.
   styles: [
@@ -373,19 +451,6 @@ const ROW_STYLES = `
     }
     .head {
       margin: 2px 0 16px;
-    }
-    .import-link {
-      display: inline-flex;
-      align-items: center;
-      min-block-size: var(--spacing-touch);
-      font-size: 13px;
-      color: var(--color-text);
-      text-underline-offset: 3px;
-      border-radius: var(--rounded-md);
-    }
-    .import-link:focus-visible {
-      outline: 2px solid var(--color-primary);
-      outline-offset: 2px;
     }
     .eyebrow {
       font-size: var(--type-eyebrow-font-size);
@@ -405,11 +470,40 @@ const ROW_STYLES = `
       font-size: var(--type-body-sm-font-size);
       color: var(--color-muted);
     }
+    .filter {
+      margin-block-end: var(--spacing-xxs);
+    }
+    /* Reserved so the list does not jump when the count appears. */
+    .filter-status {
+      margin: 0 0 var(--spacing-xs);
+      min-block-size: 18px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .sentinel {
+      block-size: 1px;
+    }
     ul {
       list-style: none;
       margin: 0;
       padding: 0;
     }
+
+    /* Link-style button to Fix failed downloads; 44px tall hit area. */
+    .failed-link {
+      display: inline-flex;
+      align-items: center;
+      min-block-size: var(--spacing-touch);
+      margin-block: calc((18px - var(--spacing-touch)) / 2);
+      color: var(--color-text);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      border-radius: var(--rounded-md);
+    }
+    .failed-link:hover { color: var(--color-primary); }
+    .failed-link:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
     /* Reserved so the list does not jump when the note appears. */
     .auto-note {
       margin: 0 0 var(--spacing-xs);
@@ -495,18 +589,57 @@ export class LibraryPage {
   protected readonly player = inject(PlayerStore);
   protected readonly settings = inject(SettingsStore);
   protected readonly autoDownload = inject(AutoDownloadStore);
+  /**
+   * Download counts for saved records; null when nothing is downloading.
+   * Status-only, so progress ticks do not re-check the whole list.
+   */
+  protected readonly libraryProgress = computed(() => {
+    const c = this.autoDownload.countsFor(this.library.savedIds());
+    return c.downloading ? c : null;
+  });
+  /** Live 0-1 fraction, read only by the progress bar. */
+  protected readonly libraryFraction = computed(
+    () => this.autoDownload.progressFor(this.library.savedIds()).fraction,
+  );
   protected readonly offline = inject(OfflineStore);
+  private readonly sync = inject(SyncStore);
   private readonly toast = inject(OrToast);
   private readonly router = inject(Router);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly injector = inject(Injector);
 
   protected readonly dialogOpen = signal(false);
+  protected readonly addFromPlaylistOpen = signal(false);
   protected readonly art = injectTrackArt();
   protected readonly remoteId = REMOTE_PROVIDER_ID;
   protected readonly downloadState = downloadState;
   protected readonly sourceLabel = sourceLabel;
   protected readonly formatDuration = formatDuration;
+
+  /** Filter text for saved and imported records (component state only). */
+  protected readonly query = signal('');
+  protected readonly filtering = computed(() => this.query().trim().length > 0);
+  protected readonly hasRecords = computed(
+    () =>
+      this.library.savedRecords().length > 0 ||
+      this.library.importedTracks().length > 0,
+  );
+  /** Filtered lists: what rows render and what a row tap queues. */
+  protected readonly savedShown = computed(() =>
+    filterTracks(this.library.savedRecords(), this.query()),
+  );
+  protected readonly importedShown = computed(() =>
+    filterTracks(this.library.importedTracks(), this.query()),
+  );
+  /** Rendered slices; reset to the first page when the filter changes. */
+  protected readonly savedWindow = lazyWindow(this.savedShown, this.query);
+  protected readonly importedWindow = lazyWindow(this.importedShown, this.query);
+  protected readonly matchLabel = computed(() => {
+    const n = this.savedShown().length + this.importedShown().length;
+    const total =
+      this.library.savedRecords().length + this.library.importedTracks().length;
+    return `${n} of ${total} record${total === 1 ? '' : 's'} match`;
+  });
 
   protected detail(t: Track): string {
     return [t.year, t.genre].filter(Boolean).join('  ·  ');
@@ -559,6 +692,10 @@ export class LibraryPage {
     } catch {
       this.toast.show(`Could not remove “${track.title}”. Try again.`);
     }
+  }
+
+  protected onAddedFromPlaylist(): void {
+    void this.sync.syncNow();
   }
 
   protected onCreated(pl: Playlist): void {

@@ -12,7 +12,9 @@ import { AuthStore, SyncStore } from '@open-record/state';
 import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-record/ui';
 
 /**
- * Settings "Account" section: Supabase email/password sign-in. The project
+ * Account sign-in form: Supabase email/password sign-in, sign-up, password
+ * reset and the reset-link "choose a new password" step. The Account page
+ * shows it while signed out; the sign-in modal uses it `compact`. The project
  * comes from the build or the download server; users never enter it. When the
  * server has no accounts set up, this says so and the app stays browse-only.
  */
@@ -41,7 +43,7 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
       @case ('unconfigured') {
         <p class="note">
           Accounts are not set up, or this device can't reach the server yet.
-          Check the server address below, then try again.
+          Check the server address in Settings, then try again.
         </p>
         <or-button size="sm" (click)="auth.refresh()">Try again</or-button>
       }
@@ -159,31 +161,6 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
             <strong>{{ auth.user()?.email || 'your account' }}</strong>
           </span>
         </div>
-        @if (sync.available) {
-          <p class="status sync-line" role="status" aria-live="polite">
-            @switch (sync.status()) {
-              @case ('syncing') {
-                <span class="muted"><or-spinner [size]="14" />Syncing your library…</span>
-              }
-              @case ('error') {
-                <span class="bad"><or-icon name="alert" [size]="14" />{{ sync.error() }}</span>
-              }
-              @default {
-                <span class="muted">{{ syncedLabel() }}</span>
-              }
-            }
-          </p>
-          <div class="actions">
-            <or-button
-              [disabled]="auth.busy() || sync.status() === 'syncing'"
-              (click)="syncNow()"
-              >Sync now</or-button
-            >
-            <or-button [disabled]="auth.busy()" (click)="signOut()">Sign out</or-button>
-          </div>
-        } @else {
-          <or-button block [disabled]="auth.busy()" (click)="signOut()">Sign out</or-button>
-        }
         <ng-container *ngTemplateOutlet="status" />
       }
     }
@@ -333,9 +310,6 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
       margin-bottom: var(--spacing-sm);
       font-size: 14px;
     }
-    .sync-line {
-      margin: 0;
-    }
     .who {
       min-inline-size: 0;
       overflow-wrap: anywhere;
@@ -367,21 +341,6 @@ export class AccountSection {
     return status === 'signedIn' ? 'signedIn' : 'signedOut';
   });
 
-  protected readonly syncedLabel = computed(() => {
-    const at = this.sync.lastSyncedAt();
-    if (!at) return 'Not synced yet on this device.';
-    const when = new Date(at).toLocaleString(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
-    return `Last synced ${when}`;
-  });
-
-  protected async syncNow(): Promise<void> {
-    await this.sync.syncNow();
-    if (this.sync.status() === 'idle') this.toast.show('Library synced');
-  }
-
   protected value(event: Event): string {
     return (event.target as HTMLInputElement).value;
   }
@@ -412,9 +371,5 @@ export class AccountSection {
 
   protected async resetPassword(): Promise<void> {
     await this.auth.resetPassword(this.email());
-  }
-
-  protected async signOut(): Promise<void> {
-    if (await this.auth.signOut()) this.toast.show('Signed out');
   }
 }

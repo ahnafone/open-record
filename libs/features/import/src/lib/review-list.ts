@@ -1,23 +1,21 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, inject, output, signal } from '@angular/core';
-import type { Track } from '@open-record/models';
 import { ImportStore, PreviewPlayerService, type ImportItem } from '@open-record/state';
 import {
   OrButton,
   OrDialog,
   OrEmptyState,
-  OrIconButton,
   OrSectionHead,
-  OrSleeve,
   OrSpinner,
   OrToast,
 } from '@open-record/ui';
 import { LinkPaste } from './link-paste';
+import { MatchCandidates } from './match-candidates';
 import { SHARED_STYLES, downloadText } from './shared';
 
 /** Step 4: review uncertain matches, export unmatched, delete import data. */
 @Component({
   selector: 'or-review-list',
-  imports: [LinkPaste, OrButton, OrEmptyState, OrIconButton, OrSectionHead, OrSleeve, OrSpinner],
+  imports: [LinkPaste, MatchCandidates, OrButton, OrEmptyState, OrSectionHead, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <or-section-head heading="To review" [level]="3" />
@@ -28,37 +26,12 @@ import { SHARED_STYLES, downloadText } from './shared';
           <li class="row">
             <span class="title">{{ item.title }}</span>
             <span class="meta">{{ item.artist }}{{ item.album ? ' · ' + item.album : '' }}{{ time(item.durationMs) }}</span>
-            <ul class="cands">
-              @for (c of item.candidates ?? []; track c.track.id) {
-                @let playing = preview.playingId() === c.track.id;
-                @let loading = preview.loadingId() === c.track.id;
-                <li class="cand">
-                  <or-sleeve size="thumb" [src]="c.track.artUrl" [label]="c.track.title" [playing]="playing" fallbackLabel="No artwork" />
-                  <span class="text">
-                    <span class="ctitle" [class.is-current]="playing">{{ c.track.title }}</span>
-                    <span class="meta">
-                      {{ c.track.artist }}{{ time(c.track.durationSec ? c.track.durationSec * 1000 : undefined) }} ·
-                      {{ percent(c.score) }}% match{{ c.durationMatch ? '' : ', length differs' }}
-                    </span>
-                    @if (c.track.source?.site; as site) {
-                      <span class="site">{{ site }}</span>
-                    }
-                  </span>
-                  <or-icon-button
-                    [icon]="loading ? null : playing ? 'pause' : 'play'"
-                    [label]="'Play preview of ' + c.track.title"
-                    [pressed]="playing"
-                    (click)="togglePreview(c.track)"
-                  >
-                    @if (loading) {
-                      <or-spinner [size]="18" label="Loading preview" />
-                    }
-                  </or-icon-button>
-                  <or-button size="sm" [disabled]="busy() === item.key || searching" (click)="accept(item, c.track.id)">Use this</or-button>
-                </li>
-              }
-            </ul>
             @let searching = store.searching().has(item.key);
+            <or-match-candidates
+              [candidates]="item.candidates ?? []"
+              [disabled]="busy() === item.key || searching"
+              (use)="accept(item, $event.id)"
+            />
             <div class="item-actions">
               <or-button size="sm" [disabled]="busy() === item.key || searching" (click)="skip(item)">Skip</or-button>
               <or-button size="sm" [disabled]="busy() === item.key || searching" (click)="research(item)">
@@ -113,19 +86,13 @@ import { SHARED_STYLES, downloadText } from './shared';
   styles: [
     SHARED_STYLES,
     `
-      .rows, .cands { margin: 0; padding: 0; list-style: none; }
+      .rows { margin: 0; padding: 0; list-style: none; }
       .row { display: grid; gap: 2px; justify-items: start; min-block-size: 60px; padding: var(--spacing-md) 0;
         border-top: 1px solid color-mix(in srgb, var(--color-border) 32%, transparent); }
       .row:first-child { border-top: 0; }
+      or-match-candidates { justify-self: stretch; }
       .title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
       .meta { font-size: 12px; color: var(--color-muted); overflow-wrap: anywhere; }
-      .cands { display: grid; gap: var(--spacing-xs); justify-self: stretch; margin: var(--spacing-sm) 0; }
-      .cand { display: flex; align-items: center; gap: var(--spacing-sm); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-xs) var(--spacing-md);
-        background: var(--color-surface); border: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); border-radius: var(--rounded-md); }
-      .text { display: grid; flex: 1; min-inline-size: 0; }
-      .ctitle { font-size: 14px; overflow-wrap: anywhere; }
-      .ctitle.is-current { color: var(--color-primary); }
-      .site { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-muted); }
       .actions { margin: 0 0 var(--spacing-sm); }
       .item-actions { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
     `,
@@ -153,16 +120,7 @@ export class ReviewList {
     return ` · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
 
-  protected percent(score: number): number {
-    return Math.round(score * 100);
-  }
-
-  protected togglePreview(track: Track): void {
-    void this.preview.toggle(track);
-  }
-
   protected async accept(item: ImportItem, trackId: string): Promise<void> {
-    void this.preview.stop();
     await this.run(item.key, () => this.store.acceptCandidate(item.key, trackId));
   }
 

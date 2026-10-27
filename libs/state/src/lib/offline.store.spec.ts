@@ -1,3 +1,4 @@
+import { computed } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import type { Track } from '@open-record/models';
 import { MusicSourceRegistry } from '@open-record/music-source';
@@ -97,6 +98,7 @@ describe('offline store', () => {
       'saving',
     );
 
+    await vi.waitFor(() => expect(resolver.saveToDevice).toHaveBeenCalled());
     finish({ sourceFile: 'imported/remote-song.audio.mp3', sizeBytes: 10 });
     await vi.waitFor(async () => {
       const saved = await storage.importedTracks.get(track.id);
@@ -118,5 +120,66 @@ describe('offline store', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(await storage.importedTracks.list()).toEqual([]);
     expect(await storage.savedRecords.list()).toEqual([]);
+  });
+
+  it('a rate-limited save stays queued and holds the queue until Retry-After', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const storage = createInMemoryStorage();
+      const busy = Object.assign(new Error('busy'), { name: 'busy', retryAfterSec: 5 });
+      const saveToDevice = vi.fn(async (_url: string, opts: { id: string }) => {
+        if (saveToDevice.mock.calls.length === 1) throw busy;
+        return { sourceFile: `imported/${opts.id}.mp3`, sizeBytes: 1 };
+      });
+      const { library, offline } = boot(storage, { saveToDevice }, { remove: async () => 0 });
+      await library.ready();
+      const a = remoteTrack('a');
+      const b = remoteTrack('b');
+
+      await offline.ensureSaved(a);
+      await vi.waitFor(() => expect(offline.busyUntil()).not.toBeNull());
+      await offline.ensureSaved(b);
+      expect(saveToDevice).toHaveBeenCalledTimes(1);
+      expect(offline.status(a.id)).toBe('queued');
+      expect(offline.status(b.id)).toBe('queued');
+
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(saveToDevice).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(offline.busyUntil()).toBeNull();
+      // The rate-limited track goes first when the wait is over.
+      expect(saveToDevice.mock.calls[1][1].id).toBe(a.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('progress ticks are coalesced and never change status reads (list re-render guard)', async () => {
+    const storage = createInMemoryStorage();
+    let tick!: (f: number) => void;
+    const resolver = {
+      saveToDevice: vi.fn(
+        (_url: string, opts: { onProgress?: (f: number) => void }) => {
+          tick = opts.onProgress as (f: number) => void;
+          return new Promise<never>(() => undefined);
+        },
+      ),
+    };
+    const track = remoteTrack('ticks');
+    const { library, offline } = boot(storage, resolver, { remove: async () => 0 });
+    await library.ready();
+    await offline.ensureSaved(track);
+    await vi.waitFor(() => expect(resolver.saveToDevice).toHaveBeenCalled());
+    expect(offline.status(track.id)).toBe('saving');
+
+    let runs = 0;
+    const status = computed(() => (runs++, offline.status(track.id)));
+    status();
+    for (let i = 1; i <= 50; i++) tick(i / 100);
+    status();
+    expect(runs).toBe(1);
+    await vi.waitFor(() => expect(offline.progress(track.id)).toBe(0.5));
+    status();
+    expect(runs).toBe(1);
   });
 });

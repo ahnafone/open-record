@@ -157,7 +157,7 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([4]);
+    expect(result.applied).toEqual([4, 5]);
     expect(await backend.get(COLLECTIONS.importedTracks, 'local:1')).toMatchObject({ status: 'saved', filePath: 'imported/1.audio.mp3' });
     expect(await backend.get(COLLECTIONS.importedTracks, 'remote:2')).toMatchObject({ status: 'saving', filePath: '' });
   });

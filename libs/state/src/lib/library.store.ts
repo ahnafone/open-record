@@ -13,6 +13,7 @@ import { PlaylistsStore } from './playlists.store';
 import { LocalMediaPort, type LocalImportFailure } from './ports';
 import { SettingsStore } from './settings.store';
 import { OfflineStore } from './offline.store';
+import { ImportSessionsStore } from './import-sessions.store';
 
 export type LoadStatus = 'loading' | 'ready' | 'error';
 
@@ -68,6 +69,7 @@ export class LibraryStore {
   private readonly media = inject(LocalMediaPort, { optional: true });
   // PlaylistsStore and PlayerStore inject this store: resolve them lazily.
   private readonly injector = inject(Injector);
+  private readonly sessions = inject(ImportSessionsStore);
 
   private readonly _tracks = signal<readonly Track[]>([]);
   private readonly _savedIds = signal<readonly string[]>([]);
@@ -101,6 +103,21 @@ export class LibraryStore {
   });
   /** Importing is possible (a LocalMediaPort is provided). */
   readonly canImport = !!this.media;
+  /**
+   * Songs saved on the device from the download server (not user imports)
+   * and the bytes their audio files take.
+   */
+  readonly downloaded = computed(() => {
+    let count = 0;
+    let bytes = 0;
+    for (const record of this._stored().values()) {
+      if (record.track.providerId === LOCAL_PROVIDER_ID) continue;
+      if ((record.status ?? 'saved') !== 'saved') continue;
+      count += 1;
+      bytes += record.track.sizeBytes ?? 0;
+    }
+    return { count, bytes };
+  });
 
   private loaded: Promise<void>;
   private catalogBytes?: Promise<number | null>;
@@ -263,21 +280,50 @@ export class LibraryStore {
   /**
    * Bookmark tracks without saving them to the device (imports). `savedAt`
    * (epoch ms) sets their place in the most-recent-first order; ids already
-   * saved are left alone.
+   * saved are left alone. One storage write. Resolves to the newly saved ids.
    */
   async bookmarkWithoutSaving(
     entries: readonly { id: string; savedAt?: number }[],
-  ): Promise<void> {
+  ): Promise<string[]> {
     await this.loaded;
     const seen = new Set(this._savedIds());
     const fresh = entries.filter((e) => !seen.has(e.id) && !!seen.add(e.id));
-    if (!fresh.length) return;
+    if (!fresh.length) return [];
     try {
-      for (const e of fresh)
-        await this.storage.savedRecords.add(e.id, e.savedAt);
+      return await this.storage.savedRecords.addMany(
+        fresh.map((e) => ({ trackId: e.id, savedAt: e.savedAt })),
+      );
     } finally {
       this._savedIds.set(await this.storage.savedRecords.list());
     }
+  }
+
+  /**
+   * Bookmark every track of a playlist (never saves to the device), keeping
+   * the playlist's order: its first track ends up on top of the library.
+   * Already-saved tracks keep their place; ids with no known track record
+   * are skipped (they could not be shown) and counted as unavailable.
+   */
+  async addTracksToLibrary(
+    trackIds: readonly string[],
+  ): Promise<{ added: number; alreadySaved: number; unavailable: number }> {
+    await this.loaded;
+    const map = this.trackMap();
+    const saved = this.savedSet();
+    const unique = [...new Set(trackIds)];
+    let alreadySaved = 0;
+    let unavailable = 0;
+    const ids: string[] = [];
+    for (const id of unique) {
+      if (saved.has(id)) alreadySaved++;
+      else if (!map.has(id)) unavailable++;
+      else ids.push(id);
+    }
+    const base = Date.now();
+    const added = await this.bookmarkWithoutSaving(
+      ids.map((id, i) => ({ id, savedAt: base - i })),
+    );
+    return { added: added.length, alreadySaved, unavailable };
   }
 
   /** Move a bookmark to another track id, keeping its position. Never saves to the device. */
@@ -291,6 +337,26 @@ export class LibraryStore {
         .map((id) => (id === oldId ? newId : id))
         .filter((id) => !seen.has(id) && !!seen.add(id));
     });
+  }
+
+  /**
+   * Swap a remote track for `next` (a new id, e.g. a replaced source link) in
+   * the library: persists `next` by metadata, moves the bookmark in place and
+   * drops the old track's file record and index entry. The caller migrates
+   * playlists, the queue and the rest; queue a download for `next` afterwards.
+   */
+  async replaceTrackId(oldId: string, next: Track): Promise<void> {
+    await this.loaded;
+    if (oldId === next.id) return;
+    await this.addMetadataTracks([next]);
+    await this.replaceSaved(oldId, next.id);
+    if (this._stored().has(oldId)) await this.dropRecord(oldId);
+    if (this._metadata().has(oldId)) {
+      const meta = new Map(this._metadata());
+      meta.delete(oldId);
+      await this.writeMetadata(meta);
+    }
+    this._tracks.update((all) => all.filter((t) => t.id !== oldId));
   }
 
   // ---- Imported files ------------------------------------------------------
@@ -319,6 +385,17 @@ export class LibraryStore {
         await this.media.remove(track).catch(() => 0);
         failures.push({ fileName: track.sourceFile ?? track.title, error });
       }
+    }
+    if (imported.length || failures.length) {
+      await this.sessions
+        .record({
+          kind: 'files',
+          added: imported.length,
+          skipped: 0,
+          failed: failures.length,
+          trackIds: imported.map((t) => t.id),
+        })
+        .catch(() => undefined);
     }
     return { imported, failures };
   }
@@ -415,6 +492,7 @@ export class LibraryStore {
     this.offline().forget([...ids]);
     await this.detach([...ids]);
     await this.storage.importedTracks.clear();
+    await this.sessions.deleteKind('files');
     this._stored.set(new Map());
     this._tracks.update((all) => all.filter((t) => !ids.has(t.id)));
     await this.media?.cleanup([]).catch(() => 0);
@@ -432,7 +510,11 @@ export class LibraryStore {
     await this.media?.cleanup([]).catch(() => 0);
     await this.storage.clearAll();
     await this.reload();
-    await Promise.all([this.playlists().reload(), this.settings.reload()]);
+    await Promise.all([
+      this.playlists().reload(),
+      this.settings.reload(),
+      this.sessions.reload(),
+    ]);
   }
 
   /** Bytes used on device. Catalogue size is measured once and cached. */

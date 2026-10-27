@@ -67,6 +67,31 @@ describe('store persistence', () => {
     await playlists.removeTrack(pl.id, 'fake:a');
     expect(playlists.addedAtOf(pl.id, 'fake:a')).toBeUndefined();
   });
+
+  it('adding a playlist to the library keeps its order and skips saved and unknown tracks', async () => {
+    const storage = createInMemoryStorage();
+    const { library } = boot(storage);
+    await library.addMetadataTracks([
+      { id: 'meta:c', providerId: 'meta', title: 'C', artist: 'Z' },
+    ]);
+    await library.bookmarkWithoutSaving([{ id: 'fake:b', savedAt: 1 }]);
+
+    const result = await library.addTracksToLibrary([
+      'meta:c',
+      'fake:a',
+      'fake:b',
+      'gone:x',
+      'fake:a',
+    ]);
+
+    expect(result).toEqual({ added: 2, alreadySaved: 1, unavailable: 1 });
+    expect(library.savedIds()).toEqual(['meta:c', 'fake:a', 'fake:b']);
+    expect(await storage.savedRecords.list()).toEqual([
+      'meta:c',
+      'fake:a',
+      'fake:b',
+    ]);
+  });
 });
 
 describe('imported tracks', () => {

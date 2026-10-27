@@ -1,5 +1,5 @@
 import type { Track } from '@open-record/models';
-import type { SyncPlaylist, SyncTrack } from './ports';
+import type { SyncImportSession, SyncPlaylist, SyncTrack } from './ports';
 
 /**
  * Pure account-sync logic (no Angular, no I/O): local change detection,
@@ -25,6 +25,8 @@ export interface SyncLedger {
   lastSyncedAt?: number;
   library: Record<string, SyncLedgerEntry>;
   playlists: Record<string, SyncLedgerEntry>;
+  /** Import-history sessions (absent in ledgers written before they synced). */
+  importSessions?: Record<string, SyncLedgerEntry>;
 }
 
 /** A record with a sync clock; `deletedAt` marks a tombstone. */
@@ -34,7 +36,7 @@ export interface Clocked {
 }
 
 export function emptyLedger(userId: string): SyncLedger {
-  return { v: 1, userId, library: {}, playlists: {} };
+  return { v: 1, userId, library: {}, playlists: {}, importSessions: {} };
 }
 
 /** Reads a stored ledger, or null when absent or malformed. */
@@ -86,6 +88,8 @@ export function contentHash(value: unknown): string {
  *   (playlists), else `now`, or 0 on the account's first sync so the cloud
  *   copy wins a conflict there;
  * - in the ledger but gone locally: a tombstone at `now`.
+ * A change or tombstone is always stamped after the clock it was last agreed
+ * at, so one made within the same millisecond still wins.
  */
 export function stampLocal<C>(
   current: ReadonlyMap<string, C>,
@@ -100,17 +104,19 @@ export function stampLocal<C>(
     let updatedAt: number;
     if (options.clockOf) updatedAt = options.clockOf(content);
     else if (entry && !entry.d && entry.h === h) updatedAt = entry.u;
-    else if (entry || !options.firstSync) updatedAt = now;
+    else if (entry) updatedAt = Math.max(now, entry.u + 1);
+    else if (!options.firstSync) updatedAt = now;
     else updatedAt = 0;
     out.set(id, { content, updatedAt });
   }
   for (const [id, entry] of Object.entries(ledger)) {
     if (out.has(id)) continue;
+    const at = Math.max(now, entry.u + 1);
     out.set(
       id,
       entry.d
         ? { updatedAt: entry.u, deletedAt: entry.d }
-        : { updatedAt: now, deletedAt: now },
+        : { updatedAt: at, deletedAt: at },
     );
   }
   return out;
@@ -209,5 +215,21 @@ export function playlistContent(p: SyncPlaylist): unknown {
     visibility: p.visibility,
     autoDownload: p.autoDownload,
     trackIds: p.trackIds,
+  };
+}
+
+/** Synced content of an import session (what its hash covers). */
+export function importSessionContent(
+  s: Omit<SyncImportSession, 'updatedAt' | 'deletedAt'>,
+): Omit<SyncImportSession, 'updatedAt' | 'deletedAt'> {
+  return {
+    id: s.id,
+    kind: s.kind,
+    label: s.label,
+    createdAt: s.createdAt,
+    added: s.added,
+    skipped: s.skipped,
+    failed: s.failed,
+    trackIds: [...s.trackIds],
   };
 }

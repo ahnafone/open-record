@@ -89,6 +89,16 @@ class IndexedDbBackend implements StorageBackend {
     await this.db.put(collection, value, key);
   }
 
+  async putMany<T>(
+    collection: CollectionName,
+    entries: readonly (readonly [string, T])[],
+  ): Promise<void> {
+    if (!entries.length) return;
+    const tx = this.db.transaction(collection, 'readwrite');
+    for (const [key, value] of entries) void tx.store.put(value, key);
+    await tx.done;
+  }
+
   async delete(collection: CollectionName, key: string): Promise<void> {
     await this.db.delete(collection, key);
   }

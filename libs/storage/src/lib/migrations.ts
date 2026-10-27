@@ -44,6 +44,7 @@ export const COLLECTIONS = {
   importedTracks: 'imported_tracks',
   queueState: 'queue_state',
   settings: 'settings',
+  importSessions: 'import_sessions',
 } as const;
 
 /** Well-known keys in the `settings` collection. */
@@ -54,10 +55,14 @@ export const SETTINGS_KEYS = {
   audioQuality: 'audioQuality',
   /** `{ library, mobileData }` auto-download switches (no migration: new key, absent = both off). */
   autoDownload: 'autoDownload',
+  /** `'data' | 'external'` where new downloads are written (no migration: new key, absent = data). */
+  downloadLocation: 'downloadLocation',
   /** Track[] known by metadata only (e.g. unmatched Spotify imports) (no migration: new key, absent = none). */
   metadataTracks: 'metadataTracks',
   /** Spotify import matching job (no migration: new key, absent = no job). Holds no raw Spotify payloads. */
   spotifyImport: 'spotifyImport',
+  /** YouTube playlist metadata enrichment queue (no migration: new key, absent = nothing queued). Track ids and status only. */
+  youtubeImport: 'youtubeImport',
   /** Account sync clocks and tombstones (no migration: new key, absent = never synced). Metadata ids and hashes only. */
   syncState: 'syncState',
 } as const;
@@ -141,6 +146,13 @@ export const MIGRATIONS: readonly Migration[] = [
           status: 'saved',
         });
       }
+    },
+  },
+  {
+    version: 5,
+    description: 'Import sessions collection (one record per import run)',
+    async up(ctx) {
+      await ctx.createCollection('import_sessions');
     },
   },
 ];

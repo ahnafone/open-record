@@ -44,6 +44,7 @@ export const OR_ICONS = {
   ],
   back: [p('M15 5 8 12l7 7')],
   'chev-down': [p('M5 9.5 12 16.5l7-7')],
+  menu: [p('M4 7h16M4 12h16M4 17h16')],
   plus: [p('M12 5.5v13M5.5 12h13')],
   close: [p('M6.2 6.2 17.8 17.8M17.8 6.2 6.2 17.8')],
   trash: [

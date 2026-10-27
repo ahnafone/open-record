@@ -15,32 +15,40 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import {
   AUDIO_QUALITIES,
   isAudioQuality,
+  isDownloadLocation,
   parsePairingLink,
   type AudioQuality,
-  type Track,
+  type DownloadLocation,
 } from '@open-record/models';
 import {
   AuthStore,
+  AutoDownloadStore,
+  FailedDownloadsStore,
+  DeviceStoragePort,
   LibraryStore,
   PairingScannerPort,
+  PlaylistsStore,
   SettingsStore,
   type StorageUsage,
 } from '@open-record/state';
 import {
   OrButton,
   OrDialog,
-  OrEmptyState,
+  OrDownloadProgress,
   OrIcon,
   OrSectionHead,
-  OrSleeve,
   OrSpinner,
   OrSwitch,
   OrToast,
+  OrViewport,
 } from '@open-record/ui';
-import { AccountSection } from './account-section';
 import { MUSIC_DISCLAIMER } from './credits';
-import { EditTrackDialog } from './edit-track-dialog';
 import { formatBytes } from './format-bytes';
+
+const LOCATION_LABELS: Record<DownloadLocation, string> = {
+  data: 'App storage (default)',
+  external: 'External app storage',
+};
 
 const QUALITY_LABELS: Record<AudioQuality, string> = {
   highest: 'Highest (best available)',
@@ -50,49 +58,42 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
 };
 
 /**
- * Settings screen: import audio files, optional account sign-in, the stream server (URL,
- * connection test), audio quality, auto-download network rule, manage
- * imported records, on-device storage with clear
- * actions, and the music disclaimer.
+ * Settings screen: a link to Account (phone), a link to Import (phone; desktop
+ * has it in the sidebar), the stream server (URL, connection test), audio
+ * quality, device storage (native: downloads, free space, download location),
+ * auto-download network rule, on-device storage with clear-all, and the music
+ * disclaimer. Import itself lives on the Import page.
  */
 @Component({
   selector: 'or-settings-page',
   imports: [
-    AccountSection,
-    EditTrackDialog,
+    OrDownloadProgress,
     OrButton,
-    OrEmptyState,
     OrIcon,
     OrSectionHead,
-    OrSleeve,
     OrSpinner,
     OrSwitch,
     RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <or-section-head heading="Import" />
-    <p class="lede">
-      Add audio files from this device. They are copied into the app and play
-      like any other record.
-    </p>
-    <or-button
-      block
-      [disabled]="!library.canImport || importing()"
-      [ariaLabel]="importing() ? 'Importing audio files' : ''"
-      (click)="importFiles()"
-    >
-      <or-icon name="plus" [size]="20" />{{
-        importing() ? 'Importing…' : 'Import audio files'
-      }}
-    </or-button>
-    @if (!library.canImport) {
-      <p class="note">Importing is not available on this device.</p>
+    @if (auth.available && !viewport.isDesktop()) {
+      <a class="account-row" routerLink="/account">
+        <or-icon name="users" [size]="20" />
+        <span class="account-txt">
+          Account
+          <span class="account-meta">{{
+            auth.user()?.email || 'Sign in or create an account'
+          }}</span>
+        </span>
+      </a>
     }
-    <a class="text-link" routerLink="/import">Import from Spotify</a>
 
-    @if (auth.available) {
-      <or-account-section />
+    @if (!viewport.isDesktop()) {
+      <a class="fix-row" routerLink="/import">
+        <or-icon name="upload" [size]="20" />
+        <span class="fix-txt">Import playlists &amp; files</span>
+      </a>
     }
 
     <or-section-head heading="Stream server" />
@@ -223,6 +224,57 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       }
     </div>
 
+    @if (device?.native) {
+      <or-section-head heading="Device storage" />
+      <dl class="usage device" aria-live="polite">
+        <div class="usage-row">
+          <dt>Auto-download</dt>
+          <dd>{{ autoDownloadSummary() }}</dd>
+        </div>
+        <div class="usage-row">
+          <dt>Downloaded songs</dt>
+          <dd>{{ library.downloaded().count }}</dd>
+        </div>
+        <div class="usage-row">
+          <dt>Space used</dt>
+          <dd>{{ formatBytes(library.downloaded().bytes) }}</dd>
+        </div>
+        @if (freeSpace(); as space) {
+          <div class="usage-row">
+            <dt>Free on device</dt>
+            <dd>
+              {{ formatBytes(space.freeBytes) }}
+              @if (space.totalBytes) {
+                of {{ formatBytes(space.totalBytes) }}
+              }
+            </dd>
+          </div>
+        }
+      </dl>
+      @if (device.locations.length > 1) {
+        <div class="quality">
+          <label class="field-label" for="or-download-location">Download location</label>
+          <select
+            id="or-download-location"
+            class="input select"
+            aria-describedby="or-download-location-note"
+            [value]="settings.downloadLocation()"
+            (change)="setLocation($event)"
+          >
+            @for (loc of locations(); track loc.value) {
+              <option [value]="loc.value" [selected]="loc.value === settings.downloadLocation()">
+                {{ loc.label }}
+              </option>
+            }
+          </select>
+        </div>
+        <p class="note" id="or-download-location-note">
+          Only new downloads go here; saved songs stay where they are. Both are
+          removed if you uninstall the app.
+        </p>
+      }
+    }
+
     <or-section-head heading="Auto-download" />
     <p class="lede">
       Turn on auto-download in your Library or on a playlist to keep those
@@ -235,48 +287,32 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       [checked]="settings.autoDownloadOnMobileData()"
       (checkedChange)="setMobileData($event)"
     />
-
-    <or-section-head heading="Imported records" />
-    @if (imported().length) {
-      <ul class="rows">
-        @for (track of imported(); track track.id) {
-          <li class="row">
-            <or-sleeve
-              [src]="art()[track.id]"
-              [label]="track.title"
-              fallbackLabel="No cover art"
-            />
-            <div class="text">
-              <span class="title">{{ track.title }}</span>
-              <span class="artist">{{ track.artist }}</span>
-              @if (detailText(track); as detail) {
-                <span class="detail">{{ detail }}</span>
-              }
-              <div class="row-actions">
-                <or-button
-                  size="sm"
-                  [ariaLabel]="'Edit ' + track.title"
-                  (click)="editing.set(track)"
-                >
-                  Edit
-                </or-button>
-                <or-button
-                  size="sm"
-                  [ariaLabel]="'Remove ' + track.title"
-                  (click)="remove(track)"
-                >
-                  <or-icon name="trash" [size]="18" />Remove
-                </or-button>
-              </div>
-            </div>
-          </li>
-        }
-      </ul>
-    } @else {
-      <or-empty-state>
-        No imported records yet. Imported files appear here.
-      </or-empty-state>
+    @if (autoDownload.countsFor(autoDownload.wanted()); as p) {
+      @if (p.downloading) {
+        <or-download-progress
+          label="Auto-download progress"
+          [saved]="p.saved"
+          [total]="p.total"
+          [fraction]="autoDownloadFraction"
+        />
+      }
     }
+    <p class="note auto-status" role="status">
+      @if (autoDownload.pauseReason(); as paused) {
+            {{ paused }}
+          } @else if (failedDownloads.count(); as n) {
+            <a class="failed-link" routerLink="/downloads/failed">{{ n }} couldn’t be downloaded</a>
+          }
+    </p>
+    @if (autoDownload.canRetry()) {
+      <or-button size="sm" class="retry" (click)="autoDownload.retryFailed()">
+        Retry failed downloads
+      </or-button>
+    }
+    <a class="fix-row" routerLink="/downloads/failed">
+      <or-icon name="link" [size]="20" />
+      <span class="fix-txt">Fix failed downloads</span>
+    </a>
 
     <or-section-head heading="Storage" />
     <dl class="usage" aria-live="polite">
@@ -288,14 +324,6 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       }
     </dl>
     <div class="stack">
-      <or-button
-        block
-        variant="danger"
-        [disabled]="!imported().length || busy()"
-        (click)="clearImported()"
-      >
-        Clear imported files
-      </or-button>
       <or-button
         block
         variant="danger"
@@ -315,12 +343,6 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       <span class="eyebrow">Music disclaimer</span>
       {{ disclaimer }}
     </p>
-
-    <or-edit-track-dialog
-      [open]="!!editing()"
-      (openChange)="$event || editing.set(null)"
-      [track]="editing()"
-    />
   `,
   styles: `
     :host {
@@ -328,6 +350,35 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     }
     or-section-head:first-child {
       margin-top: var(--spacing-xs);
+    }
+    .account-row {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-md);
+      min-block-size: 64px;
+      margin-bottom: var(--spacing-sm);
+      padding: 0 var(--spacing-md);
+      color: var(--color-text);
+      text-decoration: none;
+      background: var(--color-surface);
+      border-radius: var(--rounded-md);
+    }
+    .account-row:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+    .account-txt {
+      display: grid;
+      min-inline-size: 0;
+      font-family: var(--font-display);
+      font-size: 18px;
+    }
+    .account-meta {
+      overflow: hidden;
+      font: 13px var(--font-body, inherit);
+      color: var(--color-muted);
+      white-space: nowrap;
+      text-overflow: ellipsis;
     }
     .lede,
     .note {
@@ -340,51 +391,16 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       margin: var(--spacing-sm) 0 0;
       font-size: 12px;
     }
-    .rows {
-      display: grid;
-      margin: 0;
-      padding: 0;
-      list-style: none;
+    .auto-status {
+      min-block-size: 18px;
     }
-    .row {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: start;
-      gap: var(--spacing-md);
-      min-block-size: 72px;
-      padding: var(--spacing-md) 0;
-      border-top: 1px solid
-        color-mix(in srgb, var(--color-border) 32%, transparent);
-    }
-    .row:first-child {
-      border-top: 0;
-    }
-    .text {
-      display: grid;
-      min-inline-size: 0;
-    }
-    .title {
-      font-size: 15px;
-      font-weight: 600;
-      line-height: 1.3;
-      overflow-wrap: anywhere;
-    }
-    .artist {
-      font-size: 13px;
-      color: var(--color-muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .detail {
-      font-size: 12px;
-      color: var(--color-muted);
-    }
-    .row-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: var(--spacing-sm);
-      margin-top: var(--spacing-sm);
+
+    .failed-link, .fix-row { display: inline-flex; align-items: center; gap: var(--spacing-sm);
+      min-block-size: var(--spacing-touch); color: var(--color-text); border-radius: var(--rounded-md); }
+    .failed-link { text-decoration: underline; }
+    .fix-row { display: flex; text-decoration: none; }
+    .retry {
+      margin-block-start: var(--spacing-sm);
     }
     .usage {
       display: grid;
@@ -404,6 +420,9 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     }
     .usage-row:last-child dt {
       font-weight: 600;
+    }
+    .device .usage-row:last-child dt {
+      font-weight: inherit;
     }
     dt {
       color: var(--color-text);
@@ -546,10 +565,42 @@ export class SettingsPage {
   protected readonly library = inject(LibraryStore);
   protected readonly settings = inject(SettingsStore);
   protected readonly auth = inject(AuthStore);
+  protected readonly viewport = inject(OrViewport);
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
   private readonly scanner = inject(PairingScannerPort, { optional: true });
+  private readonly playlists = inject(PlaylistsStore);
+  protected readonly autoDownload = inject(AutoDownloadStore);
+  /** Live 0-1 auto-download fraction, read only by the progress bar. */
+  protected readonly autoDownloadFraction = computed(
+    () => this.autoDownload.progress().fraction,
+  );
+  protected readonly failedDownloads = inject(FailedDownloadsStore);
+  /** Native device storage info; absent or `native: false` on web. */
+  protected readonly device = inject(DeviceStoragePort, { optional: true });
+  protected readonly formatBytes = formatBytes;
+
+  protected readonly locations = computed(() =>
+    (this.device?.locations ?? []).map((value) => ({
+      value,
+      label: LOCATION_LABELS[value],
+    })),
+  );
+  /** Free/total bytes behind the chosen location; null hides the row. */
+  protected readonly freeSpace = signal<{
+    freeBytes: number;
+    totalBytes?: number;
+  } | null>(null);
+  private spaceRun = 0;
+
+  protected readonly autoDownloadSummary = computed(() => {
+    const parts: string[] = [];
+    if (this.settings.autoDownloadLibrary()) parts.push('Library');
+    const n = this.playlists.playlists().filter((p) => p.autoDownload).length;
+    if (n) parts.push(`${n} playlist${n === 1 ? '' : 's'}`);
+    return parts.length ? `On for ${parts.join(' and ')}` : 'Off';
+  });
 
   protected readonly disclaimer = MUSIC_DISCLAIMER;
 
@@ -557,9 +608,7 @@ export class SettingsPage {
     AUDIO_QUALITIES.map((value) => ({ value, label: QUALITY_LABELS[value] }));
 
   protected readonly imported = this.library.importedTracks;
-  protected readonly importing = signal(false);
   protected readonly busy = signal(false);
-  protected readonly editing = signal<Track | null>(null);
 
   // Download server form drafts; reset when the stored values change.
   protected readonly serverUrl = linkedSignal(() =>
@@ -584,11 +633,8 @@ export class SettingsPage {
   private readonly disclaimerEl =
     viewChild.required<ElementRef<HTMLElement>>('disclaimerEl');
 
-  /** Resolved cover URLs by track id (resolved at display time, never stored). */
-  protected readonly art = signal<Record<string, string | undefined>>({});
   private readonly usage = signal<StorageUsage | null>(null);
   private usageRun = 0;
-  private artRun = 0;
 
   protected readonly usageRows = computed(() => {
     const u = this.usage();
@@ -609,13 +655,15 @@ export class SettingsPage {
       if (this.route.snapshot.fragment === 'music-disclaimer')
         this.showDisclaimer();
     });
-    // Resolve cover art for imported tracks whenever the list changes.
-    effect(() => {
-      const tracks = this.imported();
-      untracked(() => void this.resolveArt(tracks));
-    });
     if (this.scanner)
       void this.scanner.available().then((ok) => this.canScan.set(ok));
+    // Native: re-read free space when the location or downloads change.
+    if (this.device?.native)
+      effect(() => {
+        const location = this.settings.downloadLocation();
+        this.library.downloaded();
+        untracked(() => void this.refreshSpace(location));
+      });
     // Re-measure storage when imports change.
     effect(() => {
       this.imported();
@@ -709,6 +757,19 @@ export class SettingsPage {
     void this.saveSetting(() => this.settings.setAutoDownload({ mobileData: on }));
   }
 
+  protected setLocation(event: Event): void {
+    const value = (event.target as HTMLSelectElement).value;
+    if (!isDownloadLocation(value)) return;
+    void this.saveSetting(() => this.settings.setDownloadLocation(value));
+  }
+
+  private async refreshSpace(location: DownloadLocation): Promise<void> {
+    const run = ++this.spaceRun;
+    const valid = this.device?.locations.includes(location) ? location : 'data';
+    const space = (await this.device?.space(valid).catch(() => null)) ?? null;
+    if (run === this.spaceRun) this.freeSpace.set(space);
+  }
+
   private async saveSetting(action: () => Promise<void>): Promise<void> {
     try {
       await action();
@@ -726,66 +787,6 @@ export class SettingsPage {
     const el = this.disclaimerEl().nativeElement;
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
-  }
-
-  protected detailText(track: Track): string {
-    return [track.album, track.year].filter(Boolean).join(' · ');
-  }
-
-  protected async importFiles(): Promise<void> {
-    if (!this.library.canImport || this.importing()) return;
-    this.importing.set(true);
-    try {
-      const { imported, failures } = await this.library.importFiles();
-      const n = imported.length;
-      const f = failures.length;
-      if (n && f) {
-        this.toast.show(
-          `Imported ${n} record${n === 1 ? '' : 's'}; ${f} file${f === 1 ? '' : 's'} failed`,
-          3200,
-        );
-      } else if (n) {
-        this.toast.show(`Imported ${n} record${n === 1 ? '' : 's'}`);
-      } else if (f) {
-        const name = f === 1 ? failures[0].fileName : `${f} files`;
-        this.toast.show(`Could not import ${name}`, 3200);
-      }
-    } catch {
-      this.toast.show('Could not import files. Try again.');
-    } finally {
-      this.importing.set(false);
-    }
-  }
-
-  protected async remove(track: Track): Promise<void> {
-    const ok = await this.dialog.confirm({
-      title: 'Remove record?',
-      message: `"${track.title}" and its file will be deleted from this device, and removed from playlists and the queue.`,
-      confirmLabel: 'Remove record',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await this.library.removeImported(track.id);
-      this.toast.show('Record removed');
-    } catch {
-      this.toast.show('Could not remove that record. Try again.');
-    }
-  }
-
-  protected async clearImported(): Promise<void> {
-    const ok = await this.dialog.confirm({
-      title: 'Clear imported files?',
-      message:
-        'Every imported record and its files will be deleted from this device, and removed from playlists and the queue.',
-      confirmLabel: 'Clear imported files',
-      danger: true,
-    });
-    if (!ok) return;
-    await this.run(
-      () => this.library.clearImported(),
-      'Imported files cleared',
-    );
   }
 
   protected async clearAll(): Promise<void> {
@@ -823,17 +824,4 @@ export class SettingsPage {
     }
   }
 
-  private async resolveArt(tracks: readonly Track[]): Promise<void> {
-    const run = ++this.artRun;
-    const entries = await Promise.all(
-      tracks.map(async (t) => {
-        try {
-          return [t.id, await this.library.artUrl(t)] as const;
-        } catch {
-          return [t.id, undefined] as const;
-        }
-      }),
-    );
-    if (run === this.artRun) this.art.set(Object.fromEntries(entries));
-  }
 }

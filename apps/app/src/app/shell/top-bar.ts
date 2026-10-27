@@ -1,16 +1,15 @@
 import {
   ChangeDetectionStrategy,
   Component,
-  inject,
   input,
   output,
 } from '@angular/core';
-import { Router } from '@angular/router';
 import { type IconName, OrIconButton } from '@open-record/ui';
 
 /**
- * Top bar. Root (tab) screens show the brand mark, serif wordmark and tagline;
- * pushed screens show a back button and a serif title.
+ * Top bar. Root (tab) screens show a menu button (opens the phone drawer),
+ * the brand mark, serif wordmark and tagline; pushed screens show a back
+ * button and a serif title.
  */
 @Component({
   selector: 'or-top-bar',
@@ -18,17 +17,12 @@ import { type IconName, OrIconButton } from '@open-record/ui';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (root()) {
+      <or-icon-button label="Open menu" icon="menu" (click)="menu.emit()" />
       <span class="brand-mark" aria-hidden="true"></span>
       <div class="brand-txt">
         <span class="brand-name">OpenRecord</span>
         <span class="brand-tag">Vintage records · listening room</span>
       </div>
-      <or-icon-button
-        class="settings"
-        label="Settings"
-        icon="settings"
-        (click)="openSettings()"
-      />
     } @else {
       <or-icon-button
         [label]="backLabel()"
@@ -77,9 +71,6 @@ import { type IconName, OrIconButton } from '@open-record/ui';
       flex: 1;
       min-width: 0;
     }
-    .settings {
-      flex: none;
-    }
     .brand-name {
       font-family: var(--font-display);
       font-size: 20px;
@@ -111,10 +102,6 @@ export class OrTopBar {
   readonly backIcon = input<IconName>('back');
   readonly backLabel = input('Back');
   readonly back = output<void>();
-
-  private readonly router = inject(Router);
-
-  protected openSettings(): void {
-    void this.router.navigateByUrl('/settings');
-  }
+  /** Root screens: open the navigation drawer. */
+  readonly menu = output<void>();
 }

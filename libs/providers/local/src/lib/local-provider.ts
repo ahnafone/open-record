@@ -1,4 +1,4 @@
-import type { PlayableSource, Track } from '@open-record/models';
+import { splitStoredPath, type PlayableSource, type Track } from '@open-record/models';
 import { createDefaultFileStore, IMPORT_DIR, type LocalFileStore, type PickedAudio } from './file-store';
 import {
   audioExtension,
@@ -30,8 +30,9 @@ function newKey(): string {
 const keyPrefix = (key: string) => `${IMPORT_DIR}/${key}.`;
 const audioPrefix = (key: string) => `${IMPORT_DIR}/${key}.audio.`;
 
-/** Key of a stored file path (`imported/<key>.audio.mp3` -> `<key>`). */
-function keyOfPath(path: string): string | null {
+/** Key of a stored file path (`imported/<key>.audio.mp3` -> `<key>`; any `external:` prefix ignored). */
+function keyOfPath(stored: string): string | null {
+  const { path } = splitStoredPath(stored);
   const name = path.startsWith(`${IMPORT_DIR}/`) ? path.slice(IMPORT_DIR.length + 1) : null;
   return name?.split('.')[0] || null;
 }
@@ -97,7 +98,9 @@ export class LocalProvider {
     const key = localKeyFromTrackId(track.id) ?? (track.sourceFile ? keyOfPath(track.sourceFile) : null);
     if (!key && !track.sourceFile) return 0;
     return this.removeWhere(
-      (path) => (key !== null && path.startsWith(keyPrefix(key))) || (!!track.sourceFile && path === track.sourceFile),
+      (path) =>
+        (key !== null && splitStoredPath(path).path.startsWith(keyPrefix(key))) ||
+        (!!track.sourceFile && path === track.sourceFile),
     );
   }
 

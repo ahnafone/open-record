@@ -11,6 +11,7 @@ import { OfflineStore } from './offline.store';
 import { PlayerStore } from './player.store';
 import { SettingsStore } from './settings.store';
 import { SyncStore } from './sync.store';
+import { MetadataEnrichStore } from './metadata-enrich.store';
 
 /**
  * Starts the stores at app start: hydrates library and playlists and restores
@@ -29,6 +30,8 @@ export function provideState(): EnvironmentProviders {
       void inject(PlayerStore).restore();
       // Registers the Spotify placeholder source; resumes a running import.
       void inject(ImportStore).restore();
+      // Resumes YouTube playlist metadata enrichment left running.
+      void inject(MetadataEnrichStore).restore();
       const autoDownload = inject(AutoDownloadStore);
       void inject(OfflineStore)
         .start()
