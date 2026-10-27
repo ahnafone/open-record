@@ -57,6 +57,7 @@
   grid-area: panel;
   inline-size: 360px;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
   padding: var(--spacing-md);

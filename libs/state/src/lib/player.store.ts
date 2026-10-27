@@ -77,11 +77,29 @@ export class PlayerStore {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSaved = '';
 
+  /**
+   * Position at 10 s granularity: the persistence effect's position
+   * dependency. A computed only notifies when its output changes, so position
+   * ticks wake the effect about once per 10 s instead of every tick.
+   */
+  private readonly savedPosition = computed(
+    () => Math.floor(this.engine.position() / 10) * 10,
+  );
+
   constructor() {
-    // Persist whenever queue, current track, modes or position change.
+    // Persist whenever queue, current track, modes, status or (coarsely)
+    // position change. Reads the signals directly instead of `snapshot()` so
+    // a tick neither allocates the id list nor re-runs this effect; `flush()`
+    // still saves the exact position (pause, ended and hide are exact too).
     effect(() => {
       if (!this._restored()) return;
-      this.snapshot();
+      this.engine.queue();
+      this.engine.currentIndex();
+      this.engine.playNextIndices();
+      this.engine.shuffle();
+      this.engine.repeat();
+      this.engine.status();
+      this.savedPosition();
       untracked(() => this.scheduleSave());
     });
 
@@ -398,7 +416,7 @@ export class PlayerStore {
       await this.engine.seek(position);
   }
 
-  /** Reads the persisted signals (tracked when called inside the effect). */
+  /** The state to persist, with the exact (floored) position. */
   private snapshot(): QueueState {
     const status = this.engine.status();
     const queue = this.engine.queue();

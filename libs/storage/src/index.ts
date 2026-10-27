@@ -21,6 +21,7 @@ export type {
   ImportSession,
   ImportSessionKind,
   ImportSessionsRepository,
+  MetadataTracksRepository,
   PlaylistRepository,
   QueueState,
   QueueStateRepository,

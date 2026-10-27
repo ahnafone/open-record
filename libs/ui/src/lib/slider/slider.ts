@@ -43,9 +43,12 @@ import {
   },
   template: `
     <span class="track"
-      ><span class="fill" [style.width.%]="percent()"></span
+      ><span class="fill" [style.transform]="fillTransform()"></span
     ></span>
-    <span class="thumb" [style.left]="thumbLeft()"></span>
+    <span class="thumb-rail"
+      ><span class="thumb-pos" [style.transform]="thumbTransform()"
+        ><span class="thumb"></span></span
+    ></span>
   `,
   styles: `
     :host {
@@ -78,13 +81,32 @@ import {
       overflow: hidden;
       background: color-mix(in srgb, var(--color-border) 70%, transparent);
     }
+    /* Fill and thumb move by transform only: no layout per tick or drag. */
     .fill {
       display: block;
       block-size: 100%;
+      inline-size: 100%;
       background: var(--color-primary);
+      transform-origin: left center;
+    }
+    /* Clips the travelling box below so it never widens the scroll area. */
+    .thumb-rail {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    /* As wide as the thumb's travel, so translateX(100%) is the far end. */
+    .thumb-pos {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      inline-size: calc(100% - var(--or-thumb));
     }
     .thumb {
       position: absolute;
+      left: 0;
       top: 50%;
       inline-size: var(--or-thumb);
       block-size: var(--or-thumb);
@@ -118,16 +140,22 @@ export class OrSlider {
 
   protected readonly clamped = computed(() => this.clamp(this.value()));
 
-  protected readonly percent = computed(() => {
+  /** 0..1 position of the value in the range. */
+  private readonly ratio = computed(() => {
     const span = this.max() - this.min();
     if (!(span > 0)) return 0;
-    return ((this.clamped() - this.min()) / span) * 100;
+    return (this.clamped() - this.min()) / span;
   });
 
+  protected readonly fillTransform = computed(() => `scaleX(${this.ratio()})`);
+
   /** Keeps the whole thumb inside the track at both ends. */
-  protected readonly thumbLeft = computed(
-    () => `calc((100% - var(--or-thumb)) * ${this.percent() / 100})`,
+  protected readonly thumbTransform = computed(
+    () => `translateX(${this.ratio() * 100}%)`,
   );
+
+  /** Host rect, measured once per drag (not on every pointermove). */
+  private rect: DOMRect | null = null;
 
   protected onKeydown(event: KeyboardEvent): void {
     if (this.disabled()) return;
@@ -182,6 +210,7 @@ export class OrSlider {
     }
     this.dragging.set(true);
     event.preventDefault();
+    this.rect = el.getBoundingClientRect();
     this.setFromPointer(event.clientX);
   }
 
@@ -193,6 +222,7 @@ export class OrSlider {
   protected onPointerUp(event: PointerEvent): void {
     if (!this.dragging()) return;
     this.dragging.set(false);
+    this.rect = null;
     try {
       this.host.nativeElement.releasePointerCapture(event.pointerId);
     } catch {
@@ -202,7 +232,7 @@ export class OrSlider {
   }
 
   private setFromPointer(clientX: number): void {
-    const rect = this.host.nativeElement.getBoundingClientRect();
+    const rect = (this.rect ??= this.host.nativeElement.getBoundingClientRect());
     const thumb = 16;
     const usable = rect.width - thumb;
     if (!(usable > 0)) return;

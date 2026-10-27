@@ -24,14 +24,17 @@ import {
   OrEmptyState,
   OrIcon,
   OrIconButton,
+  OrLoadMore,
   OrModal,
   OrSectionHead,
   OrSleeve,
-  OrSlider,
   OrSpinner,
   OrTag,
   OrToast,
+  lazyWindow,
 } from '@open-record/ui';
+import { OrSeekRow } from './seek-row';
+import { formatTime } from './time';
 import { injectTrackArt } from './track-art';
 
 interface UpNextRow {
@@ -42,14 +45,6 @@ interface UpNextRow {
   readonly playNext: boolean;
 }
 
-/** `m:ss` (or `h:mm:ss`) for seek times. */
-export function formatTime(totalSec: number): string {
-  const s = Math.max(0, Math.floor(Number.isFinite(totalSec) ? totalSec : 0));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = String(s % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-}
 
 /**
  * Now Playing: large sleeve over a disc that spins while playing, title,
@@ -66,10 +61,11 @@ export function formatTime(totalSec: number): string {
     OrEmptyState,
     OrIcon,
     OrIconButton,
+    OrLoadMore,
     OrModal,
     OrSectionHead,
+    OrSeekRow,
     OrSleeve,
-    OrSlider,
     OrSpinner,
     OrTag,
   ],
@@ -123,22 +119,7 @@ export function formatTime(totalSec: number): string {
       </div>
 
       @if (!panel()) {
-      <div class="seek">
-        <span class="time">{{ fmt(shownPosition()) }}</span>
-        <or-slider
-          label="Seek within this record"
-          [min]="0"
-          [max]="seekMax()"
-          [step]="1"
-          [largeStep]="10"
-          [disabled]="!canSeek()"
-          [value]="shownPosition()"
-          (valueChange)="scrub.set($event)"
-          (committed)="commitSeek($event)"
-          [valueText]="fmt(shownPosition()) + ' of ' + fmt(seekMax())"
-        />
-        <span class="time">{{ fmt(seekMax()) }}</span>
-      </div>
+        <or-seek-row />
       }
 
       <div class="status" aria-live="polite">
@@ -207,7 +188,7 @@ export function formatTime(totalSec: number): string {
       <or-section-head heading="Up next" />
       @if (upNext().length) {
         <ol class="queue">
-          @for (row of upNext(); track row.queueIndex) {
+          @for (row of upNextWindow.items(); track row.queueIndex) {
             <li class="row">
               <button
                 type="button"
@@ -242,6 +223,14 @@ export function formatTime(totalSec: number): string {
             </li>
           }
         </ol>
+        @if (upNextWindow.hasMore()) {
+          <div
+            class="sentinel"
+            orLoadMore
+            [loadMoreKey]="upNextWindow.items().length"
+            (loadMore)="upNextWindow.grow()"
+          ></div>
+        }
       } @else {
         <or-empty-state>Nothing else is queued after this record.</or-empty-state>
       }
@@ -344,12 +333,6 @@ export function formatTime(totalSec: number): string {
       flex-wrap: wrap;
       gap: var(--spacing-xs);
     }
-    .seek {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      align-items: center;
-      gap: var(--spacing-sm);
-    }
     .time {
       min-width: 36px;
       text-align: center;
@@ -388,6 +371,9 @@ export function formatTime(totalSec: number): string {
     }
     .note + .note {
       margin-block-start: var(--spacing-xxs);
+    }
+    .sentinel {
+      block-size: 1px;
     }
     .queue {
       list-style: none;
@@ -505,24 +491,8 @@ export class NowPlayingPage {
   /** Up next row whose options modal is open. */
   protected readonly optionsFor = signal<UpNextRow | null>(null);
 
-  /** Slider value while the user drags; null follows playback. */
-  protected readonly scrub = signal<number | null>(null);
-
   protected readonly fmt = formatTime;
   protected readonly art = injectTrackArt();
-
-  protected readonly seekMax = computed(() => {
-    const d = this.player.duration();
-    return d > 0 ? d : (this.player.current()?.durationSec ?? 0);
-  });
-
-  protected readonly canSeek = computed(
-    () => this.player.duration() > 0 && !this.player.isLoading(),
-  );
-
-  protected readonly shownPosition = computed(
-    () => this.scrub() ?? this.player.position(),
-  );
 
   protected readonly saved = computed(() => {
     const id = this.player.current()?.id;
@@ -544,6 +514,9 @@ export class NowPlayingPage {
   protected readonly upNext = computed<readonly UpNextRow[]>(() =>
     this.player.upcomingEntries(),
   );
+
+  /** Rendered slice of `upNext` (long queues grow as the end nears). */
+  protected readonly upNextWindow = lazyWindow(this.upNext);
 
   /** Options: move a normal-order row into the "Play next" list. */
   protected async playNextFromOptions(): Promise<void> {
@@ -614,14 +587,6 @@ export class NowPlayingPage {
   /** Album title for the line under the artist (year and genre are tags). */
   protected albumLine(track: Track): string {
     return track.album?.trim() ?? '';
-  }
-
-  protected async commitSeek(sec: number): Promise<void> {
-    try {
-      await this.player.seek(sec);
-    } finally {
-      this.scrub.set(null);
-    }
   }
 
   protected async toggleSaved(track: Track): Promise<void> {

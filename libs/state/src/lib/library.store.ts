@@ -6,6 +6,7 @@ import {
   StoragePort,
   type ImportedTrack,
   type JsonValue,
+  type SavedRecord,
 } from '@open-record/storage';
 // Circular with these stores; only used at call time, never at module load.
 import { PlayerStore } from './player.store';
@@ -21,6 +22,9 @@ export type LoadStatus = 'loading' | 'ready' | 'error';
 export const LOCAL_PROVIDER_ID = 'local';
 /** Provider id of server-backed (stream server) tracks. */
 export const REMOTE_PROVIDER_ID = 'remote';
+
+/** Imported file records written per storage call (a failed write loses at most one batch). */
+const IMPORT_BATCH_SIZE = 20;
 
 /**
  * Hand edits to an imported track. Only provided keys are considered; a
@@ -73,8 +77,12 @@ export class LibraryStore {
 
   private readonly _tracks = signal<readonly Track[]>([]);
   private readonly _savedIds = signal<readonly string[]>([]);
+  /** When each bookmark was made (epoch ms), mirrored from storage. */
+  private readonly _savedAt = signal<ReadonlyMap<string, number>>(new Map());
   /** Stored file records by track id: a track is "imported" iff it has one. */
-  private readonly _stored = signal<ReadonlyMap<string, ImportedTrack>>(new Map());
+  private readonly _stored = signal<ReadonlyMap<string, ImportedTrack>>(
+    new Map(),
+  );
   /** Tracks persisted by metadata only (no file record), e.g. Spotify imports. */
   private readonly _metadata = signal<ReadonlyMap<string, Track>>(new Map());
   private readonly _status = signal<LoadStatus>('loading');
@@ -87,20 +95,34 @@ export class LibraryStore {
   readonly status = this._status.asReadonly();
   readonly error = this._error.asReadonly();
 
+  /** Rebuilt only when `_tracks` changes (writers skip no-op updates). */
   readonly trackMap = computed(
     () => new Map(this._tracks().map((t) => [t.id, t])),
   );
   private readonly savedSet = computed(() => new Set(this._savedIds()));
+  /**
+   * The stored-record map, re-emitted only when its set of ids changes: a
+   * status or progress write (e.g. every download tick) keeps the old value,
+   * so membership-only consumers do not re-run.
+   */
+  private readonly storedIds = computed(() => this._stored(), {
+    equal: sameKeys,
+  });
   /** Saved records that resolve to a known track, most recent first. */
-  readonly savedRecords = computed(() => this.resolveIds(this._savedIds()));
+  readonly savedRecords = computed(() => this.resolveIds(this._savedIds()), {
+    equal: sameItems,
+  });
   /**
    * Tracks that have a stored file record (user imports, and remote tracks
    * that are saving, saved or failed to save), in index order.
    */
-  readonly importedTracks = computed(() => {
-    const stored = this._stored();
-    return this._tracks().filter((t) => stored.has(t.id));
-  });
+  readonly importedTracks = computed(
+    () => {
+      const stored = this.storedIds();
+      return this._tracks().filter((t) => stored.has(t.id));
+    },
+    { equal: sameItems },
+  );
   /** Importing is possible (a LocalMediaPort is provided). */
   readonly canImport = !!this.media;
   /**
@@ -156,6 +178,19 @@ export class LibraryStore {
     return this.savedSet().has(trackId);
   }
 
+  /** When a saved record was bookmarked (epoch ms); undefined if unknown. Reactive. */
+  savedAt(trackId: string): number | undefined {
+    return this._savedAt().get(trackId);
+  }
+
+  /**
+   * When a stored file record was created (epoch ms); undefined if none.
+   * Reactive on the set of stored ids only, so download ticks do not re-run it.
+   */
+  importedAt(trackId: string): number | undefined {
+    return this.storedIds().get(trackId)?.importedAt;
+  }
+
   /** True when the track has a stored file record (editable, removable). Reactive. */
   isImported(track: Pick<Track, 'id'>): boolean {
     return this._stored().has(track.id);
@@ -165,6 +200,12 @@ export class LibraryStore {
   storedRecord(trackId: string): ImportedTrack | undefined {
     return this._stored().get(trackId);
   }
+
+  /**
+   * Every stored file record: the in-memory mirror of the imported-tracks
+   * collection, so callers need not re-read storage. Reactive.
+   */
+  readonly storedRecords = computed(() => [...this._stored().values()]);
 
   /** Bookmark or un-bookmark a record. Resolves to the new saved state. */
   async toggleSaved(trackId: string): Promise<boolean> {
@@ -191,13 +232,55 @@ export class LibraryStore {
       );
     apply(saved);
     try {
-      if (saved) await this.storage.savedRecords.add(trackId);
-      else await this.storage.savedRecords.remove(trackId);
+      if (saved) {
+        const at = Date.now();
+        await this.storage.savedRecords.add(trackId, at);
+        this._savedAt.update((m) => new Map(m).set(trackId, at));
+      } else await this.storage.savedRecords.remove(trackId);
     } catch (err) {
       apply(!saved);
       throw err;
     }
-    if (!saved) await this.offline().reconcile();
+    if (!saved) await this.offline().reconcile([trackId]);
+  }
+
+  /**
+   * Un-bookmark several records with one signal write and one reconcile of
+   * just those ids (account sync, detaching removed tracks). Ids that are not
+   * saved are skipped. On a failed write the remaining ids stay saved.
+   */
+  async unsaveMany(ids: readonly string[]): Promise<void> {
+    await this.loaded;
+    const targets = [...new Set(ids)].filter((id) => this.isSaved(id));
+    if (!targets.length) return;
+    const gone = new Set(targets);
+    const before = this._savedIds();
+    this._savedIds.update((list) => list.filter((id) => !gone.has(id)));
+    const done: string[] = [];
+    let failed = false;
+    try {
+      for (const id of targets) {
+        await this.storage.savedRecords.remove(id);
+        done.push(id);
+      }
+    } catch (err) {
+      failed = true;
+      // Put back the original order minus the ids actually removed, keeping
+      // any ids saved meanwhile.
+      const removed = new Set(done);
+      this._savedIds.update((list) => {
+        const prior = new Set(before);
+        return [...before.filter((id) => !removed.has(id)), ...list.filter((id) => !prior.has(id))];
+      });
+      throw err;
+    } finally {
+      if (done.length) {
+        // Never let a reconcile failure replace the storage error.
+        const reconciled = this.offline().reconcile(done);
+        if (failed) await reconciled.catch(() => undefined);
+        else await reconciled;
+      }
+    }
   }
 
   /**
@@ -206,11 +289,11 @@ export class LibraryStore {
    * tracks. Results are merged into the known-track index so they can be
    * saved, added to playlists and restored in the queue.
    */
-  async search(query: string): Promise<Track[]> {
+  async search(query: string, signal?: AbortSignal): Promise<Track[]> {
     if (!query.trim()) return [...this._tracks()];
     await this.loaded;
     const [remote, local] = [
-      this.registry.searchAll(query),
+      this.registry.searchAll(query, signal),
       this.importedTracks().filter(matches(query)),
     ];
     const results = dedupe([...local, ...(await remote)]);
@@ -249,9 +332,10 @@ export class LibraryStore {
   async addMetadataTracks(tracks: readonly Track[]): Promise<void> {
     await this.loaded;
     if (!tracks.length) return;
+    await this.storage.metadataTracks.saveMany(tracks);
     const next = new Map(this._metadata());
     for (const t of tracks) next.set(t.id, t);
-    await this.writeMetadata(next);
+    this._metadata.set(next);
     for (const t of tracks) if (!this._stored().has(t.id)) this.upsert(t);
   }
 
@@ -260,9 +344,7 @@ export class LibraryStore {
     await this.loaded;
     const gone = new Set(ids.filter((id) => this._metadata().has(id)));
     if (!gone.size) return;
-    const next = new Map(this._metadata());
-    for (const id of gone) next.delete(id);
-    await this.writeMetadata(next);
+    await this.forgetMetadata([...gone]);
     const stored = this._stored();
     this._tracks.update((all) =>
       all.filter((t) => !gone.has(t.id) || stored.has(t.id)),
@@ -294,7 +376,7 @@ export class LibraryStore {
         fresh.map((e) => ({ trackId: e.id, savedAt: e.savedAt })),
       );
     } finally {
-      this._savedIds.set(await this.storage.savedRecords.list());
+      this.setSavedEntries(await this.storage.savedRecords.entries());
     }
   }
 
@@ -331,6 +413,14 @@ export class LibraryStore {
     await this.loaded;
     if (oldId === newId || !this.isSaved(oldId)) return;
     await this.storage.savedRecords.replace(oldId, newId);
+    const at = this._savedAt().get(oldId);
+    if (at !== undefined) {
+      this._savedAt.update((m) => {
+        const next = new Map(m);
+        next.delete(oldId);
+        return next.set(newId, at);
+      });
+    }
     this._savedIds.update((ids) => {
       const seen = new Set<string>();
       return ids
@@ -351,11 +441,7 @@ export class LibraryStore {
     await this.addMetadataTracks([next]);
     await this.replaceSaved(oldId, next.id);
     if (this._stored().has(oldId)) await this.dropRecord(oldId);
-    if (this._metadata().has(oldId)) {
-      const meta = new Map(this._metadata());
-      meta.delete(oldId);
-      await this.writeMetadata(meta);
-    }
+    if (this._metadata().has(oldId)) await this.forgetMetadata([oldId]);
     this._tracks.update((all) => all.filter((t) => t.id !== oldId));
   }
 
@@ -373,19 +459,26 @@ export class LibraryStore {
     const failures = [...result.failures];
     const imported: Track[] = [];
     const importedAt = Date.now();
-    for (const track of result.tracks) {
+    let batch: ImportedTrack[] = [];
+    const flush = async () => {
+      if (!batch.length) return;
+      const records = batch;
+      batch = [];
       try {
-        await this.storeRecord({
-          track,
-          filePath: track.sourceFile ?? '',
-          importedAt,
-        });
-        imported.push(track);
+        await this.storeRecords(records);
+        for (const r of records) imported.push(r.track);
       } catch (error) {
-        await this.media.remove(track).catch(() => 0);
-        failures.push({ fileName: track.sourceFile ?? track.title, error });
+        for (const { track } of records) {
+          await this.media?.remove(track).catch(() => 0);
+          failures.push({ fileName: track.sourceFile ?? track.title, error });
+        }
       }
+    };
+    for (const track of result.tracks) {
+      batch.push({ track, filePath: track.sourceFile ?? '', importedAt });
+      if (batch.length >= IMPORT_BATCH_SIZE) await flush();
     }
+    await flush();
     if (imported.length || failures.length) {
       await this.sessions
         .record({
@@ -408,6 +501,21 @@ export class LibraryStore {
     await this.storage.importedTracks.save(record);
     this._stored.update((m) => new Map(m).set(record.track.id, record));
     this.upsert(record.track);
+  }
+
+  /**
+   * Persist several stored file records in one write and update the index
+   * and record map once. Throws if the write fails; nothing changes then.
+   */
+  async storeRecords(records: readonly ImportedTrack[]): Promise<void> {
+    if (!records.length) return;
+    await this.storage.importedTracks.saveMany(records);
+    this._stored.update((m) => {
+      const next = new Map(m);
+      for (const r of records) next.set(r.track.id, r);
+      return next;
+    });
+    this.upsertMany(records.map((r) => r.track));
   }
 
   /**
@@ -542,27 +650,55 @@ export class LibraryStore {
 
   // ---- Internals -----------------------------------------------------------
 
-  private async writeMetadata(next: ReadonlyMap<string, Track>): Promise<void> {
-    await this.storage.settings.set(
-      SETTINGS_KEYS.metadataTracks,
-      [...next.values()] as unknown as JsonValue,
-    );
+  /** Delete metadata-only tracks from storage and the in-memory map. */
+  private async forgetMetadata(ids: readonly string[]): Promise<void> {
+    await this.storage.metadataTracks.deleteMany(ids);
+    const next = new Map(this._metadata());
+    for (const id of ids) next.delete(id);
+    // An empty collection falls back to the legacy settings blob on the next
+    // launch; empty the blob too so removed tracks do not come back.
+    if (!next.size) {
+      await this.storage.settings.set(SETTINGS_KEYS.metadataTracks, []);
+    }
     this._metadata.set(next);
   }
 
   private replaceTrack(track: Track): void {
-    this._tracks.update((all) =>
-      all.map((t) => (t.id === track.id ? track : t)),
-    );
+    this._tracks.update((all) => {
+      const i = all.findIndex((t) => t.id === track.id);
+      return i < 0 || all[i] === track ? all : replaceAt(all, i, track);
+    });
   }
 
-  /** Replace the index entry for a track, or add it. */
+  /**
+   * Replace the index entry for a track, or add it. Keeps the same array when
+   * the entry is already this object, so re-storing a record (download status
+   * writes) does not invalidate the index and everything derived from it.
+   */
   private upsert(track: Track): void {
-    this._tracks.update((all) =>
-      all.some((t) => t.id === track.id)
-        ? all.map((t) => (t.id === track.id ? track : t))
-        : [...all, track],
-    );
+    this._tracks.update((all) => {
+      const i = all.findIndex((t) => t.id === track.id);
+      if (i < 0) return [...all, track];
+      return all[i] === track ? all : replaceAt(all, i, track);
+    });
+  }
+
+  /** {@link upsert} for several tracks in one pass (same array when nothing changes). */
+  private upsertMany(tracks: readonly Track[]): void {
+    this._tracks.update((all) => {
+      const incoming = new Map(tracks.map((t) => [t.id, t]));
+      let changed = false;
+      const next = all.map((t) => {
+        const u = incoming.get(t.id);
+        if (!u) return t;
+        incoming.delete(t.id);
+        if (u === t) return t;
+        changed = true;
+        return u;
+      });
+      if (incoming.size) changed = true;
+      return changed ? [...next, ...incoming.values()] : all;
+    });
   }
 
   /** Remove tracks from the queue, playlists and saved records. */
@@ -570,9 +706,7 @@ export class LibraryStore {
     if (!ids.length) return;
     await this.player()?.removeTracks(ids);
     await this.playlists().removeTracksEverywhere(ids);
-    for (const id of ids) {
-      if (this.isSaved(id)) await this.setSaved(id, false);
-    }
+    await this.unsaveMany(ids);
   }
 
   private playlists() {
@@ -594,7 +728,9 @@ export class LibraryStore {
   /** Best-effort size of bundled (read-only) provider assets via HEAD requests. */
   private async measureCatalog(): Promise<number | null> {
     if (typeof fetch !== 'function') return null;
-    const bundled = this._tracks().filter((t) => !this.isImported(t) && !t.source);
+    const bundled = this._tracks().filter(
+      (t) => !this.isImported(t) && !t.source,
+    );
     const urls = new Set<string>();
     for (const t of bundled) {
       if (t.artUrl) urls.add(t.artUrl);
@@ -625,25 +761,51 @@ export class LibraryStore {
     return measured ? total : null;
   }
 
+  /**
+   * Metadata-only tracks from their collection (schema v6). When it is empty
+   * the legacy settings blob is read instead (data written by an older build
+   * after the migration ran) and copied into the collection, best effort, so
+   * later per-id writes do not drop those tracks.
+   */
+  private async readMetadataTracks(): Promise<Track[]> {
+    const stored = await this.storage.metadataTracks.list();
+    if (stored.length) return stored;
+    const blob = await this.storage.settings.get<JsonValue>(
+      SETTINGS_KEYS.metadataTracks,
+    );
+    const legacy = Array.isArray(blob)
+      ? (blob as unknown as Track[]).filter(
+          (t) => !!t && typeof t.id === 'string' && !!t.id,
+        )
+      : [];
+    if (legacy.length) {
+      await this.storage.metadataTracks.saveMany(legacy).catch(() => undefined);
+    }
+    return legacy;
+  }
+
+  /** Replace the saved ids and their timestamps (storage order: newest first). */
+  private setSavedEntries(entries: readonly SavedRecord[]): void {
+    this._savedIds.set(entries.map((e) => e.trackId));
+    this._savedAt.set(new Map(entries.map((e) => [e.trackId, e.savedAt])));
+  }
+
   private async hydrate(): Promise<void> {
     this._status.set('loading');
     this._error.set(null);
     try {
-      const [listed, imported, savedIds, metadata] = await Promise.all([
+      const [listed, imported, savedEntries, metaTracks] = await Promise.all([
         this.registry.listAll(),
         this.storage.importedTracks.list(),
-        this.storage.savedRecords.list(),
-        this.storage.settings.get<JsonValue>(SETTINGS_KEYS.metadataTracks),
+        this.storage.savedRecords.entries(),
+        this.readMetadataTracks(),
       ]);
-      const metaTracks = Array.isArray(metadata)
-        ? (metadata as unknown as Track[]).filter((t) => t && t.id)
-        : [];
       this._tracks.set(
         dedupe([...listed, ...imported.map((i) => i.track), ...metaTracks]),
       );
       this._stored.set(new Map(imported.map((i) => [i.track.id, i])));
       this._metadata.set(new Map(metaTracks.map((t) => [t.id, t])));
-      this._savedIds.set(savedIds);
+      this.setSavedEntries(savedEntries);
       this._status.set('ready');
     } catch (err) {
       this._error.set(
@@ -689,4 +851,26 @@ function dedupe(tracks: readonly Track[]): Track[] {
     seen.add(t.id);
     return true;
   });
+}
+
+/** A copy of `items` with index `i` replaced. */
+function replaceAt<T>(items: readonly T[], i: number, item: T): T[] {
+  const next = [...items];
+  next[i] = item;
+  return next;
+}
+
+/** Same elements (by reference) in the same order. */
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
+}
+
+/** Same set of keys. */
+function sameKeys(
+  a: ReadonlyMap<string, unknown>,
+  b: ReadonlyMap<string, unknown>,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const key of a.keys()) if (!b.has(key)) return false;
+  return true;
 }

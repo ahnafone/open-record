@@ -91,12 +91,6 @@ import { EditTrackDialog } from './edit-track-dialog';
                   <span class="title">{{ t.title }}</span>
                   <span class="artist">{{ t.artist }}@if (t.album) { · {{ t.album }}}</span>
                   <span class="detail">
-                    @if (current) {
-                      <span class="now">
-                        <or-icon name="disc" [size]="13" />
-                        {{ player.isPlaying() ? 'On the turntable' : 'Paused' }}
-                      </span>
-                    }
                     @if (source) {
                       <or-tag>{{ source }}</or-tag>
                     }
@@ -118,6 +112,12 @@ import { EditTrackDialog } from './edit-track-dialog';
                       <or-tag>Not matched yet</or-tag>
                     }
                   </span>
+                  @if (current) {
+                    <span class="now">
+                      <or-icon name="disc" [size]="13" />
+                      {{ player.isPlaying() ? 'On the turntable' : 'Paused' }}
+                    </span>
+                  }
                 </span>
               </button>
               <span class="dur">{{ formatDuration(t.durationSec) }}</span>
@@ -280,10 +280,17 @@ import { EditTrackDialog } from './edit-track-dialog';
       color: var(--color-primary);
       border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
     }
+    .record.is-current {
+      background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+      border-radius: var(--rounded-md);
+    }
     .now {
-      display: inline-flex;
+      display: flex;
       align-items: center;
       gap: var(--spacing-xs);
+      margin-top: 2px;
+      font-size: var(--type-meta-font-size);
+      line-height: 16px;
       color: var(--color-text);
     }
     .dur {

@@ -11,11 +11,10 @@ import {
   OrButton,
   OrEmptyState,
   OrIcon,
-  OrSectionHead,
   OrSpinner,
 } from '@open-record/ui';
+import { OrBinRail } from './bin-rail';
 import { OrListeningBooth } from './listening-booth';
-import { OrRecordCard } from './record-card';
 
 interface Bin {
   name: string;
@@ -31,18 +30,17 @@ const FRESH_LIMIT = 12;
 /**
  * Browse: the "listening booth" hero (what is on the turntable) followed by
  * the shop's crates: a "Fresh in the crates" rail, then one horizontal rail
- * per genre bin. Tapping a record
- * plays it with its bin as the queue.
+ * per genre bin. Each rail renders its records a page at a time; tapping a
+ * record plays it with its whole bin as the queue.
  */
 @Component({
   selector: 'or-browse-page',
   imports: [
+    OrBinRail,
     OrButton,
     OrEmptyState,
     OrIcon,
     OrListeningBooth,
-    OrRecordCard,
-    OrSectionHead,
     OrSpinner,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -85,21 +83,13 @@ const FRESH_LIMIT = 12;
       }
       @default {
         @for (bin of bins(); track bin.name) {
-          <section class="bin" [attr.aria-label]="bin.name + ' bin'">
-            <or-section-head [heading]="bin.name" />
-            <ul class="rail">
-              @for (t of bin.tracks; track t.id) {
-                <li>
-                  <or-record-card
-                    [track]="t"
-                    [current]="player.current()?.id === t.id"
-                    [playing]="player.isPlaying()"
-                    (pick)="playRecord(t, bin.tracks)"
-                  />
-                </li>
-              }
-            </ul>
-          </section>
+          <or-bin-rail
+            [name]="bin.name"
+            [tracks]="bin.tracks"
+            [currentId]="player.current()?.id ?? null"
+            [playing]="player.isPlaying()"
+            (pick)="playRecord($event, bin.tracks)"
+          />
         } @empty {
           <or-empty-state class="crates-status">
             The crates are empty. Records you add will be filed here.
@@ -128,44 +118,7 @@ const FRESH_LIMIT = 12;
       line-height: var(--type-body-sm-line-height);
       color: var(--color-muted);
     }
-    .bin or-section-head {
-      margin-block-start: 20px;
-    }
-    /* Crate rail: bleeds to the screen edge, re-pads so the next sleeve peeks in. */
-    .rail {
-      display: flex;
-      gap: var(--spacing-sm);
-      margin: 0 calc(-1 * var(--spacing-gutter));
-      padding: var(--spacing-sm) var(--spacing-gutter) 0;
-      list-style: none;
-      overflow-x: auto;
-      scroll-snap-type: x proximity;
-      scroll-padding-inline: var(--spacing-gutter);
-      scrollbar-width: none;
-    }
-    .rail::-webkit-scrollbar {
-      display: none;
-    }
-    .rail > li {
-      flex: none;
-      scroll-snap-align: start;
-    }
-    .rail > li:last-child {
-      margin-inline-end: var(--spacing-gutter);
-    }
-    /* Desktop: crates become a responsive grid instead of a swipe rail. */
     @media (min-width: 900px) {
-      .rail {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-        gap: var(--spacing-md) var(--spacing-sm);
-        margin: 0;
-        padding: var(--spacing-sm) 0 0;
-        overflow: visible;
-      }
-      .rail > li:last-child {
-        margin-inline-end: 0;
-      }
       .display {
         font-size: 40px;
       }
@@ -207,15 +160,15 @@ export class BrowsePage {
 
   /** Genre bins in first-seen order; genre-less records go last. */
   protected readonly bins = computed<Bin[]>(() => {
+    const all = this.library.tracks();
+    if (!all.length) return [];
     const byGenre = new Map<string, Track[]>();
-    for (const t of this.library.tracks()) {
+    for (const t of all) {
       const name = t.genre?.trim() || UNSORTED_BIN;
       const bin = byGenre.get(name);
       if (bin) bin.push(t);
       else byGenre.set(name, [t]);
     }
-    const all = this.library.tracks();
-    if (!all.length) return [];
     const bins = [...byGenre].map(([name, tracks]) => ({ name, tracks }));
     return [
       { name: FRESH_BIN, tracks: all.slice(0, FRESH_LIMIT) },

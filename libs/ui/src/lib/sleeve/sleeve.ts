@@ -48,6 +48,7 @@ function isPromiseLike(
         [label]="label()"
         [showLabel]="size() !== 'thumb'"
         [spinning]="playing()"
+        [flat]="size() === 'thumb'"
       />
     }
     <div class="art">
@@ -129,8 +130,12 @@ function isPromiseLike(
     /* thumb: 60px sleeve with the disc peeking out to the right */
     :host(.size-thumb) {
       --s: 60px;
-      inline-size: calc(var(--s) + 10px);
+      /* Wide enough for the peeking disc (0.42s + 0.76s), since paint
+         containment clips anything outside the box. */
+      inline-size: calc(var(--s) * 1.18);
       block-size: var(--s);
+      /* Rows hold many thumbs: keep each one's layout and paint to itself. */
+      contain: layout paint;
     }
     :host(.size-thumb) .disc {
       inline-size: calc(var(--s) * 0.76);
@@ -145,8 +150,6 @@ function isPromiseLike(
       block-size: var(--s);
       padding: 3px;
       border-radius: 2px;
-      box-shadow: 0 4px 10px
-        color-mix(in srgb, var(--color-vinyl) 40%, transparent);
     }
 
     /* mini: 44px ivory frame in the mini player */
@@ -185,17 +188,17 @@ function isPromiseLike(
     /* large: Now Playing, square sleeve */
     :host(.size-large) {
       inline-size: 100%;
-      padding-right: 14%;
+      padding-right: 20%;
     }
     :host(.size-large) .disc {
       z-index: 0;
       right: 0;
       top: 9%;
-      inline-size: 62%;
+      inline-size: 66%;
     }
     :host(.size-large) .art {
       z-index: 1;
-      inline-size: 86%;
+      inline-size: 100%;
       aspect-ratio: 1;
       padding: 6px;
       box-shadow: 0 18px 34px

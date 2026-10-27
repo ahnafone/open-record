@@ -45,6 +45,8 @@ export const COLLECTIONS = {
   queueState: 'queue_state',
   settings: 'settings',
   importSessions: 'import_sessions',
+  /** Tracks known by metadata only (e.g. unmatched imports), keyed by track id. Added in v6. */
+  metadataTracks: 'metadata_tracks',
 } as const;
 
 /** Well-known keys in the `settings` collection. */
@@ -57,7 +59,11 @@ export const SETTINGS_KEYS = {
   autoDownload: 'autoDownload',
   /** `'data' | 'external'` where new downloads are written (no migration: new key, absent = data). */
   downloadLocation: 'downloadLocation',
-  /** Track[] known by metadata only (e.g. unmatched Spotify imports) (no migration: new key, absent = none). */
+  /**
+   * @deprecated Legacy Track[] blob of metadata-only tracks. Since v6 they live
+   * in the `metadata_tracks` collection; this key is read only by the v6
+   * migration and as a fallback when that collection is empty.
+   */
   metadataTracks: 'metadataTracks',
   /** Spotify import matching job (no migration: new key, absent = no job). Holds no raw Spotify payloads. */
   spotifyImport: 'spotifyImport',
@@ -153,6 +159,25 @@ export const MIGRATIONS: readonly Migration[] = [
     description: 'Import sessions collection (one record per import run)',
     async up(ctx) {
       await ctx.createCollection('import_sessions');
+    },
+  },
+  {
+    version: 6,
+    description:
+      'Metadata-only tracks move from the settings blob to their own collection',
+    async up(ctx) {
+      await ctx.createCollection('metadata_tracks');
+      const blob = (await ctx.entries(COLLECTIONS.settings)).find(
+        ([key]) => key === 'metadataTracks',
+      )?.[1];
+      if (!Array.isArray(blob)) return;
+      for (const track of blob as Array<{ id?: unknown } | null>) {
+        if (!track || typeof track !== 'object') continue;
+        if (typeof track.id !== 'string' || !track.id) continue;
+        await ctx.put('metadata_tracks', track.id, track);
+      }
+      // The blob is kept (not deleted) so an older build can still read it;
+      // the app reads it only when the collection is empty.
     },
   },
 ];

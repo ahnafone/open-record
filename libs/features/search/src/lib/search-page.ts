@@ -28,11 +28,13 @@ import {
   OrEmptyState,
   OrIcon,
   OrIconButton,
+  OrLoadMore,
   OrSectionHead,
   OrSleeve,
   OrSpinner,
   OrTag,
   OrToast,
+  lazyWindow,
 } from '@open-record/ui';
 import {
   MAX_QUERY_LENGTH,
@@ -42,6 +44,10 @@ import {
 } from './search-query';
 import { DownloadSources } from './download-sources';
 import { injectTrackArt } from './track-art';
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
 
 /** Result row styles (kept apart from the page sheet). */
 const ROW_STYLES = `
@@ -64,6 +70,11 @@ const ROW_STYLES = `
       padding: var(--spacing-xxs) 0;
       border-block-start: 1px solid
         color-mix(in srgb, var(--color-border) 32%, transparent);
+      /* Broad queries: skip layout and paint for off-screen rows. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 77px;
+      /* Paint containment would clip the play button's focus ring. */
+      overflow-clip-margin: 4px;
     }
     .record:first-child {
       border-block-start: 0;
@@ -84,12 +95,18 @@ const ROW_STYLES = `
       font: inherit;
       text-align: start;
       cursor: pointer;
-      transition:
-        background var(--duration-fast) var(--ease-standard),
-        transform var(--duration-fast) var(--ease-standard);
+      transition: transform var(--duration-fast) var(--ease-standard);
     }
-    .record-main:hover {
-      background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    /* Hover only where a pointer can hover (no sticky hover after a tap). */
+    @media (hover: hover) {
+      .record-main {
+        transition:
+          background var(--duration-fast) var(--ease-standard),
+          transform var(--duration-fast) var(--ease-standard);
+      }
+      .record-main:hover {
+        background: color-mix(in srgb, var(--color-text) 5%, transparent);
+      }
     }
     .record-main:active {
       transform: scale(0.97);
@@ -158,12 +175,20 @@ const ROW_STYLES = `
         border-block-end: 1px solid
           color-mix(in srgb, var(--color-border) 32%, transparent);
       }
+      .record {
+        contain-intrinsic-size: auto 69px;
+      }
       .record-main {
         min-block-size: 64px;
       }
+    }
+    @media (min-width: 900px) and (hover: hover) {
       .record-main:hover {
         background: var(--color-surface-raised);
       }
+    }
+    .sentinel {
+      block-size: 1px;
     }
 
 `;
@@ -185,6 +210,7 @@ const ROW_STYLES = `
     OrEmptyState,
     OrIcon,
     OrIconButton,
+    OrLoadMore,
     OrSectionHead,
     OrSleeve,
     OrSpinner,
@@ -258,7 +284,7 @@ const ROW_STYLES = `
     } @else if (hits().length && !results.error()) {
       <or-section-head [heading]="countLabel()" />
       <ul class="crate" [class.is-stale]="results.isLoading()">
-        @for (t of hits(); track t.id) {
+        @for (t of hitsWindow.items(); track t.id) {
           @let current = player.isCurrent(t.id);
           @let saved = library.isSaved(t.id);
           @let status = offline.status(t.id);
@@ -335,6 +361,14 @@ const ROW_STYLES = `
           </li>
         }
       </ul>
+      @if (hitsWindow.hasMore()) {
+        <div
+          class="sentinel"
+          orLoadMore
+          [loadMoreKey]="hitsWindow.items().length"
+          (loadMore)="hitsWindow.grow()"
+        ></div>
+      }
     }
 
     <or-download-sources
@@ -484,7 +518,8 @@ export class SearchPage {
   protected readonly results = resource({
     params: () =>
       this.hasQuery() ? toProviderQuery(this.settledText()) : undefined,
-    loader: ({ params }) => this.library.search(params),
+    loader: ({ params, abortSignal }) =>
+      this.library.search(params, abortSignal),
   });
 
   /** Latest results, kept on screen (dimmed) while the next search loads. */
@@ -492,6 +527,12 @@ export class SearchPage {
     source: () => (this.results.hasValue() ? this.results.value() : undefined),
     computation: (next, prev) => next ?? prev?.value ?? [],
   });
+
+  /**
+   * Rendered rows; back to the first page when the settled query changes.
+   * Play queues, the count and the empty state keep using `hits`.
+   */
+  protected readonly hitsWindow = lazyWindow(this.hits, this.settledText);
 
   protected readonly showNoResults = computed(
     () => this.results.hasValue() && this.results.value().length === 0,
@@ -502,8 +543,10 @@ export class SearchPage {
     return `${n} record${n === 1 ? '' : 's'}`;
   });
 
-  protected readonly chips = computed(() =>
-    suggestionChips(this.library.tracks()),
+  /** Value-equal chips keep the rail from re-rendering when searches grow the index. */
+  protected readonly chips = computed(
+    () => suggestionChips(this.library.tracks()),
+    { equal: sameStrings },
   );
   protected readonly exampleBin = computed(() => this.chips()[0] ?? 'Ragtime');
 

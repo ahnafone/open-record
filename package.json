@@ -15,7 +15,12 @@
     "cap:sync": "nx run app:cap-sync",
     "server:up": "node scripts/server-up.mjs",
     "android": "nx run app:cap-sync && cd apps/app && cap run android",
-    "android:open": "nx run app:cap-sync && cd apps/app && cap open android"
+    "android:open": "nx run app:cap-sync && cd apps/app && cap open android",
+    "android:release": "npm run cap:sync && cd apps/app/android && ./gradlew assembleRelease",
+    "android:release:install": "npm run android:release && adb install -r apps/app/android/app/build/outputs/apk/release/app-release.apk",
+    "ios": "npm run cap:sync && cd apps/app && cap run ios",
+    "ios:open": "npm run cap:sync && cd apps/app && cap open ios",
+    "ios:release": "npm run cap:sync && cd apps/app/ios/App && xcodebuild -project App.xcodeproj -scheme App -configuration Release -destination generic/platform=iOS -derivedDataPath build build"
   },
   "private": true,
   "devDependencies": {

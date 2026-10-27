@@ -339,7 +339,7 @@ export class SyncStore {
     const sessionClock = new Map<string, SyncImportSession>(localSessions);
     for (const s of sMerge.apply) sessionClock.set(s.id, s);
 
-    const after = await this.collectLibrary();
+    const after = await this.collectLibrary({ savedAt: false });
     const afterPl = new Map(
       this.playlists.playlists().map((p) => [p.id, toSyncPlaylist(p)]),
     );
@@ -354,10 +354,18 @@ export class SyncStore {
       playlists: nextLedger(afterPl, plClock, (p) => contentHash(p)),
       importSessions: nextLedger(this.sessionContent(), sessionClock, contentHash),
     };
-    await this.storage.settings.set(
-      SETTINGS_KEYS.syncState,
-      next as unknown as JsonValue,
-    );
+    // Skip the (large) ledger write when only the timestamp would change; it
+    // is still refreshed at least hourly so "last synced" survives a restart.
+    const unchanged =
+      stored === ledger &&
+      now - (ledger.lastSyncedAt ?? 0) < LEDGER_REFRESH_MS &&
+      sameLedgerContent(ledger, next);
+    if (!unchanged) {
+      await this.storage.settings.set(
+        SETTINGS_KEYS.syncState,
+        next as unknown as JsonValue,
+      );
+    }
     this._lastSyncedAt.set(next.lastSyncedAt ?? null);
   }
 
@@ -366,13 +374,18 @@ export class SyncStore {
    * tracks (never `local:` file imports). `referenced` holds every saved or
    * listed id, known or not.
    */
-  private async collectLibrary(): Promise<{
+  private async collectLibrary(opts: { savedAt?: boolean } = {}): Promise<{
     content: Map<string, LibraryContent>;
     savedAt: Map<string, number>;
     referenced: Set<string>;
   }> {
+    // Bookmark dates live only in storage; skip that read when not needed.
     const savedAt = new Map(
-      (await this.storage.savedRecords.entries()).map((r) => [r.trackId, r.savedAt]),
+      opts.savedAt === false
+        ? []
+        : (await this.storage.savedRecords.entries()).map(
+            (r) => [r.trackId, r.savedAt] as const,
+          ),
     );
     const saved = new Set(this.library.savedIds());
     const referenced = new Set<string>(saved);
@@ -417,7 +430,7 @@ export class SyncStore {
     }
     await this.library.addMetadataTracks(addMeta);
     await this.library.bookmarkWithoutSaving(bookmark);
-    for (const id of unsave) await this.library.setSaved(id, false);
+    await this.library.unsaveMany(unsave);
     await this.library.removeMetadataTracks(forget);
   }
 
@@ -450,6 +463,20 @@ export class SyncStore {
       return null;
     }
   }
+}
+
+/** Longest the stored ledger's `lastSyncedAt` may lag when nothing changed. */
+const LEDGER_REFRESH_MS = 60 * 60_000;
+
+/** Same clocks and tombstones (ignores `lastSyncedAt`). */
+function sameLedgerContent(a: SyncLedger, b: SyncLedger): boolean {
+  return (
+    a.userId === b.userId &&
+    JSON.stringify(a.library) === JSON.stringify(b.library) &&
+    JSON.stringify(a.playlists) === JSON.stringify(b.playlists) &&
+    JSON.stringify(a.importSessions ?? {}) ===
+      JSON.stringify(b.importSessions ?? {})
+  );
 }
 
 function toSyncPlaylist(p: Playlist): SyncPlaylist {

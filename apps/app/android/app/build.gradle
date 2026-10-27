@@ -18,8 +18,12 @@ android {
     }
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Local performance testing without a keystore. Remove when a real
+            // release keystore is wired up.
+            signingConfig signingConfigs.debug
         }
     }
 }

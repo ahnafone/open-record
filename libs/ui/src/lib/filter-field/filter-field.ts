@@ -2,8 +2,10 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  effect,
   input,
   model,
+  output,
   viewChild,
 } from '@angular/core';
 import { OrIcon } from '../icon/icon';
@@ -11,10 +13,15 @@ import { OrIconButton } from '../icon-button/icon-button';
 
 let nextId = 0;
 
+/** Quiet time before `settledValue` follows typing (see `OrFilterField`). */
+export const FILTER_SETTLE_MS = 150;
+
 /**
  * Search-style field for filtering a list in place: search icon, 44px input
  * and a clear button while it has text. Escape clears too. `value` is a
- * two-way model; `label` is the accessible name.
+ * two-way model and stays instant; `settledValue` follows it once typing
+ * pauses for `settleMs` (clearing is immediate), so long lists re-filter once
+ * per pause instead of per keystroke. `label` is the accessible name.
  */
 @Component({
   selector: 'or-filter-field',
@@ -106,9 +113,27 @@ export class OrFilterField {
   readonly placeholder = input('');
   /** Id of a status line (e.g. the match count) announced with the field. */
   readonly describedBy = input<string>();
+  /** Debounce for `settledValue`, in ms. */
+  readonly settleMs = input(FILTER_SETTLE_MS);
+  /** `value` after typing settles; an empty value is emitted at once. */
+  readonly settledValue = output<string>();
 
   protected readonly inputId = `or-filter-${nextId++}`;
   private readonly field = viewChild.required<ElementRef<HTMLInputElement>>('field');
+
+  constructor() {
+    let first = true;
+    effect((onCleanup) => {
+      const value = this.value();
+      if (first || !value.trim()) {
+        first = false;
+        this.settledValue.emit(value);
+        return;
+      }
+      const timer = setTimeout(() => this.settledValue.emit(value), this.settleMs());
+      onCleanup(() => clearTimeout(timer));
+    });
+  }
 
   protected clear(event?: Event): void {
     if (!this.value()) return;

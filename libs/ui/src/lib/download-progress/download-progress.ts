@@ -27,7 +27,7 @@ import {
       [attr.aria-valuenow]="percent()"
       [attr.aria-valuetext]="saved() + ' of ' + total() + ' on device'"
     >
-      <span class="fill" [style.width.%]="percent()"></span>
+      <span class="fill" [style.transform]="fill()"></span>
     </div>
   `,
   styles: `
@@ -54,12 +54,15 @@ import {
       background: color-mix(in srgb, var(--color-border) 50%, transparent);
       overflow: hidden;
     }
+    /* Scaled, not resized: a compositor-only change on every tick. */
     .fill {
       display: block;
       block-size: 100%;
-      inline-size: 0;
+      inline-size: 100%;
       background: var(--color-primary);
-      transition: width var(--duration-base) linear;
+      transform-origin: left center;
+      will-change: transform;
+      transition: transform var(--duration-base) linear;
     }
     @media (prefers-reduced-motion: reduce) {
       .fill {
@@ -89,4 +92,5 @@ export class OrDownloadProgress {
     const f = typeof value === 'function' ? value() : value;
     return Number.isFinite(f) ? Math.round(Math.min(1, Math.max(0, f)) * 100) : 0;
   });
+  protected readonly fill = computed(() => `scaleX(${this.percent() / 100})`);
 }

@@ -15,6 +15,8 @@ import {
 
 /** Rows rendered at first, and added each time the end comes near. */
 export const LAZY_PAGE_SIZE = 40;
+/** Cards rendered at first in a horizontal crate rail, and added per page. */
+export const RAIL_PAGE_SIZE = 12;
 
 export interface LazyWindow<T> {
   /** The first `limit` items of the source: what the template renders. */
@@ -54,7 +56,8 @@ export function lazyWindow<T>(
 
 /**
  * Sentinel placed after a lazily rendered list: emits `loadMore` when it
- * comes within ~a screen of the viewport (inside any scrolling ancestor).
+ * comes within ~a screen of the viewport (inside any scrolling ancestor),
+ * on either axis so horizontal rails preload too.
  * Bind `loadMoreKey` to the rendered count so the sentinel re-checks after
  * each page and keeps loading while it is still in view.
  */
@@ -84,7 +87,11 @@ export class OrLoadMore {
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) this.loadMore.emit();
       },
-      { rootMargin: '800px 0px' },
+      // rootMargin only grows the viewport; scrollMargin grows each scrolling
+      // ancestor's clip (a crate rail, the screen host) by the same amount,
+      // so the sentinel fires before it reaches their edge. Engines without
+      // scrollMargin ignore it and load once the sentinel is in view.
+      { rootMargin: '800px 640px', scrollMargin: '800px 640px' },
     );
     effect((onCleanup) => {
       this.loadMoreKey();

@@ -75,12 +75,18 @@ import { injectTrackArt } from './track-art';
       font: inherit;
       text-align: left;
       cursor: pointer;
-      transition:
-        background var(--duration-fast) var(--ease-standard),
-        transform var(--duration-fast) var(--ease-standard);
+      transition: transform var(--duration-fast) var(--ease-standard);
     }
-    .card:hover {
-      background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    /* Hover only where a pointer can hover: no sticky hover after a tap. */
+    @media (hover: hover) {
+      .card {
+        transition:
+          background var(--duration-fast) var(--ease-standard),
+          transform var(--duration-fast) var(--ease-standard);
+      }
+      .card:hover {
+        background: color-mix(in srgb, var(--color-text) 5%, transparent);
+      }
     }
     .card:active {
       transform: scale(0.97);
@@ -104,6 +110,8 @@ import { injectTrackArt } from './track-art';
       .card .sleeve {
         --s: 128px;
       }
+    }
+    @media (hover: hover) and (min-width: 900px) {
       .card:hover {
         background: var(--color-surface-raised);
       }

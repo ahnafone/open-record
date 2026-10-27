@@ -1,7 +1,7 @@
 import { Injectable, Injector, computed, inject, signal } from '@angular/core';
 import { lookupMetadata, type MetadataFetch } from '@open-record/metadata-lookup';
 import type { DownloadLocation, Track } from '@open-record/models';
-import { StoragePort, type ImportedTrack } from '@open-record/storage';
+import { type ImportedTrack } from '@open-record/storage';
 import { LOCAL_PROVIDER_ID, LibraryStore } from './library.store';
 import { PlaylistsStore } from './playlists.store';
 import { DeviceStoragePort, LocalMediaPort, METADATA_FETCH, StreamResolverPort } from './ports';
@@ -53,7 +53,6 @@ type LiveStatus = 'queued' | 'saving';
 @Injectable({ providedIn: 'root' })
 export class OfflineStore {
   private readonly library = inject(LibraryStore);
-  private readonly storage = inject(StoragePort);
   private readonly resolver = inject(StreamResolverPort, { optional: true });
   private readonly media = inject(LocalMediaPort, { optional: true });
   private readonly metadataFetch = inject(METADATA_FETCH, { optional: true });
@@ -150,6 +149,17 @@ export class OfflineStore {
    * local tracks, tracks without a source link, and tracks already saved.
    */
   async ensureSaved(track: Track): Promise<void> {
+    return this.save(track);
+  }
+
+  /**
+   * `ensureSaved`, optionally storing `interrupted` attempts/cooldown on the
+   * `saving` record (an interrupted save resumed at launch).
+   */
+  private async save(
+    track: Track,
+    interrupted?: { attempts: number; retryAt: number },
+  ): Promise<void> {
     if (!isSavable(track)) return;
     await this.library.ready();
     const existing = this.library.storedRecord(track.id);
@@ -161,6 +171,8 @@ export class OfflineStore {
       filePath: '',
       importedAt: existing?.importedAt ?? Date.now(),
       status: 'saving',
+      ...(interrupted ??
+        (existing?.attempts ? { attempts: existing.attempts } : {})),
     };
     await this.library.storeRecord(record);
     this.failKinds.delete(track.id);
@@ -213,10 +225,11 @@ export class OfflineStore {
 
   /**
    * Delete the files and records of remote tracks that are neither
-   * bookmarked nor in any playlist. Resolves to the number of records removed.
+   * bookmarked nor in any playlist, limited to `trackIds` when given (e.g. the
+   * tracks just un-bookmarked). Resolves to the number of records removed.
    * Skipped until the library and playlists have loaded (never on a failed load).
    */
-  async reconcile(): Promise<number> {
+  async reconcile(trackIds?: readonly string[]): Promise<number> {
     const playlists = this.playlists();
     await Promise.all([this.library.ready(), playlists.ready()]);
     if (this.library.status() !== 'ready' || playlists.status() !== 'ready')
@@ -226,9 +239,10 @@ export class OfflineStore {
       ...this.library.savedIds(),
       ...playlists.playlists().flatMap((p) => p.trackIds),
     ]);
+    const target = trackIds ? new Set(trackIds) : null;
     let removed = 0;
-    for (const record of await this.storage.importedTracks.list()) {
-      const { track } = record;
+    for (const { track } of this.library.storedRecords()) {
+      if (target && !target.has(track.id)) continue;
       if (track.providerId === LOCAL_PROVIDER_ID || referenced.has(track.id))
         continue;
       this.dropLive(track.id);
@@ -245,17 +259,39 @@ export class OfflineStore {
   }
 
   /**
-   * Startup: reconcile, then resume saves left `saving` or `failed` (a failed
-   * save is retried on every launch; cancel or unbookmark to stop it).
+   * Startup: reconcile, then (off the boot path, once the app is idle) resume
+   * saves left `saving` or `failed`. A failed save waits out its `retryAt`
+   * cooldown; cancel or unbookmark to stop it.
    */
   async start(): Promise<void> {
     await this.reconcile();
-    for (const record of await this.storage.importedTracks.list()) {
+    const retry = () => void this.retryInterrupted();
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(retry, { timeout: 8000 });
+    } else {
+      setTimeout(retry, 4000);
+    }
+  }
+
+  private async retryInterrupted(): Promise<void> {
+    const now = Date.now();
+    for (const record of this.library.storedRecords()) {
       if (record.track.providerId === LOCAL_PROVIDER_ID) continue;
       const status = record.status ?? 'saved';
+      if (status !== 'saving' && status !== 'failed') continue;
       if (status === 'failed' && record.error === WAITING_FOR_WIFI) continue;
-      if (status === 'saving' || status === 'failed') {
-        await this.ensureSaved(record.track);
+      // Failed saves and interrupted saves share the cooldown.
+      if ((record.retryAt ?? 0) > now) continue;
+      // An interrupted save counts as an attempt, like a real failure in `fail()`.
+      const attempts = (record.attempts ?? 0) + 1;
+      const interrupted =
+        status === 'saving'
+          ? { attempts, retryAt: now + retryDelayMs(attempts) }
+          : undefined;
+      try {
+        await this.save(record.track, interrupted);
+      } catch {
+        // Left as it is; retried on a later launch.
       }
     }
   }
@@ -371,6 +407,9 @@ export class OfflineStore {
   private async fail(trackId: string, message: string): Promise<void> {
     const record = this.library.storedRecord(trackId);
     if (!record) return;
+    // Cancels and Wi-Fi waits are not real attempts: no cooldown for them.
+    const counts = message !== 'Cancelled.' && message !== WAITING_FOR_WIFI;
+    const attempts = (record.attempts ?? 0) + (counts ? 1 : 0);
     try {
       await this.library.storeRecord({
         track: record.track,
@@ -378,6 +417,8 @@ export class OfflineStore {
         importedAt: record.importedAt,
         status: 'failed',
         error: message,
+        ...(attempts ? { attempts } : {}),
+        ...(counts ? { retryAt: Date.now() + retryDelayMs(attempts) } : {}),
       });
     } catch {
       // The record stays as it was; the UI shows the pre-failure state.
@@ -477,6 +518,13 @@ export class OfflineStore {
 /** Remote tracks with a page link can be saved; local imports and catalogue tracks cannot. */
 export function isSavable(track: Track): boolean {
   return track.providerId !== LOCAL_PROVIDER_ID && !!track.source?.url;
+}
+
+/** Cooldown before a failed save is retried at launch: 1 min, 5 min, 30 min, then 2 h. */
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
+
+function retryDelayMs(attempts: number): number {
+  return RETRY_DELAYS_MS[Math.min(attempts, RETRY_DELAYS_MS.length) - 1];
 }
 
 function clamp(fraction: number): number {

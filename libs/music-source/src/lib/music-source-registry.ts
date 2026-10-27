@@ -26,11 +26,12 @@ export class MusicSourceRegistry {
   /**
    * Search every provider that supports search and merge the results in
    * registration order. A failing provider is skipped so one broken source
-   * does not hide results from the others.
+   * does not hide results from the others. `signal` is passed to every
+   * provider so a stale search can be cancelled.
    */
-  async searchAll(query: string): Promise<Track[]> {
+  async searchAll(query: string, signal?: AbortSignal): Promise<Track[]> {
     const searchable = this.list().filter((p) => p.capabilities.search);
-    const results = await Promise.allSettled(searchable.map((p) => p.search(query)));
+    const results = await Promise.allSettled(searchable.map((p) => p.search(query, signal)));
     return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
   }
 

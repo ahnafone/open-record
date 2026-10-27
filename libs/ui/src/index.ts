@@ -43,6 +43,7 @@ export { OrFilterField } from './lib/filter-field/filter-field';
 export {
   OrLoadMore,
   LAZY_PAGE_SIZE,
+  RAIL_PAGE_SIZE,
   lazyWindow,
   type LazyWindow,
 } from './lib/lazy-list/lazy-list';

@@ -1,4 +1,4 @@
-import { formatTime } from './now-playing-page';
+import { formatTime } from './time';
 
 describe('formatTime', () => {
   it('formats seek times and guards bad input', () => {

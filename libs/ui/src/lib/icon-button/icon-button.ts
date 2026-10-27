@@ -54,12 +54,20 @@ export type IconButtonVariant = 'plain' | 'transport' | 'transport-main';
       place-items: center;
       cursor: pointer;
       transition:
-        background var(--duration-fast) var(--ease-standard),
         transform var(--duration-fast) var(--ease-standard),
         color var(--duration-fast) var(--ease-standard);
     }
-    .ib:hover {
-      background: color-mix(in srgb, var(--color-text) 7%, transparent);
+    /* Hover only where a pointer can hover (no sticky hover after a tap). */
+    @media (hover: hover) {
+      .ib {
+        transition:
+          background var(--duration-fast) var(--ease-standard),
+          transform var(--duration-fast) var(--ease-standard),
+          color var(--duration-fast) var(--ease-standard);
+      }
+      .ib:hover {
+        background: color-mix(in srgb, var(--color-text) 7%, transparent);
+      }
     }
     .ib:active {
       transform: scale(0.94);
@@ -86,8 +94,10 @@ export type IconButtonVariant = 'plain' | 'transport' | 'transport-main';
       background: var(--color-surface);
       border: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
     }
-    :host(.variant-transport) .ib:hover {
-      background: var(--color-surface-raised);
+    @media (hover: hover) {
+      :host(.variant-transport) .ib:hover {
+        background: var(--color-surface-raised);
+      }
     }
     :host(.variant-transport) .ib[aria-pressed='true'] {
       border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
@@ -100,8 +110,10 @@ export type IconButtonVariant = 'plain' | 'transport' | 'transport-main';
       border-color: var(--color-primary);
       color: var(--color-on-primary);
     }
-    :host(.variant-transport-main) .ib:hover {
-      background: var(--color-primary-hover);
+    @media (hover: hover) {
+      :host(.variant-transport-main) .ib:hover {
+        background: var(--color-primary-hover);
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {

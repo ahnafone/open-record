@@ -17,7 +17,8 @@ export interface DownloadSink {
 export interface MusicSourceProvider {
   id: string;
   capabilities: { search: boolean; download: boolean };
-  search(query: string): Promise<Track[]>;
+  /** `signal` aborts a stale request; providers without I/O may ignore it. */
+  search(query: string, signal?: AbortSignal): Promise<Track[]>;
   /** Every track the provider can offer without a query (e.g. a bundled catalogue). */
   list?(): Promise<Track[]>;
   /** Resolve a track id (Track.id) to something the player can load. */

@@ -510,6 +510,8 @@ export class DownloadSources {
       const server = this.server;
       if (!server) return [];
       const tracks = await server.searchSite(params.q, params.site, abortSignal);
+      // A stale response must not grow the known-track index.
+      abortSignal.throwIfAborted();
       this.library.remember(tracks);
       return tracks;
     },

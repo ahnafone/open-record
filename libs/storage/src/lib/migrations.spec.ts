@@ -3,6 +3,7 @@ import {
   COLLECTIONS,
   MIGRATIONS,
   Migration,
+  SETTINGS_KEYS,
   latestVersion,
   runMigrations,
 } from './migrations';
@@ -157,8 +158,28 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([4, 5]);
+    expect(result.applied).toEqual([4, 5, 6]);
     expect(await backend.get(COLLECTIONS.importedTracks, 'local:1')).toMatchObject({ status: 'saved', filePath: 'imported/1.audio.mp3' });
     expect(await backend.get(COLLECTIONS.importedTracks, 'remote:2')).toMatchObject({ status: 'saving', filePath: '' });
+  });
+
+  it('v6 copies metadata tracks from the settings blob into their own collection', async () => {
+    const backend = new InMemoryBackend();
+    await runMigrations(backend, MIGRATIONS.slice(0, 5));
+    const blob = [
+      { id: 'spotify:1', providerId: 'spotify', title: 'One', artist: 'A' },
+      { id: 'spotify:2', providerId: 'spotify', title: 'Two', artist: 'B' },
+      { title: 'No id' },
+    ];
+    await backend.put(COLLECTIONS.settings, SETTINGS_KEYS.metadataTracks, blob);
+
+    const result = await runMigrations(backend, MIGRATIONS);
+
+    expect(result.applied).toEqual([6]);
+    expect(await backend.getAll(COLLECTIONS.metadataTracks)).toEqual([blob[0], blob[1]]);
+    expect(await backend.get(COLLECTIONS.metadataTracks, 'spotify:2')).toEqual(blob[1]);
+    // The legacy blob is kept as a fallback for older builds.
+    expect(await backend.get(COLLECTIONS.settings, SETTINGS_KEYS.metadataTracks)).toEqual(blob);
+    expect((await runMigrations(backend, MIGRATIONS)).applied).toEqual([]);
   });
 });

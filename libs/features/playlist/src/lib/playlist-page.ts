@@ -18,11 +18,18 @@ import {
   PlayerStore,
   PlaylistsStore,
   REMOTE_PROVIDER_ID,
+  ariaSortFor,
   downloadState,
   filterWords,
+  formatAddedAt,
   formatDuration,
+  nextSort,
+  sortArrowFor,
+  sortByColumn,
   sourceLabel,
   trackMatches,
+  type TrackSort,
+  type TrackSortKey,
 } from '@open-record/state';
 import {
   OrDownloadProgress,
@@ -45,14 +52,9 @@ import {
 } from '@open-record/ui';
 import { AddRecordsDialog } from './add-records-dialog';
 import { RenamePlaylistDialog } from './rename-playlist-dialog';
-import { formatAddedAt } from './row-format';
 import { injectTrackArt } from './track-art';
 
-type SortKey = 'title' | 'album' | 'source' | 'added' | 'duration';
-interface SortState {
-  key: SortKey;
-  dir: 'asc' | 'desc';
-}
+type SortKey = TrackSortKey;
 
 /** A record row with its static (per playlist load) display values. */
 interface Row {
@@ -64,8 +66,6 @@ interface Row {
   addedAt: number | undefined;
   added: string;
 }
-
-const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
 
 function sortValue(row: Row, key: SortKey): string | number | undefined {
   switch (key) {
@@ -146,11 +146,9 @@ const ROW_STYLES = `
       visibility: hidden;
       color: var(--color-text);
     }
-    .track:hover .num-hover,
     .track:focus-within .num-hover {
       visibility: visible;
     }
-    .track:hover .num-idle,
     .track:focus-within .num-idle {
       visibility: hidden;
     }
@@ -174,10 +172,6 @@ const ROW_STYLES = `
       font: inherit;
       text-align: left;
       cursor: pointer;
-      transition: background var(--duration-fast) var(--ease-standard);
-    }
-    .track-main:hover {
-      background: color-mix(in srgb, var(--color-text) 5%, transparent);
     }
     .track-main:focus-visible,
     .sort:focus-visible {
@@ -250,7 +244,6 @@ const ROW_STYLES = `
       cursor: pointer;
       transition: color var(--duration-fast) var(--ease-standard);
     }
-    .sort:hover,
     [aria-sort='ascending'] .sort,
     [aria-sort='descending'] .sort {
       color: var(--color-text);
@@ -258,6 +251,27 @@ const ROW_STYLES = `
     .sort-dir {
       font-size: 12px;
       letter-spacing: 0;
+    }
+    /*
+     * Hover only where a pointer can hover: touch screens neither keep a
+     * sticky hover after a tap nor declare a transition per row.
+     */
+    @media (hover: hover) {
+      .track:hover .num-hover {
+        visibility: visible;
+      }
+      .track:hover .num-idle {
+        visibility: hidden;
+      }
+      .track-main {
+        transition: background var(--duration-fast) var(--ease-standard);
+      }
+      .track-main:hover {
+        background: color-mix(in srgb, var(--color-text) 5%, transparent);
+      }
+      .sort:hover {
+        color: var(--color-text);
+      }
     }
     .sr-only {
       position: absolute;
@@ -298,14 +312,18 @@ const ROW_STYLES = `
         border-top: 0;
         border-radius: var(--rounded-md);
         contain-intrinsic-size: auto 68px;
-        transition: background var(--duration-fast) var(--ease-standard);
-      }
-      .track:hover {
-        background: var(--color-surface-raised);
       }
       .track-main {
         min-block-size: 64px;
         padding: 2px 0;
+      }
+    }
+    @media (min-width: 900px) and (hover: hover) {
+      .track {
+        transition: background var(--duration-fast) var(--ease-standard);
+      }
+      .track:hover {
+        background: var(--color-surface-raised);
       }
       .track-main:hover {
         background: transparent;
@@ -428,6 +446,7 @@ const NO_IDS: readonly string[] = [];
           placeholder="Filter by title, artist or album"
           describedBy="or-playlist-filter-status"
           [(value)]="query"
+          (settledValue)="listQuery.set($event)"
         />
         <p id="or-playlist-filter-status" class="filter-status" role="status">
           @if (filtering()) {
@@ -798,10 +817,12 @@ export class PlaylistPage {
   protected readonly remoteId = REMOTE_PROVIDER_ID;
   protected readonly downloadState = downloadState;
   /** `null` is the playlist's custom order. */
-  protected readonly sort = signal<SortState | null>(null);
-  /** Filter text over title, artist and album (component state only). */
+  protected readonly sort = signal<TrackSort | null>(null);
+  /** Filter text as typed (the field and the "no match" copy). */
   protected readonly query = signal('');
-  private readonly words = computed(() => filterWords(this.query()));
+  /** The filter the rows use: `query` once typing pauses (see `OrFilterField`). */
+  protected readonly listQuery = signal('');
+  private readonly words = computed(() => filterWords(this.listQuery()));
   protected readonly filtering = computed(() => this.words().length > 0);
 
   /** Rows in playlist order; formatted once per playlist change, not per check. */
@@ -820,27 +841,13 @@ export class PlaylistPage {
     });
   });
   /** Rows in display order, filtered (what Play, Shuffle and row taps play). */
-  protected readonly rows = computed<Row[]>(() => {
+  protected readonly rows = computed<readonly Row[]>(() => {
     const words = this.words();
     const rows = words.length
       ? this.baseRows().filter((r) => trackMatches(r.track, words))
       : this.baseRows();
-    const sort = this.sort();
-    if (!sort) return rows;
-    const dir = sort.dir === 'asc' ? 1 : -1;
     // Stable sort: ties keep playlist order; unknown values always sink.
-    return [...rows].sort((a, b) => {
-      const av = sortValue(a, sort.key);
-      const bv = sortValue(b, sort.key);
-      if (av === undefined || bv === undefined) {
-        return av === bv ? 0 : av === undefined ? 1 : -1;
-      }
-      const c =
-        typeof av === 'number' && typeof bv === 'number'
-          ? av - bv
-          : collator.compare(String(av), String(bv));
-      return c * dir;
-    });
+    return sortByColumn(rows, this.sort(), sortValue);
   });
   private readonly displayedTracks = computed(() => this.rows().map((r) => r.track));
   /** Rendered rows; back to the first page when the filter or sort changes. */
@@ -851,22 +858,15 @@ export class PlaylistPage {
 
   /** Header click: ascending, then descending, then back to custom order. */
   protected cycleSort(key: SortKey): void {
-    const s = this.sort();
-    if (s?.key !== key) this.sort.set({ key, dir: 'asc' });
-    else if (s.dir === 'asc') this.sort.set({ key, dir: 'desc' });
-    else this.sort.set(null);
+    this.sort.set(nextSort(this.sort(), key));
   }
 
   protected ariaSort(key: SortKey): 'ascending' | 'descending' | null {
-    const s = this.sort();
-    if (s?.key !== key) return null;
-    return s.dir === 'asc' ? 'ascending' : 'descending';
+    return ariaSortFor(this.sort(), key);
   }
 
   protected sortArrow(key: SortKey): string {
-    const s = this.sort();
-    if (s?.key !== key) return '';
-    return s.dir === 'asc' ? '↑' : '↓';
+    return sortArrowFor(this.sort(), key);
   }
 
   protected async setAutoDownload(on: boolean): Promise<void> {

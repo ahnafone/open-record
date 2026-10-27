@@ -303,22 +303,33 @@ export class SettingsStore {
   private async hydrate(): Promise<void> {
     this.testAbort?.abort();
     this._connection.set({ status: 'idle' });
-    let stored: DownloadServerSettings | undefined;
+    // Independent rows: read them in parallel (one round trip of latency on
+    // the native bridge instead of four). Each read handles its own failure.
+    const [server, quality, autoDownload, downloadLocation] = await Promise.all([
+      this.readServer(),
+      this.readQuality(),
+      this.readAutoDownload(),
+      this.readDownloadLocation(),
+    ]);
+    this.apply(server, false);
+    this._quality.set(quality);
+    this._autoDownload.set(autoDownload);
+    this._downloadLocation.set(downloadLocation);
+    this._hydrated.set(true);
+  }
+
+  private async readServer(): Promise<DownloadServerSettings> {
     try {
       const raw = await this.storage.settings.get<{
         url?: string;
         token?: string;
       }>(SETTINGS_KEYS.downloadServer);
       if (raw && typeof raw.url === 'string')
-        stored = { url: raw.url, token: raw.token ?? '' };
+        return { url: raw.url, token: raw.token ?? '' };
     } catch {
       // Unreadable settings fall back to defaults.
     }
-    this.apply(stored ?? NO_SERVER, false);
-    this._quality.set(await this.readQuality());
-    this._autoDownload.set(await this.readAutoDownload());
-    this._downloadLocation.set(await this.readDownloadLocation());
-    this._hydrated.set(true);
+    return NO_SERVER;
   }
 
   private async readQuality(): Promise<AudioQualitySettings> {

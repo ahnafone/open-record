@@ -202,9 +202,9 @@ export class RemoteProvider {
   }
 
   /** MusicSourceProvider search on the default site. Empty when no server is configured. */
-  async search(query: string): Promise<Track[]> {
+  async search(query: string, signal?: AbortSignal): Promise<Track[]> {
     if (!this._client) return [];
-    return this.searchSite(query, this.options.defaultSite ?? 'youtube');
+    return this.searchSite(query, this.options.defaultSite ?? 'youtube', signal);
   }
 
   async searchSite(query: string, site: DownloadSite, signal?: AbortSignal): Promise<Track[]> {

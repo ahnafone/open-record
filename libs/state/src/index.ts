@@ -10,6 +10,7 @@ export * from './lib/provide-state';
 export * from './lib/offline.store';
 export * from './lib/failed-downloads.store';
 export * from './lib/track-format';
+export * from './lib/track-sort';
 export * from './lib/track-filter';
 export * from './lib/auto-download.store';
 export * from './lib/remote-errors';

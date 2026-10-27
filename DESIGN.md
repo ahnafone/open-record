@@ -365,8 +365,10 @@ overlays.
 - **Flat UI:** cards and rows differentiate by surface colour plus a
   semi-transparent border, not by shadow.
 - **Physical records:** sleeves cast real shadows (`0 16px 30px rgba(0,0,0,.55)`
-  on the booth, `0 18px 34px` on Now Playing, `0 4px 10px rgba(0,0,0,.4)` on
-  thumbnails). The disc sits behind the sleeve (z-index 1 vs 2) and has
+  on the booth, `0 18px 34px` on Now Playing). Thumbnails in lists and rails
+  are flat for rendering cost: no sleeve shadow, and the peeking disc is plain
+  vinyl with only the faint inner rim (no gradient grooves or shadow). The disc
+  sits behind the sleeve (z-index 1 vs 2); on the booth and Now Playing it has
   `0 10px 24px rgba(0,0,0,.5)` plus a faint inner rim.
 - **Overlays:** modals sit on a `rgba(9,11,14,.68)` backdrop with
   `0 24px 50px rgba(0,0,0,.55)`. The toast is an ivory slip near the bottom
@@ -422,7 +424,15 @@ overlays.
   title, `artist · album` (album when known), detail and tags; the current
   item's title turns coral. Library and Search rows carry the same source and
   download-state tags as playlist rows and a trailing tabular duration
-  (`h:mm:ss` from an hour); missing fields are simply omitted.
+  (`h:mm:ss` from an hour); missing fields are simply omitted. Library rows
+  (Saved and Imported) end with a bookmark toggle and an options button
+  (Play next); the playing row gets a faint coral tint and an "On the
+  turntable" / "Paused" line. On desktop each Library list gains Album,
+  Source and Date added columns (saved date for Saved, import date for
+  Imported; an em dash when unknown) under a header row (Title, Album,
+  Source, Date added, Duration) whose buttons sort that list ascending,
+  descending, then back to its own order (`aria-sort`); row taps follow the
+  displayed order.
 - **Playlist rows:** number cell, sleeve, title, `artist · album`, then tags
   (source: YouTube / YT Music / SoundCloud / Link; download state: On device
   with a check, Downloading with a spinner, Failed in coral with an alert
@@ -560,7 +570,9 @@ nothing changes.
   current link sits on surface with a coral icon.
 - **Content:** scrolls on its own with 16px top and 24px side padding. Crate
   rails become `auto-fill` grids (min 168px cards, 128px sleeves); record rows
-  flow into `auto-fill` columns (min 360px) at 64px; playlist cards in 280px
+  (Search, etc.) flow into `auto-fill` columns (min 360px) at 64px, while
+  Library, Playlist and Import session stay one full-width list (Library and
+  Playlist as sortable tables); playlist cards in 280px
   columns. The listening booth puts the sleeve left and details right. The top
   bar only appears on pushed screens (back plus serif title). Settings, Account and
   Import cap their content at 800px.

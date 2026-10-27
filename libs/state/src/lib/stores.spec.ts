@@ -59,6 +59,43 @@ describe('store persistence', () => {
     expect(second.library.savedRecords().map((t) => t.id)).toEqual(['fake:a']);
   });
 
+  it('download status writes do not rebuild the index or derived lists', async () => {
+    const { library } = boot(createInMemoryStorage());
+    await library.ready();
+    const [a, b] = library.tracks();
+    await library.setSaved(b.id, true);
+    await library.storeRecord({
+      track: b,
+      filePath: '',
+      importedAt: 1,
+      status: 'saving',
+    });
+    const index = library.tracks();
+    const map = library.trackMap();
+    const saved = library.savedRecords();
+    const imported = library.importedTracks();
+    expect(imported).toEqual([b]);
+
+    await library.storeRecord({
+      track: b,
+      filePath: '',
+      importedAt: 1,
+      status: 'failed',
+    });
+    expect(library.tracks()).toBe(index);
+    expect(library.trackMap()).toBe(map);
+    expect(library.savedRecords()).toBe(saved);
+    expect(library.importedTracks()).toBe(imported);
+
+    await library.storeRecord({
+      track: a,
+      filePath: '',
+      importedAt: 2,
+      status: 'saving',
+    });
+    expect(library.importedTracks()).toEqual([a, b]);
+  });
+
   it('adding a track records addedAt and removing it clears the entry', async () => {
     const { playlists } = boot(createInMemoryStorage());
     const pl = await playlists.create('Dated');
@@ -147,5 +184,38 @@ describe('imported tracks', () => {
     expect((await storage.playlists.get(pl.id))?.trackIds).toEqual([]);
     expect(library.importedTracks()).toEqual([]);
     expect(media.cleanup).toHaveBeenCalledWith([]);
+  });
+
+  it('importFiles rolls back the files of a batch whose write fails', async () => {
+    const storage = createInMemoryStorage();
+    const files: Track[] = Array.from({ length: 25 }, (_, i) => ({
+      id: `local:f${i}`,
+      providerId: 'local',
+      title: `F${i}`,
+      artist: 'Band',
+      sourceFile: `f${i}.mp3`,
+    }));
+    const { library, media } = bootWithPorts(storage);
+    media.pickAndImport = async () => ({ tracks: files, failures: [] });
+    const remove = vi.spyOn(media, 'remove');
+    const saveMany = storage.importedTracks.saveMany;
+    let calls = 0;
+    storage.importedTracks.saveMany = (records) =>
+      ++calls === 2
+        ? Promise.reject(new Error('disk full'))
+        : saveMany(records);
+    await library.ready();
+
+    const { imported, failures } = await library.importFiles();
+
+    expect(imported.map((t) => t.id)).toEqual(
+      files.slice(0, 20).map((t) => t.id),
+    );
+    expect(failures.map((f) => f.fileName)).toEqual(
+      files.slice(20).map((t) => t.sourceFile),
+    );
+    expect(remove.mock.calls.map(([t]) => t)).toEqual(files.slice(20));
+    expect(await storage.importedTracks.list()).toHaveLength(20);
+    expect(library.importedTracks()).toHaveLength(20);
   });
 });

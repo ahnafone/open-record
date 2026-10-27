@@ -1,21 +1,49 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# R8 keep rules for the release build (minifyEnabled true).
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Capacitor instantiates plugins reflectively from capacitor.plugins.json and
+# dispatches JS calls to @PluginMethod methods by name, so plugin classes and
+# their methods must survive shrinking and obfuscation.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Capacitor runtime and bridge.
+-keep class com.getcapacitor.** { *; }
+-keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
+-keep public class * extends com.getcapacitor.Plugin { *; }
+-keepclassmembers class * {
+    @com.getcapacitor.PluginMethod public <methods>;
+    @com.getcapacitor.annotation.PermissionCallback <methods>;
+    @com.getcapacitor.annotation.ActivityCallback <methods>;
+}
+# WebView JS interfaces.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# The app's own plugins (BackgroundWork, NotificationPermission, DeviceStorage),
+# MainActivity and the DownloadService foreground service.
+-keep class app.openrecord.** { *; }
+
+# Official Capacitor plugins (@capacitor/app, filesystem, network, preferences).
+-keep class com.capacitorjs.plugins.** { *; }
+
+# capacitor-plugin-playlist (native playback, media3 session, handoff workers).
+-keep class org.dwbn.plugins.playlist.** { *; }
+
+# @capacitor-community/sqlite and its SQLCipher JNI bindings.
+-keep class com.getcapacitor.community.database.sqlite.** { *; }
+-keep class net.zetetic.** { *; }
+-dontwarn net.zetetic.**
+
+# @capacitor-mlkit/barcode-scanning.
+-keep class io.capawesome.capacitorjs.plugins.mlkit.barcodescanning.** { *; }
+
+# @capawesome/capacitor-file-picker.
+-keep class io.capawesome.capacitorjs.plugins.filepicker.** { *; }
+
+# Cordova compatibility layer (capacitor-cordova-android-plugins).
+-keep public class * extends org.apache.cordova.* {
+    public <methods>;
+    public <fields>;
+}
+-dontwarn org.apache.cordova.**

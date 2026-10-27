@@ -43,6 +43,10 @@ export interface ImportedTrack {
   status?: ImportedTrackStatus;
   /** Human-readable reason, set when `status` is `failed`. */
   error?: string;
+  /** Failed download attempts so far (no migration: absent = 0). */
+  attempts?: number;
+  /** Epoch ms before which a failed download is not retried (no migration: absent = retry now). */
+  retryAt?: number;
 }
 
 export interface PlaylistRepository {
@@ -78,6 +82,8 @@ export interface ImportedTracksRepository {
   list(): Promise<ImportedTrack[]>;
   get(trackId: string): Promise<ImportedTrack | undefined>;
   save(imported: ImportedTrack): Promise<void>;
+  /** Create or replace several records in one write (all or nothing where supported). */
+  saveMany(records: readonly ImportedTrack[]): Promise<void>;
   delete(trackId: string): Promise<void>;
   /** Delete every imported-track record. */
   clear(): Promise<void>;
@@ -111,6 +117,17 @@ export interface ImportSessionsRepository {
   clear(): Promise<void>;
 }
 
+/** Tracks known by metadata only (no stored file), keyed by track id. */
+export interface MetadataTracksRepository {
+  /** In key order. */
+  list(): Promise<Track[]>;
+  get(id: string): Promise<Track | undefined>;
+  /** Insert or replace several tracks in one write. */
+  saveMany(tracks: readonly Track[]): Promise<void>;
+  deleteMany(ids: readonly string[]): Promise<void>;
+  clear(): Promise<void>;
+}
+
 export interface QueueStateRepository {
   get(): Promise<QueueState | undefined>;
   save(state: QueueState): Promise<void>;
@@ -134,6 +151,7 @@ export abstract class StoragePort {
   abstract readonly queueState: QueueStateRepository;
   abstract readonly settings: SettingsRepository;
   abstract readonly importSessions: ImportSessionsRepository;
+  abstract readonly metadataTracks: MetadataTracksRepository;
   /** Delete every record in every collection (keeps the schema). */
   abstract clearAll(): Promise<void>;
   /** Resolves once the store is open and migrated; rejects on failure. */

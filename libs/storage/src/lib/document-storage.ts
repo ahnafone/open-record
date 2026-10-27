@@ -1,4 +1,4 @@
-import { Playlist } from '@open-record/models';
+import { Playlist, Track } from '@open-record/models';
 import { JsonValue, StorageBackend } from './backend';
 import { COLLECTIONS } from './migrations';
 import {
@@ -6,6 +6,7 @@ import {
   ImportedTracksRepository,
   ImportSession,
   ImportSessionsRepository,
+  MetadataTracksRepository,
   PlaylistRepository,
   QueueState,
   QueueStateRepository,
@@ -136,6 +137,15 @@ export class DocumentStorage extends StoragePort {
         imported.track.id,
         imported,
       ),
+    saveMany: async (records) => {
+      if (!records.length) return;
+      await (
+        await this.db()
+      ).putMany(
+        COLLECTIONS.importedTracks,
+        records.map((r) => [r.track.id, r] as const),
+      );
+    },
     delete: async (trackId) =>
       (await this.db()).delete(COLLECTIONS.importedTracks, trackId),
     clear: async () => (await this.db()).clear(COLLECTIONS.importedTracks),
@@ -173,5 +183,26 @@ export class DocumentStorage extends StoragePort {
     delete: async (id) =>
       (await this.db()).delete(COLLECTIONS.importSessions, id),
     clear: async () => (await this.db()).clear(COLLECTIONS.importSessions),
+  };
+
+  readonly metadataTracks: MetadataTracksRepository = {
+    list: async () =>
+      (await this.db()).getAll<Track>(COLLECTIONS.metadataTracks),
+    get: async (id) =>
+      (await this.db()).get<Track>(COLLECTIONS.metadataTracks, id),
+    saveMany: async (tracks) => {
+      if (!tracks.length) return;
+      await (
+        await this.db()
+      ).putMany(
+        COLLECTIONS.metadataTracks,
+        tracks.map((t) => [t.id, t] as const),
+      );
+    },
+    deleteMany: async (ids) => {
+      const db = await this.db();
+      for (const id of ids) await db.delete(COLLECTIONS.metadataTracks, id);
+    },
+    clear: async () => (await this.db()).clear(COLLECTIONS.metadataTracks),
   };
 }

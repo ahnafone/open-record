@@ -13,24 +13,26 @@ import { LibraryStore, PlaylistsStore } from '@open-record/state';
 import {
   OrButton,
   OrEmptyState,
+  OrLoadMore,
   OrModal,
   OrSleeve,
   OrTag,
   OrToast,
+  lazyWindow,
 } from '@open-record/ui';
 import { injectTrackArt } from './track-art';
 
 /** "Add records" modal: pick library records that are not in the playlist yet. */
 @Component({
   selector: 'or-add-records-dialog',
-  imports: [OrButton, OrEmptyState, OrModal, OrSleeve, OrTag],
+  imports: [OrButton, OrEmptyState, OrLoadMore, OrModal, OrSleeve, OrTag],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <or-modal heading="Add records" [(open)]="open">
       @if (candidates().length) {
         <fieldset class="list">
           <legend class="sr-only">Records to add</legend>
-          @for (track of candidates(); track track.id) {
+          @for (track of candidatesWindow.items(); track track.id) {
             <label class="row">
               <input
                 type="checkbox"
@@ -46,6 +48,14 @@ import { injectTrackArt } from './track-art';
                 }
               </span>
             </label>
+          }
+          @if (candidatesWindow.hasMore()) {
+            <div
+              class="sentinel"
+              orLoadMore
+              [loadMoreKey]="candidatesWindow.items().length"
+              (loadMore)="candidatesWindow.grow()"
+            ></div>
           }
         </fieldset>
       } @else {
@@ -100,6 +110,14 @@ import { injectTrackArt } from './track-art';
       padding: 6px var(--spacing-xs);
       border-top: 1px solid color-mix(in srgb, var(--color-border) 30%, transparent);
       cursor: pointer;
+      /* Long libraries: skip layout and paint for off-screen rows. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 72px;
+      /* Paint containment would clip the checkbox focus ring. */
+      overflow-clip-margin: 4px;
+    }
+    .sentinel {
+      block-size: 1px;
     }
     .row:first-of-type {
       border-top: 0;
@@ -167,6 +185,11 @@ export class AddRecordsDialog {
     const have = new Set(this.playlists.playlist(this.playlistId())?.trackIds);
     return this.library.tracks().filter((t) => !have.has(t.id));
   });
+  /**
+   * Rendered rows; back to the first page each time the dialog opens.
+   * Selection lives in `selected`, so it survives rows leaving the window.
+   */
+  protected readonly candidatesWindow = lazyWindow(this.candidates, this.open);
 
   protected readonly submitLabel = computed(() => {
     const n = this.selected().size;

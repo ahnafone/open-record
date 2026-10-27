@@ -153,8 +153,9 @@ export const appConfig: ApplicationConfig = {
     // Library + playlist metadata sync for signed-in users (same client).
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
     provideStorage(),
-    // capacitor-plugin-playlist is not installed (iOS 18 target pending), so
-    // createAudioEngine() falls back to the HTML5 engine on every platform.
+    // capacitor-plugin-playlist is installed: on device createAudioEngine()
+    // uses NativeAudioEngine (foreground-service ExoPlayer, 1 Hz position
+    // ticks). The HTML5 engine is the web / fallback path only.
     providePlayer({
       resolve: (track) => sources.resolve(track),
       // Imported covers for lock-screen / media-key artwork.

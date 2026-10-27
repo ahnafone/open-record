@@ -15,7 +15,7 @@ import {
   host: {
     'aria-hidden': 'true',
   },
-  template: `<span class="fill" [style.width.%]="percent()"></span>`,
+  template: `<span class="fill" [style.transform]="fill()"></span>`,
   styles: `
     :host {
       display: block;
@@ -23,12 +23,15 @@ import {
       background: color-mix(in srgb, var(--color-border) 50%, transparent);
       overflow: hidden;
     }
+    /* Scaled, not resized: a compositor-only change on every tick. */
     .fill {
       display: block;
       block-size: 100%;
-      inline-size: 0;
+      inline-size: 100%;
       background: var(--color-primary);
-      transition: width var(--duration-base) linear;
+      transform-origin: left center;
+      will-change: transform;
+      transition: transform var(--duration-base) linear;
     }
     @media (prefers-reduced-motion: reduce) {
       .fill {
@@ -41,9 +44,12 @@ export class OrProgressLine {
   readonly value = input<number>(0);
   readonly max = input<number>(1);
 
-  protected readonly percent = computed(() => {
+  /** `scaleX(0..1)` for the fill. */
+  protected readonly fill = computed(() => {
     const max = this.max();
-    if (!(max > 0) || !Number.isFinite(this.value())) return 0;
-    return Math.min(100, Math.max(0, (this.value() / max) * 100));
+    const value = this.value();
+    const f =
+      max > 0 && Number.isFinite(value) ? Math.min(1, Math.max(0, value / max)) : 0;
+    return `scaleX(${f})`;
   });
 }

@@ -11,6 +11,9 @@ export interface MediaSessionHandlers {
 /** Default skip used for OS seek-forward / seek-backward buttons. */
 const SEEK_STEP_SEC = 10;
 
+/** Minimum gap between routine `setPositionState` calls (the OS extrapolates). */
+const POSITION_STATE_INTERVAL_MS = 1000;
+
 function guessImageType(url: string): string | undefined {
   const ext = /\.(png|jpe?g|webp|gif|svg)(?:[?#]|$)/i
     .exec(url)?.[1]
@@ -30,6 +33,9 @@ export class MediaSessionController {
   private readonly session: MediaSession | null;
   private handlers: MediaSessionHandlers | null = null;
   private position = 0;
+  /** Last state sent to `setPositionState` (for throttling). */
+  private sent: { position: number; duration: number; at: number } | null =
+    null;
 
   constructor(
     session: MediaSession | null = typeof navigator !== 'undefined' &&
@@ -102,11 +108,32 @@ export class MediaSessionController {
 
   setPlaybackState(state: MediaSessionPlaybackState): void {
     if (this.session) this.session.playbackState = state;
+    // Stopped: send the exact position a throttled tick may have skipped.
+    const last = this.sent;
+    if (state !== 'playing' && last && last.position !== this.position) {
+      this.sent = null;
+      this.setPosition(this.position, last.duration);
+    }
   }
 
+  /**
+   * Throttled to ~1 Hz: a new duration or a jump (seek, track change) is sent
+   * at once, steady playback ticks at most once per second.
+   */
   setPosition(positionSec: number, durationSec: number): void {
     this.position = positionSec;
     if (!this.session?.setPositionState) return;
+    const now = Date.now();
+    const last = this.sent;
+    if (
+      last &&
+      last.duration === durationSec &&
+      now - last.at < POSITION_STATE_INTERVAL_MS &&
+      positionSec >= last.position &&
+      positionSec - last.position <= 2
+    )
+      return;
+    this.sent = { position: positionSec, duration: durationSec, at: now };
     try {
       if (!(durationSec > 0) || !Number.isFinite(durationSec)) {
         this.session.setPositionState();

@@ -8,6 +8,8 @@ import {
 /**
  * A grooved vinyl disc with an ivory centre label and spindle hole.
  * Size it from the outside (width); it keeps a 1:1 ratio. Decorative.
+ * `flat` paints a plain vinyl disc with no grooves or drop shadow: for small
+ * row thumbnails, where those effects are invisible but costly in bulk.
  */
 @Component({
   selector: 'or-disc',
@@ -15,6 +17,7 @@ import {
   host: {
     'aria-hidden': 'true',
     '[class.is-spinning]': 'spinning()',
+    '[class.flat]': 'flat()',
   },
   template: `
     @if (showLabel()) {
@@ -39,8 +42,16 @@ import {
         var(--or-groove) 2px 3.5px
       );
       box-shadow:
-        inset 0 0 0 1px color-mix(in srgb, var(--color-text) 5%, transparent),
+        0 0 0 1px color-mix(in srgb, var(--color-border) 75%, transparent),
+        inset 0 0 0 1px color-mix(in srgb, var(--color-text) 8%, transparent),
         0 10px 24px color-mix(in srgb, var(--color-vinyl) 50%, transparent);
+    }
+    :host(.flat) {
+      contain: paint;
+      background: var(--color-vinyl);
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--color-border) 60%, transparent),
+        inset 0 0 0 1px color-mix(in srgb, var(--color-text) 5%, transparent);
     }
     :host(.is-spinning) {
       animation: or-disc-spin 8s linear infinite;
@@ -87,4 +98,6 @@ export class OrDisc {
   readonly showLabel = input(true, { transform: booleanAttribute });
   /** Rotates once every 8s while true (stopped under reduced motion). */
   readonly spinning = input(false, { transform: booleanAttribute });
+  /** Plain vinyl, no grooves or drop shadow (small thumbnails). */
+  readonly flat = input(false, { transform: booleanAttribute });
 }

@@ -1,4 +1,4 @@
-import { downloadState, formatDuration, sourceLabel } from './track-format';
+import { downloadState, formatAddedAt, formatDuration, sourceLabel } from './track-format';
 
 describe('track row format', () => {
   it('formats durations and hides unknown ones', () => {
@@ -6,6 +6,7 @@ describe('track row format', () => {
     expect(formatDuration(3725)).toBe('1:02:05');
     expect(formatDuration(undefined)).toBe('');
     expect(formatDuration(0)).toBe('');
+    expect(formatAddedAt(undefined)).toBe('—');
   });
 
   it('labels sources and download states', () => {

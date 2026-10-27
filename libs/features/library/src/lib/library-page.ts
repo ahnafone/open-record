@@ -14,16 +14,18 @@ import type { Playlist, Track } from '@open-record/models';
 import {
   AutoDownloadStore,
   LibraryStore,
-  OfflineStore,
   PlayerStore,
   PlaylistsStore,
-  REMOTE_PROVIDER_ID,
   SettingsStore,
   SyncStore,
-  downloadState,
+  ariaSortFor,
   filterTracks,
-  formatDuration,
+  nextSort,
+  sortArrowFor,
+  sortByColumn,
   sourceLabel,
+  type TrackSort,
+  type TrackSortKey,
 } from '@open-record/state';
 import {
   OrDownloadProgress,
@@ -31,131 +33,130 @@ import {
   OrEmptyState,
   OrFilterField,
   OrIcon,
-  OrIconButton,
   OrLoadMore,
+  OrModal,
   OrSectionHead,
-  OrSleeve,
-  OrSpinner,
   OrSwitch,
   OrTag,
   OrToast,
   lazyWindow,
 } from '@open-record/ui';
 import { AddFromPlaylistDialog } from './add-from-playlist-dialog';
+import { OrLibraryRow } from './library-row';
 import { NewPlaylistDialog } from './new-playlist-dialog';
 import { injectTrackArt } from './track-art';
 
-/** Saved / imported record row styles (kept apart from the page sheet). */
+/** Which record list a sort header or row belongs to. */
+type ListId = 'saved' | 'imported';
+
+/** Saved / imported record list styles; the row body lives in `OrLibraryRow`. */
 const ROW_STYLES = `
-    /* Record rows: title, artist · album, tags + detail; duration; bookmark. */
+    /*
+     * Record rows. Phone: title, artist · album, tags + detail; duration;
+     * bookmark; options. Desktop (>= 900px): Album, Source and Date added
+     * columns under a sortable header row.
+     */
     .crate {
       display: grid;
     }
-    .record {
+    .record,
+    .head-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto 44px;
+      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
       align-items: center;
       gap: var(--spacing-xs);
+    }
+    .list-head {
+      display: none;
+    }
+    .record {
       padding: var(--spacing-xxs) 0;
       border-top: 1px solid
         color-mix(in srgb, var(--color-border) 32%, transparent);
+      /* Long libraries: skip layout and paint for off-screen rows. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 77px;
+      /* Paint containment would clip the play button's focus ring. */
+      overflow-clip-margin: 4px;
     }
     .record:first-child {
       border-top: 0;
     }
-    .record-main {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 10px;
-      align-items: center;
-      min-block-size: 72px;
-      min-inline-size: 0;
-      padding: var(--spacing-xs);
-      background: transparent;
-      border: 0;
+    /* Playing row: faint coral tint (flat, no shadow). */
+    .record:has(or-library-row.is-current) {
+      background: color-mix(in srgb, var(--color-primary) 8%, transparent);
       border-radius: var(--rounded-md);
-      color: inherit;
-      font: inherit;
-      text-align: left;
-      cursor: pointer;
-      transition: background var(--duration-fast) var(--ease-standard);
     }
-    .record-main:hover {
-      background: color-mix(in srgb, var(--color-text) 5%, transparent);
-    }
-    .record-main:focus-visible,
-    .pl-row:focus-visible {
+    .pl-row:focus-visible,
+    .sort:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
     }
-    .info {
-      display: grid;
-      min-inline-size: 0;
-    }
-    .title,
-    .artist {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .title {
-      font-size: var(--type-row-title-font-size);
-      font-weight: var(--type-row-title-font-weight);
-      line-height: var(--type-row-title-line-height);
-    }
-    .is-current .title {
-      color: var(--color-primary);
-    }
-    .artist {
-      font-size: 13px;
-      color: var(--color-muted);
-    }
-    .detail {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: var(--spacing-xxs) var(--spacing-xs);
-      margin-top: 3px;
-      min-block-size: 23px;
-      font-size: var(--type-meta-font-size);
-      letter-spacing: var(--type-meta-letter-spacing);
-      color: var(--color-muted);
-    }
-    .detail-text {
-      min-inline-size: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    or-tag.tag-failed {
-      color: var(--color-primary);
-      border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
-    }
-    .dur {
-      font-size: 12px;
-      color: var(--color-muted);
-      font-variant-numeric: tabular-nums;
-      text-align: right;
-    }
-    .now {
+    .sort {
+      appearance: none;
       display: inline-flex;
       align-items: center;
-      gap: var(--spacing-xs);
+      gap: 4px;
+      min-block-size: 44px;
+      max-inline-size: 100%;
+      padding: 0 var(--spacing-xs);
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      color: var(--color-muted);
+      font: inherit;
+      font-size: var(--type-eyebrow-font-size);
+      letter-spacing: var(--type-eyebrow-letter-spacing);
+      text-transform: uppercase;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: color var(--duration-fast) var(--ease-standard);
+    }
+    [aria-sort='ascending'] .sort,
+    [aria-sort='descending'] .sort {
       color: var(--color-text);
     }
-
+    .sort-dir {
+      font-size: 12px;
+      letter-spacing: 0;
+    }
+    .sr-only {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    @media (hover: hover) {
+      .sort:hover {
+        color: var(--color-text);
+      }
+    }
     @media (min-width: 900px) {
       .record,
-      .record:first-child {
-        border-top: 0;
+      .head-row {
+        grid-template-columns:
+          minmax(0, 3fr) minmax(0, 2fr) minmax(72px, 1fr)
+          104px 64px 44px 44px;
+        gap: var(--spacing-sm);
+        padding-inline: var(--spacing-xs);
+      }
+      .list-head {
+        display: block;
+      }
+      .head-row {
         border-bottom: 1px solid
-          color-mix(in srgb, var(--color-border) 32%, transparent);
+          color-mix(in srgb, var(--color-border) 55%, transparent);
       }
-      .record-main {
-        min-block-size: 64px;
+      .h-duration {
+        display: flex;
+        justify-content: flex-end;
       }
-      .record-main:hover {
-        background: var(--color-surface-raised);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .sort {
+        transition-duration: 1ms;
       }
     }
 `;
@@ -176,11 +177,10 @@ const ROW_STYLES = `
     OrEmptyState,
     OrFilterField,
     OrIcon,
-    OrIconButton,
+    OrLibraryRow,
     OrLoadMore,
+    OrModal,
     OrSectionHead,
-    OrSleeve,
-    OrSpinner,
     OrSwitch,
     OrTag,
   ],
@@ -199,6 +199,7 @@ const ROW_STYLES = `
         placeholder="Filter by title, artist or album"
         describedBy="or-library-filter-status"
         [(value)]="query"
+        (settledValue)="listQuery.set($event)"
       />
       <p id="or-library-filter-status" class="filter-status" role="status">
         @if (filtering()) {
@@ -256,11 +257,19 @@ const ROW_STYLES = `
       @default {
         @let saved = savedShown();
         @if (saved.length) {
+          <ng-container *ngTemplateOutlet="sortHead; context: { $implicit: 'saved' }" />
           <ul class="crate" aria-label="Saved records">
             @for (t of savedWindow.items(); track t.id; let i = $index) {
-              <ng-container
-                *ngTemplateOutlet="row; context: { $implicit: t, list: saved, pos: i + 1 }"
-              />
+              <li class="record" [attr.aria-setsize]="saved.length" [attr.aria-posinset]="i + 1">
+                <or-library-row
+                  [track]="t"
+                  [art]="art(t)"
+                  [addedAt]="library.savedAt(t.id)"
+                  (playTrack)="play(t, saved)"
+                  (toggleSave)="toggleSaved(t, $event)"
+                  (options)="optionsFor.set(t)"
+                />
+              </li>
             }
           </ul>
           @if (savedWindow.hasMore()) {
@@ -285,11 +294,19 @@ const ROW_STYLES = `
       @let imported = importedShown();
       <or-section-head heading="Imported" />
       @if (imported.length) {
+        <ng-container *ngTemplateOutlet="sortHead; context: { $implicit: 'imported' }" />
         <ul class="crate" aria-label="Imported records">
           @for (t of importedWindow.items(); track t.id; let i = $index) {
-            <ng-container
-              *ngTemplateOutlet="row; context: { $implicit: t, list: imported, pos: i + 1 }"
-            />
+            <li class="record" [attr.aria-setsize]="imported.length" [attr.aria-posinset]="i + 1">
+              <or-library-row
+                [track]="t"
+                [art]="art(t)"
+                [addedAt]="library.importedAt(t.id)"
+                (playTrack)="play(t, imported)"
+                (toggleSave)="toggleSaved(t, $event)"
+                (options)="optionsFor.set(t)"
+              />
+            </li>
           }
         </ul>
         @if (importedWindow.hasMore()) {
@@ -356,82 +373,45 @@ const ROW_STYLES = `
       Saved records and playlists live on this device. No account, no server.
     </p>
 
-    <ng-template #row let-t let-list="list" let-pos="pos">
-      @let current = player.isCurrent(t.id);
-      @let saved = library.isSaved(t.id);
-      @let status = offline.status(t.id);
-      @let state = downloadState(status, offline.error(t.id));
-      @let source = sourceLabel(t.source?.site);
-      @let streamOnly = !status && t.providerId === remoteId;
-      <li
-        class="record"
-        [class.is-current]="current"
-        [attr.aria-setsize]="list.length"
-        [attr.aria-posinset]="pos"
+    <!--
+      Desktop-only sortable header for a record list (hidden below 900px).
+      Sorting is view-only: ascending, descending, then the list's own order.
+    -->
+    <ng-template #sortHead let-list>
+      <div
+        class="list-head"
+        role="table"
+        [attr.aria-label]="list === 'saved' ? 'Sort saved records' : 'Sort imported records'"
       >
-        <button
-          class="record-main"
-          type="button"
-          [attr.aria-label]="
-            (current ? 'Now playing: ' : 'Play ') + t.title + ' by ' + t.artist
-          "
-          [attr.aria-current]="current ? 'true' : null"
-          (click)="play(t, list)"
-        >
-          <or-sleeve
-            size="thumb"
-            [src]="art(t)"
-            [alt]="''"
-            [playing]="current && player.isPlaying()"
-          />
-          <span class="info">
-            <span class="title">{{ t.title }}</span>
-            <span class="artist">{{ t.artist }}@if (t.album) { · {{ t.album }}}</span>
-            <span class="detail">
-              @if (current) {
-                <span class="now">
-                  <or-icon name="disc" [size]="13" />
-                  {{ player.isPlaying() ? 'On the turntable' : 'Paused' }}
-                </span>
-              }
-              @if (source) {
-                <or-tag>{{ source }}</or-tag>
-              }
-              @if (state) {
-                @switch (state.kind) {
-                  @case ('saved') {
-                    <or-tag icon="check">{{ state.label }}</or-tag>
-                  }
-                  @case ('downloading') {
-                    <or-tag><or-spinner [size]="12" />{{ state.label }}</or-tag>
-                  }
-                  @case ('failed') {
-                    <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ state.label }}</or-tag>
-                  }
-                }
-              } @else if (streamOnly) {
-                <or-tag>Streaming only</or-tag>
-              }
-              @if (!current) {
-                <span class="detail-text">{{ detail(t) }}</span>
-              }
-            </span>
-          </span>
-        </button>
-        <span class="dur">{{ formatDuration(t.durationSec) }}</span>
-        <or-icon-button
-          icon="bookmark"
-          [pressed]="saved"
-          [label]="
-            (saved ? 'Remove ' : 'Save ') +
-            t.title +
-            (saved ? ' from' : ' to') +
-            ' your library'
-          "
-          (click)="toggleSaved(t, saved)"
-        />
-      </li>
+        <div class="head-row" role="row">
+          @for (col of columns; track col.key) {
+            <div
+              role="columnheader"
+              [class]="'h-' + col.key"
+              [attr.aria-sort]="ariaSort(list, col.key)"
+            >
+              <button type="button" class="sort" (click)="cycleSort(list, col.key)">
+                {{ col.label }}
+                <span class="sort-dir" aria-hidden="true">{{ sortArrow(list, col.key) }}</span>
+              </button>
+            </div>
+          }
+          <div role="columnheader"><span class="sr-only">Saved</span></div>
+          <div role="columnheader"><span class="sr-only">Options</span></div>
+        </div>
+      </div>
     </ng-template>
+
+    <or-modal
+      [open]="!!optionsFor()"
+      [heading]="optionsFor()?.title ?? 'Record'"
+      (dismissed)="optionsFor.set(null)"
+    >
+      <div orModalActions>
+        <or-button block (click)="playNext()">Play next</or-button>
+        <or-button block (click)="optionsFor.set(null)">Close</or-button>
+      </div>
+    </or-modal>
 
     <or-new-playlist-dialog
       [(open)]="dialogOpen"
@@ -541,8 +521,10 @@ const ROW_STYLES = `
       text-decoration: none;
       transition: background var(--duration-fast) var(--ease-standard);
     }
-    .pl-row:hover {
-      background: var(--color-surface-raised);
+    @media (hover: hover) {
+      .pl-row:hover {
+        background: var(--color-surface-raised);
+      }
     }
     .pl-info {
       display: grid;
@@ -559,12 +541,8 @@ const ROW_STYLES = `
       color: var(--color-muted);
     }
 
-    /* Desktop: records and playlists flow into responsive columns. */
+    /* Desktop: playlists flow into responsive columns; records stay one list. */
     @media (min-width: 900px) {
-      .crate {
-        grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-        column-gap: var(--spacing-lg);
-      }
       .pl-list {
         grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
       }
@@ -575,7 +553,6 @@ const ROW_STYLES = `
       color: var(--color-muted);
     }
     @media (prefers-reduced-motion: reduce) {
-      .record-main,
       .pl-row {
         transition-duration: 1ms;
       }
@@ -601,7 +578,6 @@ export class LibraryPage {
   protected readonly libraryFraction = computed(
     () => this.autoDownload.progressFor(this.library.savedIds()).fraction,
   );
-  protected readonly offline = inject(OfflineStore);
   private readonly sync = inject(SyncStore);
   private readonly toast = inject(OrToast);
   private readonly router = inject(Router);
@@ -611,29 +587,58 @@ export class LibraryPage {
   protected readonly dialogOpen = signal(false);
   protected readonly addFromPlaylistOpen = signal(false);
   protected readonly art = injectTrackArt();
-  protected readonly remoteId = REMOTE_PROVIDER_ID;
-  protected readonly downloadState = downloadState;
-  protected readonly sourceLabel = sourceLabel;
-  protected readonly formatDuration = formatDuration;
 
-  /** Filter text for saved and imported records (component state only). */
+  /** Filter text as typed (the field and the "no match" copy). */
   protected readonly query = signal('');
-  protected readonly filtering = computed(() => this.query().trim().length > 0);
+  /**
+   * The filter the lists use: `query` once typing pauses, so a keystroke
+   * does not re-filter 2000 records or reset the rendered window.
+   */
+  protected readonly listQuery = signal('');
+  protected readonly filtering = computed(() => this.listQuery().trim().length > 0);
   protected readonly hasRecords = computed(
     () =>
       this.library.savedRecords().length > 0 ||
       this.library.importedTracks().length > 0,
   );
-  /** Filtered lists: what rows render and what a row tap queues. */
+  /** Desktop column headers. Sorting is view-only, per list. */
+  protected readonly columns: readonly { key: TrackSortKey; label: string }[] = [
+    { key: 'title', label: 'Title' },
+    { key: 'album', label: 'Album' },
+    { key: 'source', label: 'Source' },
+    { key: 'added', label: 'Date added' },
+    { key: 'duration', label: 'Duration' },
+  ];
+  /** `null` is the list's own order (saved: newest first; imported: index order). */
+  protected readonly savedSort = signal<TrackSort | null>(null);
+  protected readonly importedSort = signal<TrackSort | null>(null);
+  /** Record whose options modal is open. */
+  protected readonly optionsFor = signal<Track | null>(null);
+
+  /** Filtered, sorted lists: what rows render and what a row tap queues. */
   protected readonly savedShown = computed(() =>
-    filterTracks(this.library.savedRecords(), this.query()),
+    sortByColumn(
+      filterTracks(this.library.savedRecords(), this.listQuery()),
+      this.savedSort(),
+      (t, key) => this.sortValue(t, key, 'saved'),
+    ),
   );
   protected readonly importedShown = computed(() =>
-    filterTracks(this.library.importedTracks(), this.query()),
+    sortByColumn(
+      filterTracks(this.library.importedTracks(), this.listQuery()),
+      this.importedSort(),
+      (t, key) => this.sortValue(t, key, 'imported'),
+    ),
   );
-  /** Rendered slices; reset to the first page when the filter changes. */
-  protected readonly savedWindow = lazyWindow(this.savedShown, this.query);
-  protected readonly importedWindow = lazyWindow(this.importedShown, this.query);
+  /** Rendered slices; reset to the first page when the filter or sort changes. */
+  protected readonly savedWindow = lazyWindow(
+    this.savedShown,
+    () => `${this.listQuery()}|${this.savedSort()?.key}|${this.savedSort()?.dir}`,
+  );
+  protected readonly importedWindow = lazyWindow(
+    this.importedShown,
+    () => `${this.listQuery()}|${this.importedSort()?.key}|${this.importedSort()?.dir}`,
+  );
   protected readonly matchLabel = computed(() => {
     const n = this.savedShown().length + this.importedShown().length;
     const total =
@@ -641,8 +646,56 @@ export class LibraryPage {
     return `${n} of ${total} record${total === 1 ? '' : 's'} match`;
   });
 
-  protected detail(t: Track): string {
-    return [t.year, t.genre].filter(Boolean).join('  ·  ');
+  private sortValue(
+    t: Track,
+    key: TrackSortKey,
+    list: ListId,
+  ): string | number | undefined {
+    switch (key) {
+      case 'title':
+        return t.title;
+      case 'album':
+        return t.album || undefined;
+      case 'source':
+        return sourceLabel(t.source?.site) ?? undefined;
+      case 'added':
+        return list === 'saved'
+          ? this.library.savedAt(t.id)
+          : this.library.importedAt(t.id);
+      case 'duration':
+        return t.durationSec || undefined;
+    }
+  }
+
+  private sortOf(list: ListId) {
+    return list === 'saved' ? this.savedSort : this.importedSort;
+  }
+
+  /** Header click: ascending, then descending, then back to the list's order. */
+  protected cycleSort(list: ListId, key: TrackSortKey): void {
+    const sort = this.sortOf(list);
+    sort.set(nextSort(sort(), key));
+  }
+
+  protected ariaSort(list: ListId, key: TrackSortKey): 'ascending' | 'descending' | null {
+    return ariaSortFor(this.sortOf(list)(), key);
+  }
+
+  protected sortArrow(list: ListId, key: TrackSortKey): string {
+    return sortArrowFor(this.sortOf(list)(), key);
+  }
+
+  /** Queue the optioned record right after the current one. */
+  protected async playNext(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!track) return;
+    try {
+      await this.player.playNext([track]);
+      this.toast.show(`“${track.title}” plays next`);
+    } catch {
+      this.toast.show('Could not queue that record. Try again.');
+    }
   }
 
   protected meta(pl: Playlist): string {

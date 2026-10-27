@@ -173,6 +173,11 @@ interface ImportJob {
   likedSaved?: true;
   /** The latest import (label only). */
   source?: ImportJobSource;
+  /**
+   * `repairSignature()` when `repairMatched()` last finished. Startup skips
+   * the repair while it still matches (nothing it could fix has changed).
+   */
+  repairedSignature?: string;
 }
 
 /** Pause between searches; the server allows 30 searches a minute. */
@@ -306,9 +311,39 @@ export class ImportStore {
   async restore(): Promise<void> {
     await this.loaded;
     await this.migrateLegacyLookup().catch(() => undefined);
-    await this.saveLikedPlaylists().catch(() => undefined);
-    await this.repairMatched().catch(() => undefined);
+    if (!(await this.repairedUpToDate().catch(() => false))) {
+      await this.saveLikedPlaylists().catch(() => undefined);
+      await this.repairMatched().catch(() => undefined);
+    }
     if (this._job()?.status === 'running') void this.run();
+  }
+
+  /**
+   * The one-time liked fixes ran and the last full `repairMatched()` saw the
+   * same items, matches, playlists and bookmarks as now: repair is a no-op.
+   */
+  private async repairedUpToDate(): Promise<boolean> {
+    const job = this._job();
+    if (!job?.repairedSignature || !job.likedPlaylistsSaved || !job.likedSaved) return false;
+    await Promise.all([this.library.ready(), this.playlists.ready()]);
+    return job.repairedSignature === this.repairSignature(job);
+  }
+
+  /** Cheap fingerprint of everything `repairMatched()` reads. */
+  private repairSignature(job: ImportJob): string {
+    let matched = 0;
+    // FNV-1a over matched ids in item order, so re-matching changes it.
+    let hash = 0x811c9dc5;
+    for (const item of job.items) {
+      if (item.state !== 'matched' || !item.matchId) continue;
+      matched++;
+      const id = `${item.matchId}\n`;
+      for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 0x01000193);
+    }
+    const playlists = this.playlists.playlists();
+    let updatedAt = 0;
+    for (const p of playlists) if (p.updatedAt > updatedAt) updatedAt = p.updatedAt;
+    return [job.items.length, matched, (hash >>> 0).toString(36), playlists.length, updatedAt, this.library.savedIds().length].join(':');
   }
 
   /**
@@ -368,10 +403,17 @@ export class ImportStore {
       if (this.library.isSaved(item.key)) await this.library.replaceSaved(item.key, item.matchId);
     }
     // A liked item is bookmarked under whatever id it has now.
-    if (job.likedSaved) return;
-    const liked = job.items.filter((i) => i.liked).map((i) => ({ id: this.currentId(i.key) }));
-    await this.library.bookmarkWithoutSaving(liked);
-    this.update((j) => ({ ...j, likedSaved: true }));
+    if (!job.likedSaved) {
+      const liked = job.items.filter((i) => i.liked).map((i) => ({ id: this.currentId(i.key) }));
+      await this.library.bookmarkWithoutSaving(liked);
+      this.update((j) => ({ ...j, likedSaved: true }));
+    }
+    // Recorded only after a full pass, so a failed repair runs again next start.
+    const current = this._job();
+    if (!current) return;
+    const signature = this.repairSignature(current);
+    if (current.repairedSignature === signature && job.likedSaved) return;
+    this.update((j) => ({ ...j, repairedSignature: signature }));
     await this.persist();
   }
 
@@ -1401,7 +1443,18 @@ export class ImportStore {
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = null;
     const job = this._job();
-    if (job) await this.storage.settings.set(SETTINGS_KEYS.spotifyImport, job as unknown as JsonValue);
+    if (!job) return;
+    // Suggestions only matter while the user can still pick one (review, or
+    // unmatched for `reopen` / `acceptCandidate`): leave them out otherwise.
+    const items = job.items.map((item) => {
+      if (item.state === 'review' || item.state === 'unmatched') return item;
+      if (!item.candidates && !item.metaCandidates) return item;
+      const rest = { ...item };
+      delete rest.candidates;
+      delete rest.metaCandidates;
+      return rest;
+    });
+    await this.storage.settings.set(SETTINGS_KEYS.spotifyImport, { ...job, items } as unknown as JsonValue);
   }
 
   private async hydrate(): Promise<void> {
