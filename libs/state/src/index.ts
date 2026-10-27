@@ -20,3 +20,4 @@ export * from './lib/sync.store';
 export * from './lib/preview-player.service';
 export * from './lib/import-sessions.store';
 export * from './lib/background-work';
+export * from './lib/track-art';

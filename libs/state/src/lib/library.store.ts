@@ -143,6 +143,11 @@ export class LibraryStore {
 
   private loaded: Promise<void>;
   private catalogBytes?: Promise<number | null>;
+  /** Resolved stored-cover URLs per track id, keyed by the cover they were resolved from. */
+  private readonly artUrls = new Map<
+    string,
+    { coverPath: string; url: Promise<string | undefined> }
+  >();
 
   constructor() {
     this.loaded = this.hydrate();
@@ -317,8 +322,14 @@ export class LibraryStore {
    */
   async artUrl(track: Track): Promise<string | undefined> {
     if (track.artUrl) return track.artUrl;
-    if (!track.coverPath || !this.media) return undefined;
-    return this.media.artUrl(track);
+    const { coverPath } = track;
+    if (!coverPath || !this.media) return undefined;
+    const cached = this.artUrls.get(track.id);
+    if (cached?.coverPath === coverPath) return cached.url;
+    const url = this.media.artUrl(track);
+    url.catch(() => this.artUrls.delete(track.id));
+    this.artUrls.set(track.id, { coverPath, url });
+    return url;
   }
 
   // ---- Metadata-only tracks -------------------------------------------------
@@ -499,6 +510,7 @@ export class LibraryStore {
    */
   async storeRecord(record: ImportedTrack): Promise<void> {
     await this.storage.importedTracks.save(record);
+    this.artUrls.delete(record.track.id);
     this._stored.update((m) => new Map(m).set(record.track.id, record));
     this.upsert(record.track);
   }
@@ -510,6 +522,7 @@ export class LibraryStore {
   async storeRecords(records: readonly ImportedTrack[]): Promise<void> {
     if (!records.length) return;
     await this.storage.importedTracks.saveMany(records);
+    for (const r of records) this.artUrls.delete(r.track.id);
     this._stored.update((m) => {
       const next = new Map(m);
       for (const r of records) next.set(r.track.id, r);
@@ -524,6 +537,7 @@ export class LibraryStore {
    */
   async dropRecord(trackId: string): Promise<void> {
     await this.storage.importedTracks.delete(trackId);
+    this.artUrls.delete(trackId);
     this._stored.update((m) => {
       const next = new Map(m);
       next.delete(trackId);

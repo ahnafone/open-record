@@ -57,6 +57,33 @@ Prerequisites: Node 24, the Android SDK (Android Studio is not required), a phon
 3. Build and run the app: `npm run android` (builds, runs cap sync, then `cap run android` on the connected device or emulator).
 4. In the app, open Settings > Stream server > Scan QR code (or type the server address), tap Test connection, then sign in (Settings > Account). Then use Search > Download sources.
 
+## Release builds
+
+Debug builds are slower than what users get, so measure and test speed on a release build. Each script runs `npm run cap:sync` first.
+
+- `npm run android:release`: builds the release APK (`apps/app/android/app/build/outputs/apk/release/app-release.apk`, debug-signed).
+- `npm run android:release:install`: builds it, then installs it on the connected device with `adb install -r`.
+- `npm run ios`: builds and runs the debug app on a connected iPhone or simulator (`cap run ios`).
+- `npm run ios:open`: opens the project in Xcode.
+- `npm run ios:release`: Release-configuration `xcodebuild` for a generic iOS device (`apps/app/ios/App/build`). Needs a Mac with Xcode and signing set up.
+
+## Performance
+
+Targets (release build, 2000+ track library, median of 5 runs; full list in [.plans/performance-optimization.md](.plans/performance-optimization.md) section 0.3):
+
+- Cold start under 1500 ms.
+- Under 2500 DOM nodes on Browse, Library and Playlist; under 1200 on Now Playing.
+- Browse to Library under 250 ms, open Now Playing under 300 ms, open the drawer under 150 ms, library filter keystroke under 100 ms.
+- No long task over 50 ms while scrolling.
+- Initial JS bundle within the budgets in `apps/app/project.json` (500 kB warning, 1 MB error); check the `npx nx build app` output.
+
+How to measure:
+
+- Always use a release build (above), not `npm run android`.
+- Android cold start: `adb shell am force-stop app.openrecord`, then `adb shell am start -W app.openrecord/.MainActivity` and read `TotalTime`. Frame timing: `adb shell dumpsys gfxinfo app.openrecord reset`, use the app, then `adb shell dumpsys gfxinfo app.openrecord` for janky frames.
+- Android WebView: open `chrome://inspect` in desktop Chrome, inspect the app, and use the Performance panel and the console (`document.querySelectorAll('*').length` for DOM nodes).
+- iOS: Safari > Develop > your iPhone > the app for the same console and timelines (Timelines > JavaScript & Events; `longtask` is not available in WKWebView). Instruments "App Launch" for cold start.
+
 ## Supabase accounts (optional)
 
 Accounts use your own Supabase project; the project hosts none. Sign-in also enables [sync between devices](#sync-between-devices).

@@ -66,6 +66,8 @@ function locate(stored: string): { path: string; directory: Directory } {
  */
 export class NativeFileStore implements LocalFileStore {
   private dirReady?: Promise<void>;
+  /** Resolved web view URLs per stored path: one bridge round trip per file, not per card. */
+  private readonly urls = new Map<string, Promise<string>>();
 
   private ensureDir(): Promise<void> {
     this.dirReady ??= Filesystem.mkdir({ path: IMPORT_DIR, directory: Directory.Data, recursive: true }).catch(
@@ -106,12 +108,18 @@ export class NativeFileStore implements LocalFileStore {
     return data.byteLength;
   }
 
-  async url(stored: string): Promise<string> {
-    const { uri } = await Filesystem.getUri(locate(stored));
-    return Capacitor.convertFileSrc(uri);
+  url(stored: string): Promise<string> {
+    let cached = this.urls.get(stored);
+    if (!cached) {
+      cached = Filesystem.getUri(locate(stored)).then(({ uri }) => Capacitor.convertFileSrc(uri));
+      cached.catch(() => this.urls.delete(stored));
+      this.urls.set(stored, cached);
+    }
+    return cached;
   }
 
   async remove(stored: string): Promise<void> {
+    this.urls.delete(stored);
     await Filesystem.deleteFile(locate(stored)).catch(() => undefined);
   }
 

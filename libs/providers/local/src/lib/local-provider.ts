@@ -1,4 +1,5 @@
 import { splitStoredPath, type PlayableSource, type Track } from '@open-record/models';
+import { downscaleCover } from './downscale-cover';
 import { createDefaultFileStore, IMPORT_DIR, type LocalFileStore, type PickedAudio } from './file-store';
 import {
   audioExtension,
@@ -155,10 +156,14 @@ export class LocalProvider {
   }
 
   private async saveCover(key: string, cover: { format: string; data: Uint8Array }): Promise<string | undefined> {
-    const mime = cover.format.includes('/') ? cover.format : `image/${cover.format || 'jpeg'}`;
+    // Stored at sleeve size (max 512px, JPEG) so list thumbnails never decode full-size art.
+    const { mime, data } = await downscaleCover({
+      mime: cover.format.includes('/') ? cover.format : `image/${cover.format || 'jpeg'}`,
+      data: cover.data,
+    });
     const path = `${keyPrefix(key)}cover.${imageExtension(mime)}`;
     try {
-      await this.store.write(path, cover.data, mime);
+      await this.store.write(path, data, mime);
       return path;
     } catch {
       return undefined; // art is optional; the UI shows the disc fallback
