@@ -1,5 +1,20 @@
 import { CatalogProvider } from './catalog-provider';
 
+describe('CatalogProvider.list', () => {
+  const provider = new CatalogProvider();
+
+  it('exposes the entry audio file as catalogFile and never leaks audioFile', async () => {
+    const tracks = await provider.list();
+    const sandman = tracks.find((t) => t.id === 'catalog:sandman');
+
+    expect(sandman?.catalogFile).toBe('japanese-sandman.mp3');
+    for (const track of tracks) {
+      expect(track).not.toHaveProperty('audioFile');
+      expect(track.catalogFile).toEqual(expect.any(String));
+    }
+  });
+});
+
 describe('CatalogProvider.search', () => {
   const provider = new CatalogProvider();
   const titles = async (q: string) => (await provider.search(q)).map((t) => t.title);

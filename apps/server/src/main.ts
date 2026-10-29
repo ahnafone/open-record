@@ -1,17 +1,19 @@
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from './app';
-import { ConfigError, loadConfig } from './config';
+import { ConfigError, defaultDataDir, loadConfig } from './config';
 import { formatBanner } from './services/banner';
-import { pickLanUrl } from './services/network';
-import { defaultDataDir, resolveToken } from './services/token-store';
+import { isLoopbackUrl, pickLanUrl } from './services/network';
+import { resolveToken } from './services/token-store';
 import { configureCookies, cookiesStatus } from './services/ytdlp';
 
 async function main(): Promise<void> {
-  const dataDir = defaultDataDir(process.env);
+  // Resolved before loadConfig so a token can be generated for a data dir that
+  // loadConfig has not validated yet; loadConfig then resolves the same value.
+  const bootDataDir = defaultDataDir(process.env);
   let token;
   try {
-    token = resolveToken({ env: process.env, dataDir });
+    token = resolveToken({ env: process.env, dataDir: bootDataDir });
   } catch (err) {
     console.error(`open-record-server: ${(err as Error).message}`);
     process.exit(1);
@@ -31,7 +33,31 @@ async function main(): Promise<void> {
   // Here rather than in buildApp on purpose: specs call buildApp, and the
   // fallback jar must not make server tests depend on whether the developer's
   // own ~/.config/open-record/cookies.txt happens to exist.
-  configureCookies(config.ytdlpCookiesFile, join(dataDir, 'cookies.txt'));
+  configureCookies(config.ytdlpCookiesFile, join(config.dataDir, 'cookies.txt'));
+
+  // Computed once: the banner prints it and the cast speaker is told to use it.
+  const publicUrl = process.env['PUBLIC_URL']?.trim() || undefined;
+  const picked = pickLanUrl({
+    publicUrl,
+    host: config.host,
+    port: config.port,
+    interfaces: networkInterfaces(),
+  });
+
+  // loadConfig leaves this null when unset; the detected URL is host-dependent,
+  // so it is resolved here rather than in config.ts (unit-testable config).
+  if (config.castMediaBaseUrl === null) {
+    config.castMediaBaseUrl = picked.url;
+  }
+  if (config.castEnabled && isLoopbackUrl(config.castMediaBaseUrl)) {
+    console.warn(
+      `open-record-server: cast media base URL ${config.castMediaBaseUrl} is loopback, which a cast device cannot reach; ` +
+        'cast devices will not be offered (set PUBLIC_URL or CAST_MEDIA_BASE_URL to the LAN address)',
+    );
+    config.castMediaBaseUrl = null;
+  } else {
+    console.log(`open-record-server: cast media base URL ${config.castMediaBaseUrl}`);
+  }
 
   const app = await buildApp(config, { logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
 
@@ -46,13 +72,6 @@ async function main(): Promise<void> {
   await app.listen({ port: config.port, host: config.host });
 
   // Console, not the logger: the token must not reach request or app logs.
-  const publicUrl = process.env['PUBLIC_URL']?.trim() || undefined;
-  const picked = pickLanUrl({
-    publicUrl,
-    host: config.host,
-    port: config.port,
-    interfaces: networkInterfaces(),
-  });
   console.log(
     await formatBanner({
       ...picked,

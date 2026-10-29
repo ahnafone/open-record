@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { SignJWT } from 'jose';
 import { buildApp } from './app';
 import { loadConfig } from './config';
+import { requireAccount } from './plugins/auth';
 
 const TOKEN = 'test-token-0123456789abcdef';
 
@@ -86,7 +87,15 @@ describe('server auth with Supabase JWTs', () => {
   beforeAll(async () => {
     const config = loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_JWT_SECRET: SECRET });
     app = await buildApp(config, {
-      routes: [async (a) => void a.get('/whoami', async (request) => ({ userId: request.userId }))],
+      routes: [
+        async (a) => {
+          a.get('/whoami', async (request) => ({ userId: request.userId }));
+          a.get('/user-exp', async (request) => ({ userExp: request.userExp }));
+          a.get('/account', { preHandler: requireAccount }, async (request) => ({
+            userId: request.userId,
+          }));
+        },
+      ],
     });
   });
 
@@ -109,6 +118,34 @@ describe('server auth with Supabase JWTs', () => {
     const res = await get(TOKEN);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ userId: null });
+  });
+
+  it('exposes the verified token expiry as a number', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/user-exp',
+      headers: { authorization: `Bearer ${await sign()}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(typeof res.json().userExp).toBe('number');
+  });
+
+  it('rejects the static token on account-only routes and accepts a Supabase JWT', async () => {
+    const staticRes = await app.inject({
+      method: 'GET',
+      url: '/account',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(staticRes.statusCode).toBe(403);
+    expect(staticRes.json()).toEqual({ error: 'account-required' });
+
+    const jwtRes = await app.inject({
+      method: 'GET',
+      url: '/account',
+      headers: { authorization: `Bearer ${await sign()}` },
+    });
+    expect(jwtRes.statusCode).toBe(200);
+    expect(jwtRes.json()).toEqual({ userId: 'user-1' });
   });
 });
 

@@ -73,6 +73,12 @@ export const SETTINGS_KEYS = {
   youtubeImport: 'youtubeImport',
   /** Account sync clocks and tombstones (no migration: new key, absent = never synced). Metadata ids and hashes only. */
   syncState: 'syncState',
+  /** Stable per-install id used for grouping session devices (no migration: new key, absent = generated on first read). */
+  deviceId: 'deviceId',
+  /** User-visible device name for the session picker (no migration: new key, absent = platform default). */
+  deviceName: 'deviceName',
+  /** `{ session, cast }` switches (no migration: new key, absent = both on). */
+  sessionPrefs: 'sessionPrefs',
 } as const;
 
 /** Removed setting (online metadata lookups); only migrations reference it. */

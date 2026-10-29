@@ -4,7 +4,16 @@ import { join, resolve, sep } from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 /** First path segments owned by the API; never answered with the web app. */
-const API_SEGMENTS = new Set(['health', 'ping', 'app-config', 'search', 'resolve', 'stream']);
+const API_SEGMENTS = new Set([
+  'health',
+  'ping',
+  'app-config',
+  'search',
+  'resolve',
+  'stream',
+  'session',
+  'cast',
+]);
 
 /** True when `dir` holds a built web app (an index.html). */
 export function hasWebApp(dir: string): boolean {

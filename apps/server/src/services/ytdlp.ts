@@ -25,6 +25,14 @@ export const BASE_ARGS = [
   'node',
 ];
 
+/**
+ * The signed-in retry enables yt-dlp's EJS challenge solver (fetched from
+ * GitHub on first use and cached by yt-dlp). Without it, a valid signed-in
+ * cookie jar still yields no playable formats for age-gated YouTube videos.
+ * Only the cookie retry uses it; anonymous requests are unchanged.
+ */
+export const COOKIE_RETRY_ARGS = ['--remote-components', 'ejs:github'];
+
 export const SEARCH_LIMIT = 15;
 export const MAX_QUERY_LENGTH = 200;
 const INFO_TIMEOUT_MS = 45_000;
@@ -563,6 +571,15 @@ export function configureCookies(
   sweepCookieCopies();
 }
 
+const NETSCAPE_HEADER = '# Netscape HTTP Cookie File\n\n';
+
+/** yt-dlp rejects a jar without the Netscape header, even when its rows are valid. */
+function withNetscapeHeader(text: string): string {
+  return /^\s*#\s*Netscape HTTP Cookie File/m.test(text)
+    ? text
+    : `${NETSCAPE_HEADER}${text}`;
+}
+
 /**
  * This run's private copy of a usable jar as `['--cookies', <copy>]`, with the
  * cleanup that deletes it; null when the copy cannot be written, so the run
@@ -586,7 +603,10 @@ function copyCookies(
     const copy = join(dir, 'cookies.txt');
     // O_EXCL + mode 0o600 from creation: never briefly world-readable and
     // never following a file planted in the fresh directory.
-    writeFileSync(copy, check.text, { flag: 'wx', mode: 0o600 });
+    writeFileSync(copy, withNetscapeHeader(check.text), {
+      flag: 'wx',
+      mode: 0o600,
+    });
 
     const runDir = dir;
     let cleaned = false;
@@ -778,8 +798,12 @@ async function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
         err.status,
       );
     try {
-      // One retry, never a loop.
-      return await execOnce([...copy.args, ...args], copy.cleanup);
+      // One retry, never a loop. The EJS solver is enabled only here: without
+      // it, a valid signed-in jar still yields no formats past the age gate.
+      return await execOnce(
+        [...copy.args, ...COOKIE_RETRY_ARGS, ...args],
+        copy.cleanup,
+      );
     } catch (retryErr) {
       if (!(retryErr instanceof YtDlpError)) throw retryErr;
       // A second age gate with a usable jar means the jar is stale (or the

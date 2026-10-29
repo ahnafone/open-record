@@ -479,11 +479,15 @@ overlays.
   switches shows "N couldn't be downloaded" as an underlined text link (44px
   hit area) to a pushed "Fix failed downloads" page (also linked from
   Settings). Failed songs use the record-row pattern with a coral failed tag
-  holding the short reason and a small "Fix link" button. The Fix link modal
-  lists suggestions (sleeve, title, artist, duration, preview, "Use this",
-  with a spinner while a candidate is checked) above a paste field for a
-  YouTube / YT Music link; a failed check shows a coral inline error in a
-  reserved status line and saves nothing.
+  holding the short reason, a small "Retry" button and a "Fix link" button; a
+  "Retry all" action above the list retries every failed song. While a retry is
+  queued or saving, the row stays visible and its coral tag becomes a muted
+  spinner tag reading "Retrying…"; on success the song leaves the list, on
+  failure the reason returns. On narrow screens the two actions stack below
+  the title. The Fix link modal lists suggestions (sleeve, title, artist,
+  duration, preview, "Use this", with a spinner while a candidate is checked)
+  above a paste field for a YouTube / YT Music link; a failed check shows a
+  coral inline error in a reserved status line and saves nothing.
 - **Import history:** the Import page links to a pushed Import history
   page instead of listing imported records. It also holds a danger "Clear
   imported files" button (confirmation dialog) for audio files. Every import

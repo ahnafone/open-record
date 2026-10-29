@@ -4,7 +4,9 @@ import {
   inject,
   provideAppInitializer,
   provideBrowserGlobalErrorListeners,
+  type Provider,
 } from '@angular/core';
+import { Capacitor } from '@capacitor/core';
 import { provideRouter, withComponentInputBinding, withRouterConfig } from '@angular/router';
 import { MusicSourceRegistry } from '@open-record/music-source';
 import { providePlayer } from '@open-record/player';
@@ -20,6 +22,7 @@ import {
   AuthPort,
   AuthStore,
   BackgroundWorkPort,
+  CastUploadPort,
   DeviceStoragePort,
   ImportFilePort,
   LocalMediaPort,
@@ -28,6 +31,7 @@ import {
   PairingScannerPort,
   PlayCountsPort,
   RemoteServerPort,
+  SessionPort,
   SettingsStore,
   StreamResolverPort,
   SyncPort,
@@ -42,6 +46,11 @@ import { createDeviceStorage } from './device-storage';
 import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
+import {
+  createCastUploads,
+  createSessionPort,
+  type ServerSessionOptions,
+} from './server-session';
 import { SupabaseAuth } from './supabase-auth';
 import { SupabasePlayCounts } from './supabase-play-counts';
 import { SupabaseSync } from './supabase-sync';
@@ -108,6 +117,37 @@ const remote = new RemoteProvider({
 });
 sources.register(remote);
 
+/**
+ * Player sync transport. Built lazily (via `useFactory`) because `settings` and
+ * `auth` are assigned by the app initializer, and `baseUrl` stays lazy so a
+ * server address change is picked up without rebuilding the adapter. Never
+ * connects here: `SessionStore.start()` owns that.
+ */
+function sessionOptions(): ServerSessionOptions & {
+  accessToken: () => Promise<string | null>;
+} {
+  return {
+    baseUrl: () => settings?.downloadServerUrl() ?? '',
+    accessToken: () => auth?.accessToken() ?? Promise.resolve(null),
+    refreshAccessToken: () => auth?.refreshAccessToken() ?? Promise.resolve(null),
+    native: Capacitor.isNativePlatform(),
+  };
+}
+
+/** Cast uploads are a browser feature (a phone cannot cast a local import). */
+const castUploadProviders: Provider[] = Capacitor.isNativePlatform()
+  ? []
+  : [
+      {
+        provide: CastUploadPort,
+        useFactory: () =>
+          createCastUploads({
+            ...sessionOptions(),
+            clientId: () => settings?.deviceId() || 'cast-upload',
+          }),
+      },
+    ];
+
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
@@ -156,6 +196,10 @@ export const appConfig: ApplicationConfig = {
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
     // Additive per-track play counts for signed-in users (same client).
     { provide: PlayCountsPort, useValue: new SupabasePlayCounts(supabase) },
+    // Player sync: WebSocket on the web, HTTP polling on native. Optional: the
+    // stores only use it when provided, so anonymous/local mode is unchanged.
+    { provide: SessionPort, useFactory: () => createSessionPort(sessionOptions()) },
+    ...castUploadProviders,
     provideStorage(),
     // capacitor-plugin-playlist is installed: on device createAudioEngine()
     // uses NativeAudioEngine (foreground-service ExoPlayer, 1 Hz position

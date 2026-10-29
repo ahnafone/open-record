@@ -24,6 +24,10 @@ import {
 import { filter, map, take } from 'rxjs';
 import { Capacitor } from '@capacitor/core';
 import { AuthStore, LibraryStore, PlayerStore, PlaylistsStore } from '@open-record/state';
+// The picker is a single shell-level instance (not a routed screen), so it is
+// intentionally eager even though the Now Playing page itself is lazy.
+// eslint-disable-next-line @nx/enforce-module-boundaries
+import { OrDevicePicker } from '@open-record/features/now-playing';
 import { OrToastHost, OrViewport } from '@open-record/ui';
 import type { ScreenData } from './app.routes';
 import { OrDrawer } from './shell/drawer';
@@ -65,6 +69,7 @@ const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'account', 'imp
     OrSidebar,
     OrPlayerBar,
     OrDrawer,
+    OrDevicePicker,
   ],
   selector: 'or-root',
   host: {

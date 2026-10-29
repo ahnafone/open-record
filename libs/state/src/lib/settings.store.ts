@@ -15,6 +15,11 @@ import {
   type DownloadLocation,
 } from '@open-record/models';
 import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
+import {
+  MAX_DEVICE_NAME_LENGTH,
+  defaultDeviceName,
+  ensureDeviceId,
+} from './device-identity';
 import { RemoteServerPort } from './ports';
 import { isAbort, remoteErrorMessage } from './remote-errors';
 
@@ -66,6 +71,19 @@ export const DEFAULT_AUTO_DOWNLOAD_SETTINGS: AutoDownloadSettings = {
   mobileData: false,
 };
 
+/** Which session features this device takes part in. */
+export interface SessionPrefs {
+  /** Join and control a playback session. */
+  session: boolean;
+  /** Drive a cast target. */
+  cast: boolean;
+}
+
+export const DEFAULT_SESSION_PREFS: SessionPrefs = {
+  session: true,
+  cast: true,
+};
+
 /**
  * App settings. Hydrates from storage on construction; setters persist
  * optimistically and roll back if the write fails.
@@ -91,6 +109,9 @@ export class SettingsStore {
   private readonly _downloadLocation = signal<DownloadLocation>(
     DEFAULT_DOWNLOAD_LOCATION,
   );
+  private readonly _deviceId = signal('');
+  private readonly _deviceName = signal('');
+  private readonly _sessionPrefs = signal<SessionPrefs>(DEFAULT_SESSION_PREFS);
   private testAbort?: AbortController;
 
   /** True once the stored settings have been read. */
@@ -125,6 +146,16 @@ export class SettingsStore {
 
   /** Where new downloads are written (existing files stay where they are). */
   readonly downloadLocation = this._downloadLocation.asReadonly();
+
+  /** Stable per-install device id; non-empty once `ready()` resolves. */
+  readonly deviceId = computed(() => this._deviceId());
+  /** Name shown in the session device picker. */
+  readonly deviceName = computed(
+    () => this._deviceName() || defaultDeviceName(),
+  );
+  /** Session participation switches (both on by default). */
+  readonly sessionEnabled = computed(() => this._sessionPrefs().session);
+  readonly castEnabled = computed(() => this._sessionPrefs().cast);
 
   private loaded: Promise<void>;
 
@@ -199,6 +230,41 @@ export class SettingsStore {
       this._downloadLocation.set(before);
       throw err;
     }
+  }
+
+  /**
+   * Rename this device (trimmed, at most 60 characters). A blank name falls
+   * back to the platform default; the write rolls back on failure.
+   */
+  async setDeviceName(name: string): Promise<void> {
+    await this.loaded;
+    const before = this._deviceName();
+    const trimmed = name.trim().slice(0, MAX_DEVICE_NAME_LENGTH);
+    const next = trimmed || defaultDeviceName();
+    if (next === this.deviceName()) return;
+    this._deviceName.set(next);
+    try {
+      await this.storage.settings.set(SETTINGS_KEYS.deviceName, next);
+    } catch (err) {
+      this._deviceName.set(before);
+      throw err;
+    }
+  }
+
+  /** Allow or refuse session participation; persists, rolling back on failure. */
+  async setSessionEnabled(enabled: boolean): Promise<void> {
+    await this.loaded;
+    await this.persist(this._sessionPrefs, SETTINGS_KEYS.sessionPrefs, {
+      session: enabled,
+    });
+  }
+
+  /** Allow or refuse casting; persists, rolling back on failure. */
+  async setCastEnabled(enabled: boolean): Promise<void> {
+    await this.loaded;
+    await this.persist(this._sessionPrefs, SETTINGS_KEYS.sessionPrefs, {
+      cast: enabled,
+    });
   }
 
   private async persist<T extends object>(
@@ -305,16 +371,30 @@ export class SettingsStore {
     this._connection.set({ status: 'idle' });
     // Independent rows: read them in parallel (one round trip of latency on
     // the native bridge instead of four). Each read handles its own failure.
-    const [server, quality, autoDownload, downloadLocation] = await Promise.all([
+    const [
+      server,
+      quality,
+      autoDownload,
+      downloadLocation,
+      deviceId,
+      deviceName,
+      sessionPrefs,
+    ] = await Promise.all([
       this.readServer(),
       this.readQuality(),
       this.readAutoDownload(),
       this.readDownloadLocation(),
+      ensureDeviceId(this.storage),
+      this.readDeviceName(),
+      this.readSessionPrefs(),
     ]);
     this.apply(server, false);
     this._quality.set(quality);
     this._autoDownload.set(autoDownload);
     this._downloadLocation.set(downloadLocation);
+    this._deviceId.set(deviceId);
+    this._deviceName.set(deviceName);
+    this._sessionPrefs.set(sessionPrefs);
     this._hydrated.set(true);
   }
 
@@ -375,6 +455,34 @@ export class SettingsStore {
       return isDownloadLocation(raw) ? raw : DEFAULT_DOWNLOAD_LOCATION;
     } catch {
       return DEFAULT_DOWNLOAD_LOCATION;
+    }
+  }
+
+  private async readDeviceName(): Promise<string> {
+    try {
+      const raw = await this.storage.settings.get<string>(
+        SETTINGS_KEYS.deviceName,
+      );
+      if (typeof raw === 'string')
+        return raw.trim().slice(0, MAX_DEVICE_NAME_LENGTH);
+    } catch {
+      // Keep the current name (the platform default on first read).
+    }
+    return this._deviceName();
+  }
+
+  private async readSessionPrefs(): Promise<SessionPrefs> {
+    try {
+      const raw = await this.storage.settings.get<Partial<SessionPrefs>>(
+        SETTINGS_KEYS.sessionPrefs,
+      );
+      return {
+        session: raw?.session !== false,
+        cast: raw?.cast !== false,
+      };
+    } catch {
+      // A failed read keeps what is loaded (both on by default).
+      return this._sessionPrefs();
     }
   }
 }

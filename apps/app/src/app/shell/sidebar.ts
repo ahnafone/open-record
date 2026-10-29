@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
-import { AuthStore, PlaylistsStore } from '@open-record/state';
+import { AuthStore, CuratedStore, PlaylistsStore } from '@open-record/state';
 import { type IconName, OrIcon } from '@open-record/ui';
 
 interface NavItem {
@@ -16,9 +16,9 @@ const NAV: readonly NavItem[] = [
 ];
 
 /**
- * Desktop sidebar (900px+): brand, the three tab destinations, the user's
- * playlists, then the account row, Import and Settings at the bottom. Replaces the
- * phone tab bar.
+ * Desktop sidebar (900px+): brand, the three tab destinations, the app-curated
+ * lists, the user's playlists, then the account row, Import and Settings at the
+ * bottom. The phone drawer reuses this content.
  */
 @Component({
   selector: 'or-sidebar',
@@ -39,6 +39,22 @@ const NAV: readonly NavItem[] = [
             <a class="link" [routerLink]="item.path" routerLinkActive="active" ariaCurrentWhenActive="page">
               <or-icon [name]="item.icon" [size]="22" />{{ item.label }}
             </a>
+          </li>
+        }
+      </ul>
+    </nav>
+    <nav class="curated" aria-labelledby="or-side-curated">
+      <h2 class="eyebrow" id="or-side-curated">Curated</h2>
+      <ul class="pl">
+        @for (c of curated.playlists; track c.id) {
+          <li>
+            <a
+              class="pl-link"
+              [routerLink]="['/curated', c.id]"
+              routerLinkActive="active"
+              ariaCurrentWhenActive="page"
+              >{{ c.name }}</a
+            >
           </li>
         }
       </ul>
@@ -239,6 +255,13 @@ const NAV: readonly NavItem[] = [
     .link.active or-icon {
       color: var(--color-primary);
     }
+    .curated {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-xs);
+      padding-top: var(--spacing-sm);
+      border-top: 1px solid color-mix(in srgb, var(--color-border) 32%, transparent);
+    }
     .playlists {
       display: flex;
       flex-direction: column;
@@ -297,6 +320,7 @@ const NAV: readonly NavItem[] = [
 })
 export class OrSidebar {
   protected readonly playlists = inject(PlaylistsStore);
+  protected readonly curated = inject(CuratedStore);
   protected readonly auth = inject(AuthStore);
   protected readonly nav = NAV;
 

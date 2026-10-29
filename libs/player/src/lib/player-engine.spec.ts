@@ -3,22 +3,30 @@ import type {
   AudioEngine,
   AudioEngineListener,
   EngineMedia,
+  EngineNeighbours,
 } from './audio-engine';
 import { PlayerEngine } from './player-engine';
 
 class FakeEngine implements AudioEngine {
   readonly ownsSystemControls = false;
-  readonly wantsNeighbours = false;
+  readonly wantsNeighbours: boolean;
   listener: AudioEngineListener | null = null;
   loaded: string[] = [];
+  /** Neighbour windows passed to each `load`, for native-window tests. */
+  neighbours: (EngineNeighbours | undefined)[] = [];
   seeks: number[] = [];
   failOn = new Set<string>();
+
+  constructor(wantsNeighbours = false) {
+    this.wantsNeighbours = wantsNeighbours;
+  }
 
   setListener(l: AudioEngineListener | null): void {
     this.listener = l;
   }
-  async load(media: EngineMedia): Promise<void> {
+  async load(media: EngineMedia, neighbours?: EngineNeighbours): Promise<void> {
     this.loaded.push(media.id);
+    this.neighbours.push(neighbours);
   }
   async play(): Promise<void> {
     const id = this.loaded.at(-1) ?? '';
@@ -57,6 +65,12 @@ const timed = (id: string, durationSec: number): Track => ({
   durationSec,
 });
 
+/** A track with a download source URL, for media-identity tests. */
+const sourced = (id: string, url: string): Track => ({
+  ...track(id),
+  source: { site: 'test', url },
+});
+
 /** Feed 1 Hz time ticks from `from` to `to` inclusive. */
 function listen(fake: FakeEngine, from: number, to: number): void {
   for (let sec = from; sec <= to; sec++) fake.listener?.onTime(sec);
@@ -79,9 +93,14 @@ function seeded(seed = 42): () => number {
   };
 }
 
-function setup(opts: { skipOnError?: boolean } = {}) {
-  const fake = new FakeEngine();
-  const player = new PlayerEngine(fake, resolve, { random: seeded(), ...opts });
+function setup(
+  opts: { skipOnError?: boolean; wantsNeighbours?: boolean } = {},
+) {
+  const fake = new FakeEngine(opts.wantsNeighbours ?? false);
+  const player = new PlayerEngine(fake, resolve, {
+    random: seeded(),
+    skipOnError: opts.skipOnError,
+  });
   const ids = () => player.current()?.id;
   return { fake, player, ids };
 }
@@ -251,6 +270,153 @@ describe('PlayerEngine', () => {
     expect(offline.status()).toBe('error');
   });
 
+  describe('applyOrder', () => {
+    it('replaces the order without reloading the same media', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 }); // b
+      fake.listener?.onTime(30);
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder(tracks.slice(1, 4), 0, {
+        positionSec: 30,
+      });
+
+      expect(result).toEqual({ reloaded: false, moved: true });
+      expect(player.current()?.id).toBe('b');
+      expect(fake.loaded.length).toBe(loads);
+      expect(fake.seeks.at(-1)).toBe(30);
+      expect(player.position()).toBe(30);
+    });
+
+    it('reports no move when the same entry stays current', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 }); // b
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder(tracks.slice(0, 3), 1);
+
+      expect(result).toEqual({ reloaded: false, moved: false });
+      expect(fake.loaded.length).toBe(loads);
+    });
+
+    it('reloads when the media behind the same cue changes', async () => {
+      const { player, fake } = setup();
+      const first = sourced('a', '/a-v1.mp3');
+      const second = sourced('a', '/a-v2.mp3');
+      await player.setQueue([first], { autoplay: false });
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder([second], 0);
+
+      expect(result.reloaded).toBe(true);
+      expect(fake.loaded.length).toBe(loads + 1);
+      expect(player.current()).toBe(second);
+      expect(player.status()).toBe('playing');
+    });
+
+    it('skips between duplicate entries without reloading, seeking to the position', async () => {
+      const { player, fake } = setup();
+      const one = sourced('a', '/a.mp3');
+      const two = sourced('a', '/a.mp3');
+      await player.setQueue([one, two], { startIndex: 0 });
+      fake.listener?.onTime(100);
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder([one, two], 1, {
+        positionSec: 5,
+      });
+
+      expect(result).toEqual({ reloaded: false, moved: true });
+      expect(player.currentIndex()).toBe(1);
+      expect(player.current()?.id).toBe('a');
+      expect(fake.loaded.length).toBe(loads);
+      expect(fake.seeks.at(-1)).toBe(5);
+    });
+
+    it('refreshes the neighbour window after an in-place order change', async () => {
+      const { player, fake } = setup({ wantsNeighbours: true });
+      await player.setQueue([track('a'), track('b')], { startIndex: 0 });
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder(
+        [track('a'), track('b'), track('c')],
+        0,
+      );
+      await flush();
+
+      expect(result).toEqual({ reloaded: false, moved: false });
+      expect(fake.loaded.length).toBe(loads + 1);
+      expect(fake.neighbours.at(-1)?.next?.id).toBe('b');
+      expect(fake.neighbours.at(-1)?.previous).toBeUndefined();
+    });
+
+    it('clears pending play-next entries when a session order is applied', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      player.playNext([track('x')]);
+      expect(player.playNextIndices().length).toBe(1);
+
+      await player.applyOrder(tracks.slice(0, 2), 0);
+
+      expect(player.playNextIndices()).toEqual([]);
+      expect(player.queue().map((t) => t.id)).toEqual(['a', 'b']);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['b']);
+    });
+
+    it('forces shuffle and repeat off for a session order, unless sessionMode is false', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks, { startIndex: 0 });
+      player.setShuffle(true);
+      player.setRepeat('one');
+
+      await player.applyOrder(tracks, 0);
+      expect(player.shuffle()).toBe(false);
+      expect(player.repeat()).toBe('off');
+
+      player.setShuffle(true);
+      player.setRepeat('all');
+      await player.applyOrder(tracks, 0, { sessionMode: false });
+      expect(player.shuffle()).toBe(true);
+      expect(player.repeat()).toBe('all');
+    });
+
+    it('clears the engine when the session order is empty', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3));
+      const loads = fake.loaded.length;
+
+      const result = await player.applyOrder([], 0);
+
+      expect(result).toEqual({ reloaded: false, moved: true });
+      expect(player.queue()).toEqual([]);
+      expect(player.current()).toBeNull();
+      expect(player.status()).toBe('idle');
+      expect(player.position()).toBe(0);
+      expect(fake.loaded.length).toBe(loads);
+    });
+  });
+
+  describe('seekIfDrifted', () => {
+    it('does not scrub within the tolerance, but does beyond it', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([track('a')]);
+      fake.listener?.onTime(10);
+      const seeks = fake.seeks.length;
+
+      await player.seekIfDrifted(11.5, 2);
+      expect(fake.seeks.length).toBe(seeks);
+
+      await player.seekIfDrifted(30);
+      expect(fake.seeks.at(-1)).toBe(30);
+    });
+
+    it('is a no-op without a current track', async () => {
+      const { player, fake } = setup();
+      await player.seekIfDrifted(50);
+      expect(fake.seeks).toEqual([]);
+    });
+  });
+
   describe('play counting', () => {
     it('counts a play once 90% is listened to, and only once', async () => {
       const { player, fake } = setup();
@@ -402,6 +568,67 @@ describe('PlayerEngine', () => {
       await flush();
       expect(unresolved.status()).toBe('error');
       expect(unresolved.lastPlay()).toBeNull();
+    });
+  });
+
+  describe('dropPlayed', () => {
+    it('drops older played entries and shifts the cursor without reloading', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks, { startIndex: 4 }); // e
+      player.playNext([track('x')]);
+      fake.listener?.onTime(30);
+      const loads = fake.loaded.length;
+      const seeks = fake.seeks.length;
+      const position = player.position();
+      const status = player.status();
+
+      player.dropPlayed(2);
+
+      // a, b were more than 2 entries behind the cursor.
+      expect(player.queue().map((t) => t.id)).toEqual(['c', 'd', 'e', 'x']);
+      expect(player.currentIndex()).toBe(2);
+      expect(player.current()?.id).toBe('e');
+      expect(player.playNextIndices()).toEqual([3]);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['x']);
+      // Playback continues untouched.
+      expect(player.status()).toBe(status);
+      expect(player.position()).toBe(position);
+      expect(fake.loaded.length).toBe(loads);
+      expect(fake.seeks.length).toBe(seeks);
+
+      // Keep counts at or beyond the cursor, and negative values, are no-ops.
+      player.dropPlayed(-1);
+      player.dropPlayed(2);
+      player.dropPlayed(10);
+      expect(player.queue().map((t) => t.id)).toEqual(['c', 'd', 'e', 'x']);
+      expect(player.currentIndex()).toBe(2);
+      expect(player.playNextIndices()).toEqual([3]);
+    });
+  });
+
+  describe('loadSeq', () => {
+    it('bumps on every load and when the queue is cleared or replaced', async () => {
+      const { player } = setup();
+      const start = player.loadSeq();
+
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      const first = player.loadSeq();
+      expect(first).toBeGreaterThan(start);
+
+      await player.next();
+      const second = player.loadSeq();
+      expect(second).toBeGreaterThan(first);
+
+      await player.clear();
+      const cleared = player.loadSeq();
+      expect(cleared).toBeGreaterThan(second);
+
+      await player.setQueue([]);
+      const emptied = player.loadSeq();
+      expect(emptied).toBeGreaterThan(cleared);
+
+      await player.setQueue(tracks.slice(0, 2));
+      expect(player.loadSeq()).toBeGreaterThan(emptied);
     });
   });
 });

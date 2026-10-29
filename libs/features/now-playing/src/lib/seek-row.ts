@@ -1,8 +1,10 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  booleanAttribute,
   computed,
   inject,
+  input,
   signal,
 } from '@angular/core';
 import { PlayerStore } from '@open-record/state';
@@ -58,6 +60,9 @@ import { formatTime } from './time';
 export class OrSeekRow {
   private readonly player = inject(PlayerStore);
 
+  /** Disable scrubbing (e.g. this client cannot play the current local entry). */
+  readonly disabled = input(false, { transform: booleanAttribute });
+
   /** Slider value while the user drags; null follows playback. */
   protected readonly scrub = signal<number | null>(null);
 
@@ -69,7 +74,10 @@ export class OrSeekRow {
   });
 
   protected readonly canSeek = computed(
-    () => this.player.duration() > 0 && !this.player.isLoading(),
+    () =>
+      !this.disabled() &&
+      this.player.duration() > 0 &&
+      !this.player.isLoading(),
   );
 
   protected readonly shownPosition = computed(

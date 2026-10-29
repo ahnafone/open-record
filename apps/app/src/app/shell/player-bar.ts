@@ -7,8 +7,17 @@ import {
   output,
   signal,
 } from '@angular/core';
+import { Capacitor } from '@capacitor/core';
 import type { Track } from '@open-record/models';
-import { AuthStore, LibraryStore, PlayerStore } from '@open-record/state';
+// Eager shell trigger for the one picker mounted by the shell (like App).
+// eslint-disable-next-line @nx/enforce-module-boundaries
+import { DevicePickerService } from '@open-record/features/now-playing';
+import {
+  AuthStore,
+  LibraryStore,
+  PlayerStore,
+  SessionStore,
+} from '@open-record/state';
 import {
   OrIcon,
   OrIconButton,
@@ -16,6 +25,7 @@ import {
   OrSlider,
   OrSpinner,
   OrToast,
+  type IconName,
 } from '@open-record/ui';
 
 /** `m:ss` (or `h:mm:ss`); same as Now Playing's, kept here so the shell does not pull that chunk. */
@@ -113,6 +123,16 @@ function formatTime(totalSec: number): string {
     </div>
 
     <div class="side">
+      <button
+        class="device"
+        type="button"
+        aria-haspopup="dialog"
+        [attr.aria-label]="'Playback device: ' + targetName()"
+        (click)="picker.show()"
+      >
+        <or-icon [name]="deviceIcon()" [size]="20" />
+        <span class="device-label">{{ targetName() }}</span>
+      </button>
       @if (player.current(); as track) {
         <or-icon-button
           icon="bookmark"
@@ -246,15 +266,80 @@ function formatTime(totalSec: number): string {
       align-items: center;
       justify-content: flex-end;
       gap: var(--spacing-xxs);
+      min-width: 0;
+    }
+    .device {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--spacing-xs);
+      flex: 0 1 auto;
+      min-inline-size: var(--spacing-touch);
+      min-block-size: var(--spacing-touch);
+      padding: 0 var(--spacing-sm);
+      border: 0;
+      border-radius: var(--rounded-md);
+      background: transparent;
+      color: var(--color-muted);
+      font: inherit;
+      font-size: var(--type-meta-font-size);
+      cursor: pointer;
+      transition:
+        background var(--duration-fast) var(--ease-standard),
+        color var(--duration-fast) var(--ease-standard),
+        transform var(--duration-fast) var(--ease-standard);
+    }
+    .device-label {
+      overflow: hidden;
+      min-inline-size: 0;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @media (hover: hover) {
+      .device:hover {
+        background: color-mix(in srgb, var(--color-text) 7%, transparent);
+        color: var(--color-text);
+      }
+    }
+    .device:active {
+      transform: scale(0.94);
+    }
+    .device:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+    /* Keep the right cluster from crowding between the bar's 900px floor and 1100px. */
+    @media (max-width: 1099px) {
+      .device {
+        justify-content: center;
+        inline-size: var(--spacing-touch);
+        padding: 0;
+      }
+      .device-label {
+        display: none;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .device {
+        transition-duration: 1ms;
+      }
+      .device:active {
+        transform: none;
+      }
     }
     .volume {
       inline-size: 112px;
-      flex: none;
+      /* Yield width to the target label before the right cluster overflows. */
+      flex: 0 1 auto;
+      min-inline-size: calc(var(--spacing-touch) + var(--spacing-md));
     }
   `,
 })
 export class OrPlayerBar {
   protected readonly player = inject(PlayerStore);
+  protected readonly session = inject(SessionStore);
+  protected readonly picker = inject(DevicePickerService);
   private readonly library = inject(LibraryStore);
   private readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
@@ -263,6 +348,42 @@ export class OrPlayerBar {
   readonly panelOpen = input(false);
   /** Open or close the Now Playing panel. */
   readonly togglePanel = output<void>();
+
+  /** Name of the device (or speaker) currently playing; "This device" locally. */
+  protected readonly targetName = computed(() => {
+    const target = this.session.target();
+    if (!target) return 'This device';
+    if (target.kind === 'cast') {
+      const cast = this.session
+        .devices()
+        .find(
+          (device) =>
+            device.platform === 'cast' &&
+            (device.castId ?? device.id) === target.castId,
+        );
+      return cast?.name ?? 'speaker';
+    }
+    if (target.clientId === this.session.clientId()) return 'This device';
+    return (
+      this.session.devices().find((device) => device.id === target.clientId)
+        ?.name ?? 'another device'
+    );
+  });
+
+  /** Cast for a speaker, desktop for web, phone for native. */
+  protected readonly deviceIcon = computed<IconName>(() => {
+    const target = this.session.target();
+    if (target?.kind === 'cast') return 'cast';
+    const device =
+      target?.kind === 'device'
+        ? this.session.devices().find((item) => item.id === target.clientId)
+        : undefined;
+    if (device?.platform === 'web') return 'desktop';
+    if (device?.platform === 'android' || device?.platform === 'ios') {
+      return 'phone';
+    }
+    return Capacitor.isNativePlatform() ? 'phone' : 'desktop';
+  });
 
   protected readonly fmt = formatTime;
   /** Slider value while the user drags; null follows playback. */

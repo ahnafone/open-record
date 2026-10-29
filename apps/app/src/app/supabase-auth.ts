@@ -84,6 +84,8 @@ export class SupabaseAuth extends AuthPort {
   /** A reset link was opened before anyone listened (replayed on subscribe). */
   private recoveryPending = false;
   private stopListening?: () => void;
+  /** In-flight `refreshAccessToken` (shared by concurrent callers). */
+  private refreshing: Promise<string | null> | null = null;
 
   /** Fetched server project per server URL (failures are not cached, so they retry). */
   private serverProjects = new Map<string, Promise<AuthProjectConfig | null>>();
@@ -232,6 +234,30 @@ export class SupabaseAuth extends AuthPort {
     const client = await this.ensureClient();
     if (!client) return null;
     const { data } = await client.auth.getSession();
+    return data.session?.access_token ?? null;
+  }
+
+  /**
+   * Refresh the Supabase session. Concurrent callers share one request (the
+   * session transport may get several 401s at once). Null when signed out or
+   * the refresh fails; this never prompts the user.
+   */
+  refreshAccessToken(): Promise<string | null> {
+    this.refreshing ??= this.refreshSession()
+      .catch(() => null)
+      .finally(() => {
+        this.refreshing = null;
+      });
+    return this.refreshing;
+  }
+
+  private async refreshSession(): Promise<string | null> {
+    const client = await this.ensureClient();
+    if (!client) return null;
+    const { data: current } = await client.auth.getSession();
+    if (!current.session) return null;
+    const { data, error } = await client.auth.refreshSession();
+    if (error) return null;
     return data.session?.access_token ?? null;
   }
 

@@ -63,8 +63,22 @@ export class PlayCountsStore {
       (a, b) => b.count - a.count || b.lastPlayedAt - a.lastPlayedAt,
     ),
   );
+  /**
+   * Records played recently with a track snapshot, most recently played first
+   * (ties: first played first). Used by the "Recently Played" curated list.
+   */
+  readonly recentlyPlayed = computed<readonly PlayCountRecord[]>(() =>
+    [...this._counts().values()]
+      .filter((r) => !!r.track)
+      .sort(
+        (a, b) =>
+          b.lastPlayedAt - a.lastPlayedAt || b.firstPlayedAt - a.firstPlayedAt,
+      ),
+  );
+  /** True once the stored counts are in memory (successfully or not). */
+  readonly loaded = signal(false);
 
-  private loaded: Promise<void> | null = null;
+  private hydration: Promise<void> | null = null;
   /** Bumped by `clear()`: results of requests started before it are dropped. */
   private generation = 0;
   /** Serializes play-count writes so concurrent plays cannot interleave. */
@@ -158,6 +172,30 @@ export class PlayCountsStore {
       await this.write(() => this.storage.playCounts.save(next));
     });
     if (this.enabled()) this.scheduleFlush();
+  }
+
+  /**
+   * Note that `track` was just played, for history-like lists (Recently
+   * Played). Unlike `recordPlay()` this never counts a play and never
+   * uploads: an absent record is created with a zero count, and an existing
+   * one keeps its count and pending plays while its latest track snapshot and
+   * `lastPlayedAt` are refreshed.
+   */
+  async recordStart(track: Track, at = Date.now()): Promise<void> {
+    await this.load();
+    await this.enqueue(async () => {
+      const prev = this._counts().get(track.id);
+      const next: PlayCountRecord = {
+        trackId: track.id,
+        count: prev?.count ?? 0,
+        pending: prev?.pending ?? 0,
+        firstPlayedAt: prev?.firstPlayedAt ?? at,
+        lastPlayedAt: prev ? Math.max(prev.lastPlayedAt, at) : at,
+        track: { ...track },
+      };
+      this._counts.update((m) => new Map(m).set(track.id, next));
+      await this.write(() => this.storage.playCounts.save(next));
+    });
   }
 
   /**
@@ -283,8 +321,8 @@ export class PlayCountsStore {
 
   /** Hydration, run once (the first caller's promise is shared). */
   private load(): Promise<void> {
-    this.loaded ??= this.hydrate();
-    return this.loaded;
+    this.hydration ??= this.hydrate();
+    return this.hydration;
   }
 
   private async hydrate(): Promise<void> {
@@ -301,6 +339,8 @@ export class PlayCountsStore {
       });
     } catch (err) {
       console.error('Could not load play counts.', err);
+    } finally {
+      this.loaded.set(true);
     }
   }
 

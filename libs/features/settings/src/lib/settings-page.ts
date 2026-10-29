@@ -28,6 +28,7 @@ import {
   LibraryStore,
   PairingScannerPort,
   PlaylistsStore,
+  SessionStore,
   SettingsStore,
   type StorageUsage,
 } from '@open-record/state';
@@ -221,6 +222,45 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
             </option>
           }
         </select>
+      }
+    </div>
+
+    <or-section-head heading="Playback" />
+    <div class="playback">
+      <label class="field-label" for="or-device-name">This device</label>
+      <input
+        id="or-device-name"
+        class="input"
+        type="text"
+        autocomplete="off"
+        autocapitalize="words"
+        spellcheck="false"
+        [value]="deviceNameDraft()"
+        (input)="onDeviceNameInput($event)"
+        (blur)="saveDeviceName()"
+      />
+      <or-switch
+        label="Sync playback between devices"
+        [description]="syncDescription()"
+        [checked]="settings.sessionEnabled()"
+        [disabled]="!playbackAvailable()"
+        (checkedChange)="setSessionEnabled($event)"
+      />
+      <or-switch
+        label="Cast to Google Home"
+        [description]="castDescription()"
+        [checked]="settings.castEnabled()"
+        [disabled]="!playbackAvailable()"
+        (checkedChange)="setCastEnabled($event)"
+      />
+      @if (settings.castEnabled()) {
+        <or-button
+          class="clear-cache"
+          [disabled]="clearingCast()"
+          (click)="clearCastCache()"
+        >
+          {{ clearingCast() ? 'Clearing cast cache…' : 'Clear cast cache' }}
+        </or-button>
       }
     </div>
 
@@ -494,6 +534,14 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       display: grid;
       gap: var(--spacing-xs);
     }
+    .playback {
+      display: grid;
+      gap: var(--spacing-xs);
+    }
+    .playback .clear-cache {
+      justify-self: start;
+      margin-top: var(--spacing-xs);
+    }
     .select {
       appearance: none;
       padding-inline-end: 36px;
@@ -564,6 +612,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
 export class SettingsPage {
   protected readonly library = inject(LibraryStore);
   protected readonly settings = inject(SettingsStore);
+  protected readonly session = inject(SessionStore);
   protected readonly auth = inject(AuthStore);
   protected readonly viewport = inject(OrViewport);
   private readonly route = inject(ActivatedRoute);
@@ -609,6 +658,46 @@ export class SettingsPage {
 
   protected readonly imported = this.library.importedTracks;
   protected readonly busy = signal(false);
+
+  // Device name draft; reset after saving so the store's trimming and length
+  // limit show in the field.
+  protected readonly deviceNameDraft = linkedSignal(() =>
+    this.settings.deviceName(),
+  );
+  protected readonly clearingCast = signal(false);
+
+  /** A stream server is paired (saved and applied, or at least a URL saved). */
+  protected readonly serverPaired = computed(
+    () =>
+      this.settings.downloadServerConfigured() ||
+      !!this.settings.downloadServerUrl(),
+  );
+
+  /** Session sync and casting need a paired server and a signed-in account. */
+  protected readonly playbackAvailable = computed(
+    () => this.serverPaired() && this.auth.signedIn(),
+  );
+
+  protected readonly playbackDisabledReason = computed(() => {
+    const server = this.serverPaired();
+    if (!server && !this.auth.signedIn())
+      return 'Pair a stream server and sign in to sync or cast.';
+    if (!server) return 'Pair a stream server to sync or cast.';
+    return 'Sign in to your account to sync or cast.';
+  });
+
+  /** Why the playback switches are off (also read by screen readers). */
+  protected readonly syncDescription = computed(() =>
+    this.playbackAvailable()
+      ? 'Needs a signed-in account and the stream server.'
+      : this.playbackDisabledReason(),
+  );
+
+  protected readonly castDescription = computed(() =>
+    this.playbackAvailable()
+      ? 'Uses the PC running the server to play on the speaker.'
+      : this.playbackDisabledReason(),
+  );
 
   // Download server form drafts; reset when the stored values change.
   protected readonly serverUrl = linkedSignal(() =>
@@ -755,6 +844,46 @@ export class SettingsPage {
 
   protected setMobileData(on: boolean): void {
     void this.saveSetting(() => this.settings.setAutoDownload({ mobileData: on }));
+  }
+
+  protected setSessionEnabled(on: boolean): void {
+    void this.saveSetting(() => this.settings.setSessionEnabled(on));
+  }
+
+  protected setCastEnabled(on: boolean): void {
+    void this.saveSetting(() => this.settings.setCastEnabled(on));
+  }
+
+  protected onDeviceNameInput(event: Event): void {
+    this.deviceNameDraft.set((event.target as HTMLInputElement).value);
+  }
+
+  protected async saveDeviceName(): Promise<void> {
+    try {
+      await this.settings.setDeviceName(this.deviceNameDraft());
+    } catch {
+      this.toast.show('Could not save the device name. Try again.');
+    } finally {
+      this.deviceNameDraft.set(this.settings.deviceName());
+    }
+  }
+
+  protected async clearCastCache(): Promise<void> {
+    if (this.clearingCast()) return;
+    this.clearingCast.set(true);
+    try {
+      const { freedBytes, retainedBytes } = await this.session.clearCastCache();
+      const bytes = `${this.formatBytes(freedBytes)} freed, ${this.formatBytes(retainedBytes)} retained`;
+      this.toast.show(
+        freedBytes || retainedBytes
+          ? `Cast cache cleared: ${bytes}`
+          : `Cast cache is already empty: ${bytes}`,
+      );
+    } catch {
+      this.toast.show('Could not clear the cast cache. Try again.');
+    } finally {
+      this.clearingCast.set(false);
+    }
   }
 
   protected setLocation(event: Event): void {

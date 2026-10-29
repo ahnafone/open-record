@@ -1,5 +1,5 @@
 import type { NetworkInterfaceInfo } from 'node:os';
-import { pickLanUrl, type InterfaceMap } from './network';
+import { isLoopbackUrl, pickLanUrl, type InterfaceMap } from './network';
 
 function addr(address: string, internal = false): NetworkInterfaceInfo {
   return {
@@ -45,5 +45,20 @@ describe('pickLanUrl', () => {
     });
     expect(picked.url).toBe('http://172.17.0.2:8787');
     expect(picked.confident).toBe(false);
+  });
+});
+
+describe('isLoopbackUrl', () => {
+  it('detects loopback hosts', () => {
+    expect(isLoopbackUrl('http://127.0.0.1:8787')).toBe(true);
+    expect(isLoopbackUrl('http://localhost:8787')).toBe(true);
+    expect(isLoopbackUrl('https://LOCALHOST')).toBe(true);
+    expect(isLoopbackUrl('http://[::1]:8787')).toBe(true);
+  });
+
+  it('rejects LAN and public hosts', () => {
+    expect(isLoopbackUrl('http://192.168.1.20:8787')).toBe(false);
+    expect(isLoopbackUrl('http://127.0.0.1.example.com')).toBe(false);
+    expect(isLoopbackUrl('not a url')).toBe(false);
   });
 });

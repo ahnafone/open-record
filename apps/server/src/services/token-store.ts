@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MIN_TOKEN_LENGTH } from '../config';
 
@@ -46,12 +45,6 @@ export interface ResolvedToken {
   source: 'env' | 'file' | 'generated';
   /** Path of the token file (absent when the token comes from the environment). */
   path?: string;
-}
-
-/** Default data directory: `OPEN_RECORD_DATA_DIR`, else `~/.config/open-record`. */
-export function defaultDataDir(env: Record<string, string | undefined>): string {
-  const fromEnv = env['OPEN_RECORD_DATA_DIR']?.trim();
-  return fromEnv || join(homedir(), '.config', 'open-record');
 }
 
 /**

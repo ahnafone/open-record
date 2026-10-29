@@ -84,3 +84,18 @@ export function formatAddedAt(ms: number | undefined): string {
   dateFormat ??= new Intl.DateTimeFormat();
   return dateFormat.format(ms);
 }
+
+let lastPlayedFormat: Intl.DateTimeFormat | undefined;
+
+/**
+ * Locale date and time for an epoch-ms last-played timestamp, with one cached
+ * formatter; `—` when unknown.
+ */
+export function formatLastPlayed(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms)) return '—';
+  lastPlayedFormat ??= new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+  return lastPlayedFormat.format(ms);
+}

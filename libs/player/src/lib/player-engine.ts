@@ -116,6 +116,8 @@ export class PlayerEngine {
     track: Track;
     at: number;
   } | null>(null);
+  /** Load generation, mirrored from `loadToken` for consumers. */
+  private readonly _loadSeq = signal(0);
 
   readonly queue = this._queue.asReadonly();
   readonly status = this._status.asReadonly();
@@ -130,6 +132,11 @@ export class PlayerEngine {
   readonly muted = this._muted.asReadonly();
   /** Last counted play; `seq` increments once per play. */
   readonly lastPlay = this._lastPlay.asReadonly();
+  /**
+   * Bumped on every load attempt, and when the queue is cleared, so a stale
+   * load can be told apart from a new start.
+   */
+  readonly loadSeq = this._loadSeq.asReadonly();
   /** False when the engine has no software volume (native: hardware keys). */
   readonly canSetVolume: boolean;
 
@@ -323,6 +330,22 @@ export class PlayerEngine {
     return true;
   }
 
+  /**
+   * Forget all but the most recent `keep` played entries before the cursor.
+   * Playback is unaffected: no media is reloaded and status/position stay put.
+   */
+  dropPlayed(keep: number): void {
+    const cursor = this._cursor();
+    if (keep < 0 || cursor <= keep) return;
+    const n = cursor - keep;
+    const shift = (i: number) => i - n;
+    this._queue.update((q) => q.slice(n));
+    this._order.update((o) => o.filter((i) => i >= n).map(shift));
+    this._playNext.update((p) => p.filter((i) => i >= n).map(shift));
+    this._cursor.set(cursor - n);
+    this.refreshNeighbours();
+  }
+
   /** Jump to a queue index (not order position) and play it. */
   async playAt(queueIndex: number, autoplay = true): Promise<void> {
     const cursor = this._order().indexOf(queueIndex);
@@ -332,7 +355,7 @@ export class PlayerEngine {
   }
 
   async clear(): Promise<void> {
-    this.loadToken++;
+    this.nextLoadToken();
     this._queue.set([]);
     this._order.set([]);
     this._cursor.set(-1);
@@ -342,6 +365,79 @@ export class PlayerEngine {
     this._duration.set(0);
     this._error.set(null);
     await this.engine.stop();
+  }
+
+  /**
+   * Replace the play order in place. When the same media is still current, no
+   * media is reloaded. Clears `_playNext`, forces shuffle and repeat off while
+   * a session owns playback, and calls the private `refreshNeighbours()` itself
+   * (no new public engine API).
+   */
+  async applyOrder(
+    order: readonly Track[],
+    cursor: number,
+    opts: {
+      autoplay?: boolean;
+      /** Media identity for reload decisions. Default: source url/catalogFile/sourceFile, else id. */
+      mediaKey?: (track: Track) => string;
+      /** Position to apply when nothing was reloaded. */
+      positionSec?: number;
+      /** Session mode: force `_shuffle=false`, `_repeat='off'`. Default true. */
+      sessionMode?: boolean;
+    } = {},
+  ): Promise<{ reloaded: boolean; moved: boolean }> {
+    const mediaKey = opts.mediaKey ?? defaultMediaKey;
+    const previous = this.current();
+    const previousCursor = this._cursor();
+    const previousKey = previous ? mediaKey(previous) : undefined;
+
+    if (opts.sessionMode ?? true) {
+      this._shuffle.set(false);
+      this._repeat.set('off');
+    }
+
+    if (!order.length) {
+      await this.clear();
+      return { reloaded: false, moved: true };
+    }
+
+    const index = Math.min(Math.max(cursor, 0), order.length - 1);
+    const next = order[index];
+    const nextKey = mediaKey(next);
+    const sameMedia = previous !== null && previousKey === nextKey;
+    const moved =
+      previousCursor !== index ||
+      !previous ||
+      previous.id !== next.id ||
+      previousKey !== nextKey;
+
+    this._queue.set([...order]);
+    this._order.set(order.map((_, i) => i));
+    this._cursor.set(index);
+    this._playNext.set([]);
+
+    if (sameMedia) {
+      if (opts.positionSec !== undefined) {
+        await this.seek(opts.positionSec);
+      }
+      if (this._status() === 'ended') this._status.set('paused');
+      this.refreshNeighbours();
+      return { reloaded: false, moved };
+    }
+
+    await this.loadCurrent(opts.autoplay ?? true);
+    return { reloaded: true, moved };
+  }
+
+  /**
+   * Seek only when the difference exceeds `tolerance` (the 30 s keepalives must
+   * not scrub). No-op without a current track.
+   */
+  async seekIfDrifted(positionSec: number, tolerance = 2): Promise<void> {
+    if (!this.current()) return;
+    if (Math.abs(this._position() - positionSec) > tolerance) {
+      await this.seek(positionSec);
+    }
   }
 
   // ---- Transport ---------------------------------------------------------
@@ -473,12 +569,19 @@ export class PlayerEngine {
   }
 
   async destroy(): Promise<void> {
-    this.loadToken++;
+    this.nextLoadToken();
     this.engine.setListener(null);
     await this.engine.destroy();
   }
 
   // ---- Internals -------------------------------------------------------
+
+  /** Start a new load generation, invalidating stale async work. */
+  private nextLoadToken(): number {
+    const token = ++this.loadToken;
+    this._loadSeq.set(token);
+    return token;
+  }
 
   /**
    * Order position `step` away from the cursor, honouring repeat-all wrap.
@@ -624,7 +727,7 @@ export class PlayerEngine {
   }
 
   private async loadCurrent(autoplay: boolean): Promise<void> {
-    const token = ++this.loadToken;
+    const token = this.nextLoadToken();
     this.listenedSec = 0;
     this.lastTick = 0;
     const track = this.current();
@@ -798,6 +901,11 @@ export class PlayerEngine {
       }
     })();
   }
+}
+
+/** Identity of the media behind a track, for reload decisions. */
+function defaultMediaKey(track: Track): string {
+  return track.source?.url ?? track.catalogFile ?? track.sourceFile ?? track.id;
 }
 
 function errorMessage(err: unknown, fallback: string): string {

@@ -5,18 +5,24 @@ import {
   inject,
   output,
 } from '@angular/core';
-import { LibraryStore, PlayerStore } from '@open-record/state';
+import { Capacitor } from '@capacitor/core';
+// Eager shell trigger for the one picker mounted by the shell (like App).
+// eslint-disable-next-line @nx/enforce-module-boundaries
+import { DevicePickerService } from '@open-record/features/now-playing';
+import { LibraryStore, PlayerStore, SessionStore } from '@open-record/state';
 import {
   OrIcon,
   OrIconButton,
   OrProgressLine,
   OrSleeve,
   OrSpinner,
+  type IconName,
 } from '@open-record/ui';
 
 /**
  * Mini player strip above the tab bar: 2px progress line, 44px ivory-framed
- * thumbnail, title/artist (both open Now Playing), play/pause and next.
+ * thumbnail, title/artist (both open Now Playing), the device picker, play/pause
+ * and next.
  * The shell only renders it while a track is loaded.
  */
 @Component({
@@ -50,6 +56,17 @@ import {
         <span class="title">{{ track.title }}</span>
         <span class="artist">{{ track.artist }}</span>
       </button>
+      @if (session.available()) {
+        <button
+          class="device"
+          type="button"
+          aria-haspopup="dialog"
+          [attr.aria-label]="'Playback device: ' + targetName()"
+          (click)="picker.show()"
+        >
+          <or-icon [name]="deviceIcon()" [size]="20" />
+        </button>
+      }
       <or-icon-button
         [label]="player.isPlaying() ? 'Pause' : 'Play'"
         [icon]="player.isPlaying() ? 'pause' : 'play'"
@@ -67,7 +84,7 @@ import {
     :host {
       position: relative;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
       align-items: center;
       gap: 6px;
       padding: 6px 6px 6px 8px;
@@ -134,11 +151,87 @@ import {
       font-size: var(--type-meta-font-size);
       color: var(--color-muted);
     }
+    /* Same 44px plain icon-button target as OrIconButton. */
+    .device {
+      appearance: none;
+      display: grid;
+      place-items: center;
+      inline-size: var(--spacing-touch);
+      block-size: var(--spacing-touch);
+      padding: 0;
+      border: 0;
+      border-radius: var(--rounded-md);
+      background: transparent;
+      color: var(--color-text);
+      cursor: pointer;
+      transition:
+        background var(--duration-fast) var(--ease-standard),
+        transform var(--duration-fast) var(--ease-standard);
+    }
+    @media (hover: hover) {
+      .device:hover {
+        background: color-mix(in srgb, var(--color-text) 7%, transparent);
+      }
+    }
+    .device:active {
+      transform: scale(0.94);
+    }
+    .device:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .device {
+        transition-duration: 1ms;
+      }
+      .device:active {
+        transform: none;
+      }
+    }
   `,
 })
 export class OrMiniPlayer {
   protected readonly player = inject(PlayerStore);
+  protected readonly session = inject(SessionStore);
+  protected readonly picker = inject(DevicePickerService);
   private readonly library = inject(LibraryStore);
+
+  /** Name of the device (or speaker) currently playing; "This device" locally. */
+  protected readonly targetName = computed(() => {
+    const target = this.session.target();
+    if (!target) return 'This device';
+    if (target.kind === 'cast') {
+      const cast = this.session
+        .devices()
+        .find(
+          (device) =>
+            device.platform === 'cast' &&
+            (device.castId ?? device.id) === target.castId,
+        );
+      return cast?.name ?? 'speaker';
+    }
+    if (target.clientId === this.session.clientId()) return 'This device';
+    return (
+      this.session.devices().find((device) => device.id === target.clientId)
+        ?.name ?? 'another device'
+    );
+  });
+
+  /** Cast for a speaker, desktop for web, phone for native. */
+  protected readonly deviceIcon = computed<IconName>(() => {
+    const target = this.session.target();
+    if (target?.kind === 'cast') return 'cast';
+    const device =
+      target?.kind === 'device'
+        ? this.session.devices().find((item) => item.id === target.clientId)
+        : undefined;
+    if (device?.platform === 'web') return 'desktop';
+    if (device?.platform === 'android' || device?.platform === 'ios') {
+      return 'phone';
+    }
+    return Capacitor.isNativePlatform() ? 'phone' : 'desktop';
+  });
+
   /** Sleeve art: provider URL, else the imported track's stored cover. */
   protected readonly art = computed(() => {
     const track = this.player.current();

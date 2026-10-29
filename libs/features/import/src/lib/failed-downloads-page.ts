@@ -24,8 +24,10 @@ import {
 import { MatchCandidates } from './match-candidates';
 
 /**
- * Fix failed downloads: songs that could not be saved, each with a "Fix link"
- * dialog that offers checked replacement recordings or a pasted YouTube link.
+ * Fix failed downloads: songs that could not be saved, each with a Retry that
+ * re-queues the same source and a "Fix link" dialog that offers checked
+ * replacement recordings or a pasted YouTube link. "Retry all" retries every
+ * failed song in turn.
  */
 @Component({
   selector: 'or-failed-downloads-page',
@@ -33,21 +35,34 @@ import { MatchCandidates } from './match-candidates';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <p class="lede">
-      These songs couldn’t be downloaded. Pick another version or paste a YouTube link; it is checked before
-      anything changes, and your title, artist, playlists and bookmark stay as they are.
+      These songs couldn’t be downloaded. Retry to download the same link again, or pick another version or paste a
+      YouTube link; a replacement is checked before anything changes, and your title, artist, playlists and bookmark
+      stay as they are.
     </p>
     @if (!loaded()) {
       <p class="loading" role="status"><or-spinner [size]="16" />Loading…</p>
-    } @else if (store.tracks().length) {
+    } @else if (store.listed().length) {
       @if (ageHint()) {
         <p class="note age-hint">
           Some songs are age-restricted. Add or refresh signed-in YouTube cookies on your download server (see its
-          README), then use Fix link to try again.
+          README), then press Retry to try again.
         </p>
       }
+      @if (store.tracks().length || retryingAll()) {
+        <div class="toolbar">
+          <or-button size="sm" (click)="retryAll()">
+            @if (retryingAll()) {
+              <or-spinner [size]="14" />Retrying…
+            } @else {
+              Retry all
+            }
+          </or-button>
+        </div>
+      }
       <ul class="crate">
-        @for (t of store.tracks(); track t.id) {
+        @for (t of store.listed(); track t.id) {
           @let source = sourceLabel(t.source?.site);
+          @let retrying = store.isRetrying(t.id);
           <li class="record">
             <span class="record-main">
               <or-sleeve size="thumb" [src]="t.artUrl" [alt]="''" />
@@ -58,16 +73,33 @@ import { MatchCandidates } from './match-candidates';
                   @if (source) {
                     <or-tag>{{ source }}</or-tag>
                   }
-                  <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ store.reason(t.id) }}</or-tag>
+                  @if (retrying) {
+                    <or-tag role="status"><or-spinner [size]="12" />Retrying…</or-tag>
+                  } @else {
+                    <or-tag class="tag-failed" icon="alert" [attr.title]="offline.error(t.id)">{{ store.reason(t.id) }}</or-tag>
+                  }
                   @if (formatDuration(t.durationSec); as d) {
                     <span class="dur">{{ d }}</span>
                   }
                 </span>
               </span>
             </span>
-            <or-button size="sm" [ariaLabel]="'Fix link for ' + t.title" (click)="openFix(t)">
-              <or-icon name="link" [size]="16" />Fix link
-            </or-button>
+            <span class="actions">
+              <or-button
+                size="sm"
+                [ariaLabel]="(retrying ? 'Retrying download of ' : 'Retry download of ') + t.title"
+                (click)="retry(t)"
+              >
+                @if (retrying) {
+                  <or-spinner [size]="14" />Retrying…
+                } @else {
+                  Retry
+                }
+              </or-button>
+              <or-button size="sm" [ariaLabel]="'Fix link for ' + t.title" (click)="openFix(t)">
+                <or-icon name="link" [size]="16" />Fix link
+              </or-button>
+            </span>
           </li>
         }
       </ul>
@@ -153,6 +185,8 @@ import { MatchCandidates } from './match-candidates';
     .detail { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-xxs) var(--spacing-xs); margin-top: 3px;
       min-block-size: 23px; font-size: var(--type-meta-font-size); color: var(--color-muted); }
     or-tag.tag-failed { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 55%, transparent); }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--spacing-xs); justify-content: flex-end; }
+    .toolbar { display: flex; justify-content: flex-end; margin-block-end: var(--spacing-sm); }
     .dur { font-variant-numeric: tabular-nums; }
     .for { display: grid; margin: 0; min-inline-size: 0; }
     .for-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
@@ -174,6 +208,11 @@ import { MatchCandidates } from './match-candidates';
       .record, .record:first-child { border-top: 0; border-bottom: 1px solid color-mix(in srgb, var(--color-border) 32%, transparent); }
       .record-main { min-block-size: 64px; }
     }
+    @media (max-width: 600px) {
+      .record { grid-template-columns: minmax(0, 1fr); }
+      .actions { padding-inline: var(--spacing-xs); }
+      .toolbar { justify-content: flex-start; }
+    }
     @media (prefers-reduced-motion: reduce) {
       input { transition-duration: 1ms; }
     }
@@ -191,6 +230,8 @@ export class FailedDownloadsPage {
   protected readonly pasteId = '__paste__';
 
   protected readonly loaded = signal(false);
+  /** True while "Retry all" is working through the failed songs. */
+  protected readonly retryingAll = signal(false);
   /** True when any listed song failed because YouTube asked for an age check. */
   protected readonly ageHint = computed(() =>
     this.store.tracks().some((t) => this.store.reason(t.id) === AGE_RESTRICTED_REASON),
@@ -216,6 +257,32 @@ export class FailedDownloadsPage {
       this.abort?.abort();
       void this.preview.stop();
     });
+  }
+
+  protected retry(track: Track): void {
+    void this.store.retry(track.id).catch(() => {
+      this.toast.show(`Could not retry “${track.title}”. Try again.`);
+    });
+  }
+
+  protected async retryAll(): Promise<void> {
+    if (this.retryingAll()) return;
+    this.retryingAll.set(true);
+    try {
+      const tracks = this.store.tracks();
+      let failed = 0;
+      for (const track of tracks) {
+        try {
+          await this.store.retry(track.id);
+        } catch {
+          failed += 1;
+        }
+      }
+      if (failed)
+        this.toast.show(`Could not retry ${failed} download${failed === 1 ? '' : 's'}. Try again.`);
+    } finally {
+      this.retryingAll.set(false);
+    }
   }
 
   protected openFix(track: Track): void {

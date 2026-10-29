@@ -4,6 +4,7 @@ import {
   failureReason,
   formatAddedAt,
   formatDuration,
+  formatLastPlayed,
   sourceLabel,
 } from './track-format';
 
@@ -14,6 +15,19 @@ describe('track row format', () => {
     expect(formatDuration(undefined)).toBe('');
     expect(formatDuration(0)).toBe('');
     expect(formatAddedAt(undefined)).toBe('—');
+  });
+
+  it('formats last-played date and time, and hides unknown ones', () => {
+    expect(formatLastPlayed(undefined)).toBe('—');
+    expect(formatLastPlayed(Number.NaN)).toBe('—');
+    expect(formatLastPlayed(Number.POSITIVE_INFINITY)).toBe('—');
+    const ms = Date.UTC(2026, 0, 2, 15, 4);
+    expect(formatLastPlayed(ms)).toBe(
+      new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      }).format(ms),
+    );
   });
 
   it('labels sources and download states', () => {

@@ -7,9 +7,8 @@ import {
 } from './catalog-tracks';
 
 function toTrack(entry: CatalogEntry): Track {
-  const track: Track & { audioFile?: string } = { ...entry, tags: entry.tags && [...entry.tags] };
-  delete track.audioFile;
-  return track;
+  const { audioFile, ...meta } = entry;
+  return { ...meta, tags: entry.tags && [...entry.tags], catalogFile: audioFile };
 }
 
 /**

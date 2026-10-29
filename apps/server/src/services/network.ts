@@ -65,6 +65,20 @@ export function listLanAddresses(interfaces: InterfaceMap): string[] {
 }
 
 /**
+ * True when the URL points back at this machine (`127.0.0.1`, `localhost`,
+ * `::1`): a cast speaker can never reach that, so casting must be disabled.
+ */
+export function isLoopbackUrl(value: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(value).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return false;
+  }
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
+}
+
+/**
  * Chooses the URL phones should use: `PUBLIC_URL` verbatim, else a specific
  * `HOST`, else the best non-internal IPv4 address on this machine.
  */

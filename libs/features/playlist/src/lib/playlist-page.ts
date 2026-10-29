@@ -13,8 +13,10 @@ import { Router, RouterLink } from '@angular/router';
 import type { Track } from '@open-record/models';
 import {
   AutoDownloadStore,
+  CuratedStore,
   LibraryStore,
   OfflineStore,
+  PlayCountsStore,
   PlayerStore,
   PlaylistsStore,
   REMOTE_PROVIDER_ID,
@@ -23,6 +25,7 @@ import {
   filterWords,
   formatAddedAt,
   formatDuration,
+  formatLastPlayed,
   nextSort,
   sortArrowFor,
   sortByColumn,
@@ -65,6 +68,16 @@ interface Row {
   source: string | null;
   addedAt: number | undefined;
   added: string;
+}
+
+/** Header values for the page, whether it shows a playlist or a curated list. */
+interface PageView {
+  readonly id: string;
+  readonly name: string;
+  readonly eyebrow: string;
+  readonly kind: 'playlist' | 'curated';
+  readonly visibility: 'private' | 'public';
+  readonly autoDownload: boolean;
 }
 
 function sortValue(row: Row, key: SortKey): string | number | undefined {
@@ -198,6 +211,7 @@ const ROW_STYLES = `
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
     .tags {
       display: flex;
       flex-wrap: wrap;
@@ -344,11 +358,16 @@ const ROW_STYLES = `
 
 /**
  * Playlist screen: header (name, visibility, count), Play / Shuffle, record
- * management (add, reorder, remove), rename, visibility and delete. The top
- * bar already carries the name as the page's h1, so the header uses an h2.
+ * management (add, reorder, remove), rename, visibility and delete. The same
+ * screen serves app-curated lists (`/curated/:id`), which are read-only: no
+ * add/rename/delete, auto-download or per-record moves/removal. The top bar
+ * already carries the name as the page's h1, so the header uses an h2.
  */
 /** Stable empty id list (download counts are memoized per array). */
 const NO_IDS: readonly string[] = [];
+
+/** Curated "Recently Played" starts with the last seven days. */
+const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
   selector: 'or-playlist-page',
@@ -373,14 +392,18 @@ const NO_IDS: readonly string[] = [];
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (playlist(); as pl) {
+    @if (view(); as vm) {
       <header class="head">
-        <span class="eyebrow">Playlist · listening copy</span>
-        <h2 class="name">{{ pl.name }}</h2>
+        <span class="eyebrow">{{ vm.eyebrow }}</span>
+        <h2 class="name">{{ vm.name }}</h2>
         <div class="meta">
-          <or-tag [icon]="pl.visibility === 'public' ? 'globe' : 'lock'">
-            {{ pl.visibility === 'public' ? 'Public' : 'Private' }}
-          </or-tag>
+          @if (vm.kind === 'curated') {
+            <or-tag>{{ showAll() ? 'All time' : 'Last 7 days' }}</or-tag>
+          } @else {
+            <or-tag [icon]="vm.visibility === 'public' ? 'globe' : 'lock'">
+              {{ vm.visibility === 'public' ? 'Public' : 'Private' }}
+            </or-tag>
+          }
           <or-tag>{{ countLabel() }}</or-tag>
         </div>
       </header>
@@ -392,50 +415,58 @@ const NO_IDS: readonly string[] = [];
         <or-button (click)="play(true)">
           <or-icon name="shuffle" [size]="20" />Shuffle
         </or-button>
-        <or-button data-add-records (click)="addOpen.set(true)">
-          <or-icon name="plus" [size]="20" />Add records
-        </or-button>
-        <or-button (click)="renameOpen.set(true)">
-          <or-icon name="settings" [size]="20" />Rename
-        </or-button>
-        <or-button (click)="toggleVisibility()">
-          <or-icon
-            [name]="pl.visibility === 'public' ? 'lock' : 'globe'"
-            [size]="20"
-          />{{ pl.visibility === 'public' ? 'Make private' : 'Make public' }}
-        </or-button>
-        <or-button variant="danger" (click)="remove()">
-          <or-icon name="trash" [size]="20" />Delete
-        </or-button>
+        @if (vm.kind === 'curated') {
+          @if (!showAll() && olderCount() > 0) {
+            <or-button (click)="showAll.set(true)">Show older</or-button>
+          }
+        } @else {
+          <or-button data-add-records (click)="addOpen.set(true)">
+            <or-icon name="plus" [size]="20" />Add records
+          </or-button>
+          <or-button (click)="renameOpen.set(true)">
+            <or-icon name="settings" [size]="20" />Rename
+          </or-button>
+          <or-button (click)="toggleVisibility()">
+            <or-icon
+              [name]="vm.visibility === 'public' ? 'lock' : 'globe'"
+              [size]="20"
+            />{{ vm.visibility === 'public' ? 'Make private' : 'Make public' }}
+          </or-button>
+          <or-button variant="danger" (click)="remove()">
+            <or-icon name="trash" [size]="20" />Delete
+          </or-button>
+        }
       </div>
 
-      <or-switch
-        class="auto"
-        label="Auto-download"
-        description="Keep every record in this playlist on this device."
-        [checked]="!!pl.autoDownload"
-        (checkedChange)="setAutoDownload($event)"
-      />
-      <p class="auto-note" role="status">
-        @if (pl.autoDownload) {
-          @if (autoDownload.waitingForWifi()) {
-            Waiting for Wi-Fi. Allow mobile data in Settings to download now.
-          } @else {
-            @if (autoDownload.pauseReason(); as paused) {
-            {{ paused }}
-          } @else if (autoDownload.failedCount(pl.trackIds); as n) {
-            <a class="failed-link" routerLink="/downloads/failed">{{ n }} couldn’t be downloaded</a>
-          }
-          }
-        }
-      </p>
-      @if (playlistProgress(); as p) {
-        <or-download-progress
-          label="Playlist download progress"
-          [saved]="p.saved"
-          [total]="p.total"
-          [fraction]="playlistFraction"
+      @if (playlist(); as pl) {
+        <or-switch
+          class="auto"
+          label="Auto-download"
+          description="Keep every record in this playlist on this device."
+          [checked]="vm.autoDownload"
+          (checkedChange)="setAutoDownload($event)"
         />
+        <p class="auto-note" role="status">
+          @if (pl.autoDownload) {
+            @if (autoDownload.waitingForWifi()) {
+              Waiting for Wi-Fi. Allow mobile data in Settings to download now.
+            } @else {
+              @if (autoDownload.pauseReason(); as paused) {
+              {{ paused }}
+            } @else if (autoDownload.failedCount(pl.trackIds); as n) {
+              <a class="failed-link" routerLink="/downloads/failed">{{ n }} couldn’t be downloaded</a>
+            }
+            }
+          }
+        </p>
+        @if (playlistProgress(); as p) {
+          <or-download-progress
+            label="Playlist download progress"
+            [saved]="p.saved"
+            [total]="p.total"
+            [fraction]="playlistFraction"
+          />
+        }
       }
 
       <or-section-head heading="Records" [level]="3" />
@@ -458,7 +489,7 @@ const NO_IDS: readonly string[] = [];
         <div
           class="tracks"
           role="table"
-          [attr.aria-label]="'Records in ' + pl.name"
+          [attr.aria-label]="'Records in ' + vm.name"
           [attr.aria-rowcount]="rows().length + 1"
         >
           <div class="head-group" role="rowgroup">
@@ -478,7 +509,7 @@ const NO_IDS: readonly string[] = [];
                   #
                 </button>
               </div>
-              @for (col of columns; track col.key) {
+              @for (col of columns(); track col.key) {
                 <div
                   role="columnheader"
                   [class]="'c-' + col.key"
@@ -546,7 +577,7 @@ const NO_IDS: readonly string[] = [];
                     <span class="text">
                       <span class="title">{{ t.title }}</span>
                       <span class="artist">
-                        {{ t.artist }}@if (t.album) {<span class="album-inline"> · {{ t.album }}</span>}
+                        {{ t.artist }}@if (t.album) {<span class="album-inline"> · {{ t.album }}</span>}@if (isCurated()) {<span class="album-inline"> · played {{ row.added }}</span>}
                       </span>
                       @if (imported || row.source || state || streamOnly) {
                         <span class="tags">
@@ -615,17 +646,27 @@ const NO_IDS: readonly string[] = [];
         }
       } @else if (filtering()) {
         <or-empty-state>No records match “{{ query().trim() }}”.</or-empty-state>
+      } @else if (vm.kind === 'curated') {
+        @if (loading()) {
+          <p class="status"><or-spinner label="Loading listening history" /></p>
+        } @else if (!curatedEntries().length) {
+          <or-empty-state>Nothing played yet.</or-empty-state>
+        } @else {
+          <or-empty-state>Nothing played in the last week.</or-empty-state>
+        }
       } @else {
         <or-empty-state>This crate is empty. Add records to fill it.</or-empty-state>
       }
 
-      <p class="note">
-        {{
-          pl.visibility === 'public'
-            ? 'Marked public. Sharing comes in a later version; for now it stays on this device.'
-            : 'Private. Kept on this device only.'
-        }}
-      </p>
+      @if (vm.kind === 'playlist') {
+        <p class="note">
+          {{
+            vm.visibility === 'public'
+              ? 'Marked public. Sharing comes in a later version; for now it stays on this device.'
+              : 'Private. Kept on this device only.'
+          }}
+        </p>
+      }
 
       <or-modal
         [open]="!!optionsFor()"
@@ -634,32 +675,36 @@ const NO_IDS: readonly string[] = [];
       >
         <div orModalActions>
           <or-button block (click)="playNext()">Play next</or-button>
-          <!-- Reordering only makes sense in the playlist's own, unfiltered order. -->
-          @if (!sort() && !filtering()) {
-            <or-button block [disabled]="optionIndex() <= 0" (click)="move(-1)">
-              Move up
-            </or-button>
-            <or-button
-              block
-              [disabled]="optionIndex() < 0 || optionIndex() >= tracks().length - 1"
-              (click)="move(1)"
-            >
-              Move down
+          @if (vm.kind === 'playlist') {
+            <!-- Reordering only makes sense in the playlist's own, unfiltered order. -->
+            @if (!sort() && !filtering()) {
+              <or-button block [disabled]="optionIndex() <= 0" (click)="move(-1)">
+                Move up
+              </or-button>
+              <or-button
+                block
+                [disabled]="optionIndex() < 0 || optionIndex() >= tracks().length - 1"
+                (click)="move(1)"
+              >
+                Move down
+              </or-button>
+            }
+            <or-button block variant="danger" (click)="removeTrack()">
+              Remove from playlist
             </or-button>
           }
-          <or-button block variant="danger" (click)="removeTrack()">
-            Remove from playlist
-          </or-button>
           <or-button block (click)="optionsFor.set(null)">Close</or-button>
         </div>
       </or-modal>
 
-      <or-rename-playlist-dialog
-        [(open)]="renameOpen"
-        [playlistId]="pl.id"
-        [currentName]="pl.name"
-      />
-      <or-add-records-dialog [(open)]="addOpen" [playlistId]="pl.id" />
+      @if (vm.kind === 'playlist') {
+        <or-rename-playlist-dialog
+          [(open)]="renameOpen"
+          [playlistId]="vm.id"
+          [currentName]="vm.name"
+        />
+        <or-add-records-dialog [(open)]="addOpen" [playlistId]="vm.id" />
+      }
     } @else if (loading()) {
       <p class="status"><or-spinner label="Loading playlist" /></p>
     } @else {
@@ -766,6 +811,8 @@ const NO_IDS: readonly string[] = [];
 })
 export class PlaylistPage {
   private readonly playlists = inject(PlaylistsStore);
+  private readonly curatedStore = inject(CuratedStore);
+  private readonly playCounts = inject(PlayCountsStore);
   protected readonly library = inject(LibraryStore);
   protected readonly offline = inject(OfflineStore);
   protected readonly autoDownload = inject(AutoDownloadStore);
@@ -790,30 +837,87 @@ export class PlaylistPage {
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly injector = inject(Injector);
 
-  /** Playlist id from the `playlist/:id` route (component input binding). */
+  /** Playlist or curated-list id from the `playlist/:id` / `curated/:id` route. */
   readonly id = input.required<string>();
 
   protected readonly playlist = computed(() => this.playlists.playlist(this.id()));
-  /** Resolved records, in playlist order. */
-  protected readonly tracks = computed(() => this.playlists.tracksOf(this.id()));
+  protected readonly curated = computed(() => this.curatedStore.playlist(this.id()));
+  protected readonly isCurated = computed(() => this.curated() !== undefined);
+
+  /** Header values for whichever kind of list this route names. */
+  protected readonly view = computed<PageView | undefined>(() => {
+    const c = this.curated();
+    if (c) {
+      return {
+        id: c.id,
+        name: c.name,
+        eyebrow: 'Curated · listening history',
+        kind: 'curated',
+        visibility: 'private',
+        autoDownload: false,
+      };
+    }
+    const p = this.playlist();
+    if (!p) return undefined;
+    return {
+      id: p.id,
+      name: p.name,
+      eyebrow: 'Playlist · listening copy',
+      kind: 'playlist',
+      visibility: p.visibility,
+      autoDownload: !!p.autoDownload,
+    };
+  });
+
+  /** Every curated entry, newest first (empty for a user playlist). */
+  protected readonly curatedEntries = computed(() =>
+    this.isCurated() ? this.curatedStore.entriesOf(this.id()) : [],
+  );
+  /** Show the whole history, not just the last week. */
+  protected readonly showAll = signal(false);
+
+  /** Records to play: playlist order, or curated newest first within the week. */
+  protected readonly tracks = computed<readonly Track[]>(() => {
+    if (!this.isCurated()) return this.playlists.tracksOf(this.id());
+    const entries = this.curatedEntries();
+    if (this.showAll()) return entries.map((e) => e.track);
+    const cutoff = Date.now() - RECENT_MS;
+    return entries
+      .filter((e) => e.lastPlayedAt >= cutoff)
+      .map((e) => e.track);
+  });
+
+  /** Curated entries older than the week window ("Show older" reveals them). */
+  protected readonly olderCount = computed(() => {
+    if (!this.isCurated()) return 0;
+    const cutoff = Date.now() - RECENT_MS;
+    return this.curatedEntries().filter((e) => e.lastPlayedAt < cutoff).length;
+  });
+
   protected readonly loading = computed(
     () =>
       this.playlists.status() === 'loading' ||
-      this.library.status() === 'loading',
+      this.library.status() === 'loading' ||
+      (this.isCurated() && !this.playCounts.loaded()),
   );
   protected readonly countLabel = computed(() => {
     const n = this.tracks().length;
-    return `${n} record${n === 1 ? '' : 's'}`;
+    const records = `${n} record${n === 1 ? '' : 's'}`;
+    return this.isCurated()
+      ? `${records} · ${this.showAll() ? 'all time' : 'last 7 days'}`
+      : records;
   });
 
   /** Desktop column headers (after `#`). Sorting is view-only. */
-  protected readonly columns: readonly { key: SortKey; label: string }[] = [
+  protected readonly columns = computed<
+    readonly { key: SortKey; label: string }[]
+  >(() => [
     { key: 'title', label: 'Title' },
     { key: 'album', label: 'Album' },
     { key: 'source', label: 'Source' },
-    { key: 'added', label: 'Date added' },
+    { key: 'added', label: this.isCurated() ? 'Last played' : 'Date added' },
     { key: 'duration', label: 'Duration' },
-  ];
+  ]);
   protected readonly remoteId = REMOTE_PROVIDER_ID;
   protected readonly downloadState = downloadState;
   /** `null` is the playlist's custom order. */
@@ -825,18 +929,28 @@ export class PlaylistPage {
   private readonly words = computed(() => filterWords(this.listQuery()));
   protected readonly filtering = computed(() => this.words().length > 0);
 
-  /** Rows in playlist order; formatted once per playlist change, not per check. */
+  /** Last-played time per curated track (the view's "added" value). */
+  private readonly curatedAt = computed<ReadonlyMap<string, number>>(() => {
+    if (!this.isCurated()) return new Map();
+    return new Map(
+      this.curatedEntries().map((e) => [e.track.id, e.lastPlayedAt] as const),
+    );
+  });
+
+  /** Rows in list order; formatted once per source change, not per check. */
   private readonly baseRows = computed<Row[]>(() => {
     const addedAt = this.playlist()?.addedAt;
+    const curatedAt = this.curatedAt();
+    const curated = this.isCurated();
     return this.tracks().map((track, i) => {
-      const at = addedAt?.[track.id];
+      const at = curated ? curatedAt.get(track.id) : addedAt?.[track.id];
       return {
         track,
         key: `${i}:${track.id}`,
         duration: formatDuration(track.durationSec),
         source: sourceLabel(track.source?.site),
         addedAt: at,
-        added: formatAddedAt(at),
+        added: curated ? formatLastPlayed(at) : formatAddedAt(at),
       };
     });
   });
@@ -846,14 +960,15 @@ export class PlaylistPage {
     const rows = words.length
       ? this.baseRows().filter((r) => trackMatches(r.track, words))
       : this.baseRows();
-    // Stable sort: ties keep playlist order; unknown values always sink.
+    // Stable sort: ties keep list order; unknown values always sink.
     return sortByColumn(rows, this.sort(), sortValue);
   });
   private readonly displayedTracks = computed(() => this.rows().map((r) => r.track));
-  /** Rendered rows; back to the first page when the filter or sort changes. */
+  /** Rendered rows; back to the first page when the filter, sort or scope changes. */
   protected readonly rowWindow = lazyWindow(
     this.rows,
-    () => `${this.words().join(' ')}|${this.sort()?.key}|${this.sort()?.dir}`,
+    () =>
+      `${this.words().join(' ')}|${this.sort()?.key}|${this.sort()?.dir}|${this.showAll()}`,
   );
 
   /** Header click: ascending, then descending, then back to custom order. */
@@ -904,7 +1019,10 @@ export class PlaylistPage {
     }
     const start = shuffle ? Math.floor(Math.random() * tracks.length) : 0;
     try {
-      await this.player.playTracks(tracks, start, { shuffle });
+      await this.player.playTracks(tracks, start, {
+        shuffle,
+        queue: 'playlist',
+      });
     } catch {
       this.toast.show('Could not play this playlist');
     }
@@ -915,6 +1033,7 @@ export class PlaylistPage {
     try {
       await this.player.playTracks(this.displayedTracks(), index, {
         shuffle: false,
+        queue: 'playlist',
       });
     } catch {
       this.toast.show('Could not play that record');

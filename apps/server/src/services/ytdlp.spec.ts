@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   utimesSync,
@@ -441,13 +442,54 @@ describe('yt-dlp cookies', () => {
       await expect(search('x', 'youtube')).resolves.toEqual([]);
 
       expect(calls).toBe(2);
-      // The retry's --cookies sits right after the global args.
+      // The anonymous first attempt never enables the EJS solver.
+      expect(callArgs(0)).not.toContain('--remote-components');
+      // The retry's --cookies sits right after the global args, and the retry
+      // enables the solver; without it a valid signed-in jar yields no formats.
       expect(lastArgs().indexOf('--cookies')).toBe(BASE_ARGS.length);
+      expect(lastArgs()).toEqual(
+        expect.arrayContaining(['--remote-components', 'ejs:github']),
+      );
       expect(copy).not.toBe(path);
       expect(dirname(copy)).not.toBe(dirname(path));
       expect(mode).toBe(0o600); // tokens are never world-readable
       // The per-run directory is removed once the promise settles.
       expect(() => statSync(dirname(copy))).toThrow();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('prepends the Netscape header to a headerless jar on the cookie retry', async () => {
+    const row = '.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc';
+    const { path, cleanup } = cookiesFile(`${row}\n`);
+    let copied = '';
+    try {
+      configureCookies(path);
+      expect(cookiesStatus()).toEqual({ path, ok: true });
+      let calls = 0;
+      vi.mocked(execFile).mockImplementation(((
+        _file: string,
+        args: string[],
+        _opts: unknown,
+        cb: (...a: unknown[]) => void,
+      ) => {
+        calls += 1;
+        if (calls === 1) {
+          cb(new Error('exit 1'), '', AGE_STDERR);
+          return;
+        }
+        const copy = args[args.indexOf('--cookies') + 1];
+        // Read before the run's callback cleans the copy up.
+        copied = readFileSync(copy, 'utf8');
+        cb(null, JSON.stringify(emptySearch), '');
+      }) as unknown as typeof execFile);
+
+      await expect(search('x', 'youtube')).resolves.toEqual([]);
+
+      expect(calls).toBe(2);
+      expect(copied).toMatch(/^# Netscape HTTP Cookie File\n/);
+      expect(copied).toContain(row);
     } finally {
       cleanup();
     }

@@ -1,5 +1,17 @@
 import { InjectionToken } from '@angular/core';
-import type { AudioQuality, DownloadLocation, DownloadSite, EnrichMatch, EnrichQuery, Track } from '@open-record/models';
+import type {
+  AudioQuality,
+  CommandResult,
+  DownloadLocation,
+  DownloadSite,
+  EnrichMatch,
+  EnrichQuery,
+  SessionClientMessage,
+  SessionCommand,
+  SessionDevice,
+  SessionServerMessage,
+  Track,
+} from '@open-record/models';
 import type { MetadataFetch } from '@open-record/metadata-lookup';
 import type { ImportSessionKind } from '@open-record/storage';
 
@@ -261,6 +273,11 @@ export abstract class AuthPort {
   abstract verifyPassword(password: string): Promise<void>;
   /** Current access token (refreshed when needed), or null when signed out. */
   abstract accessToken(): Promise<string | null>;
+  /**
+   * Force a token refresh (session sync retries a `401` once with it).
+   * Resolves null when signed out or the refresh fails; never opens a prompt.
+   */
+  abstract refreshAccessToken(): Promise<string | null>;
   /** Fresh details of the signed-in account from the server, or null when signed out. */
   abstract profile(): Promise<AuthProfile | null>;
   /** Start an email change (the project emails a confirmation link). */
@@ -414,4 +431,49 @@ export abstract class BackgroundWorkPort {
   abstract update(options: { text: string }): Promise<void>;
   /** Release the hold and remove the notification. */
   abstract stop(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Player sync + cast (Phase 3). Implemented by the app (apps/app), provided
+// optionally so local-only mode is unchanged without them.
+// ---------------------------------------------------------------------------
+
+export type SessionConnectionState = 'off' | 'connecting' | 'open' | 'retrying' | 'refused';
+
+/**
+ * Upload contracts live here (Phase 3) so `SessionStore` compiles before the
+ * Phase 6 implementations exist. Implemented in apps/app, provided optionally.
+ */
+export abstract class CastUploadPort {
+  abstract upload(
+    file: Blob,
+    name: string,
+    opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void },
+  ): Promise<{ uploadId: string; sizeBytes: number; expiresAt: number }>;
+  abstract usage(): Promise<{ bytes: number; count: number; cap: number }>;
+  abstract clear(): Promise<{ freedBytes: number; retainedBytes: number }>;
+}
+
+export abstract class CastFilePort {
+  abstract bytes(track: Track): Promise<Blob | undefined>;
+}
+
+/**
+ * The session transport for this platform: a WebSocket on the web, HTTP
+ * polling on native (§0.4). `connect` is idempotent and a port keeps one
+ * connection at a time; the returned function disconnects and clears every
+ * timer and listener it installed.
+ */
+export abstract class SessionPort {
+  /** This build/platform can run sessions (not a signed-in check). */
+  abstract available(): boolean;
+  abstract connection(): SessionConnectionState;
+  abstract onChange(listener: (state: SessionConnectionState) => void): () => void;
+  abstract onMessage(listener: (message: SessionServerMessage) => void): () => void;
+  /** Connects (WS) or starts the poll loop (native). Returns a disconnect function. */
+  abstract connect(profile: SessionDevice, token: () => Promise<string | null>): () => void;
+  /** Fire-and-forget messages: `report` and `pong` on WS; POST /session/report on native. */
+  abstract send(message: SessionClientMessage): void;
+  /** Commands resolve with their result (WS: by ack id; native: the POST body). */
+  abstract command(id: string, command: SessionCommand): Promise<CommandResult>;
 }

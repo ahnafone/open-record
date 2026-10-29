@@ -10,6 +10,7 @@ import { ImportStore } from './import.store';
 import { OfflineStore } from './offline.store';
 import { PlayCountsStore } from './play-counts.store';
 import { PlayerStore } from './player.store';
+import { SessionStore } from './session.store';
 import { SettingsStore } from './settings.store';
 import { SyncStore } from './sync.store';
 
@@ -29,7 +30,11 @@ export function provideState(): EnvironmentProviders {
       inject(SyncStore).start();
       // Play counts are local-first, synced when signed in.
       inject(PlayCountsStore).start();
-      void inject(PlayerStore).restore();
+      // Restore local playback first; sessions attach to the restored engine
+      // afterwards and either step is safe to skip or fail on its own.
+      const player = inject(PlayerStore);
+      const session = inject(SessionStore);
+      void player.restore().finally(() => session.start());
       // Registers the Spotify placeholder source; resumes a running import
       // (Spotify matching and YouTube song-detail lookup).
       void inject(ImportStore).restore();

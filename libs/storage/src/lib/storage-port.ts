@@ -12,6 +12,12 @@ export interface QueueState {
   repeat: RepeatMode;
   /** Ids waiting in the "Play next" list, in play order. Absent when empty. */
   playNextIds?: string[];
+  /** Unplayed queue-window pool ids, in play order. Absent when there is none. */
+  sourceIds?: string[];
+  /** Queue-window ahead size (50 or 100). */
+  sourceLimit?: number;
+  /** Queue kind that produced the current window. */
+  sourceKind?: 'auto' | 'playlist';
 }
 
 export interface SavedRecord {

@@ -20,6 +20,8 @@ export interface Track {
   album?: string;
   /** Provider-relative key of the stored audio file (e.g. `imported/<id>.audio.mp3`). */
   sourceFile?: string;
+  /** Bundled catalog audio file name under `<WEB_DIR>/catalog/audio/` (validated basename). */
+  catalogFile?: string;
   /** Size of the stored audio file in bytes. */
   sizeBytes?: number;
   /**
@@ -223,3 +225,4 @@ export interface Member {
 
 export * from './lib/pairing';
 export * from './lib/download-location';
+export * from './lib/session';

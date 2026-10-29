@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 export interface ServerConfig {
   /** TCP port to listen on. */
   port: number;
@@ -5,9 +8,11 @@ export interface ServerConfig {
   host: string;
   /** Shared bearer token every request (except GET /health) must present. */
   token: string;
+  /** Data directory: token, cast secret and upload cache all live here. */
+  dataDir: string;
   /** Allowed CORS origins; `true` reflects any origin (safe: no cookies, token auth). */
   corsOrigin: true | string[];
-  /** Requests per minute per client IP. */
+  /** Requests per minute per client (T1.6 keys it by user/token/IP). */
   rateLimitMax: number;
   /** Trust X-Forwarded-For from a reverse proxy / tunnel. */
   trustProxy: boolean;
@@ -17,6 +22,28 @@ export interface ServerConfig {
   streamCacheTtl: number;
   /** Requests per minute per token for the yt-dlp routes (/search, /stream). */
   resolveRateLimitMax: number;
+  /** Cast discovery and control. False = no mDNS sockets are opened. */
+  castEnabled: boolean;
+  /**
+   * Base URL the cast speaker uses to reach this server. Null in `loadConfig`
+   * when unset; `main.ts` fills in the detected LAN URL and clears it again
+   * when it is a loopback address (a speaker cannot use that).
+   */
+  castMediaBaseUrl: string | null;
+  /** Relay token TTL in seconds; slid while the cast session is active. */
+  castRelayTtlSec: number;
+  /** Per-user upload cache cap in MB. 0 disables uploads. */
+  castCacheMb: number;
+  /** Largest accepted upload in MB. */
+  castUploadMaxMb: number;
+  /** Session routes (REST + websocket). False = they are not registered. */
+  sessionEnabled: boolean;
+  /** Drop an idle session room after this many minutes. */
+  sessionIdleTimeoutMin: number;
+  /** Pause/clear a target after this many minutes without contact. */
+  sessionTargetStaleMin: number;
+  /** Transcode fallback binary (name on PATH or absolute path). */
+  ffmpegPath: string;
   /** Optional Netscape cookies.txt handed to yt-dlp (age-restricted videos, bot checks). */
   ytdlpCookiesFile: string | null;
   /**
@@ -65,6 +92,35 @@ function int(env: Env, key: string, fallback: number, min: number, max: number):
   return n;
 }
 
+/** Strict boolean: `true`/`1` and `false`/`0`, case-insensitive. */
+function bool(env: Env, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const value = raw.toLowerCase();
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw new ConfigError(`${key} must be true, false, 1 or 0`);
+}
+
+/** Optional http(s) URL, trailing slashes trimmed. Invalid values are a config error. */
+function httpUrl(env: Env, key: string, fallback: string | null): string | null {
+  const raw = env[key]?.trim().replace(/\/+$/, '');
+  if (!raw) return fallback;
+  if (!/^https?:\/\/[^/]+/i.test(raw)) {
+    throw new ConfigError(`${key} must be an http(s) URL`);
+  }
+  return raw;
+}
+
+/**
+ * Default data directory: `OPEN_RECORD_DATA_DIR`, else `~/.config/open-record`.
+ * Lives here (not in token-store) so `loadConfig` can resolve it without a cycle.
+ */
+export function defaultDataDir(env: Env): string {
+  const fromEnv = env['OPEN_RECORD_DATA_DIR']?.trim();
+  return fromEnv || join(homedir(), '.config', 'open-record');
+}
+
 /** Reads and validates server configuration from environment variables. */
 export function loadConfig(env: Env = process.env): ServerConfig {
   const token = env['OPEN_RECORD_TOKEN']?.trim() ?? '';
@@ -84,12 +140,24 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     port: int(env, 'PORT', 8787, 1, 65535),
     host: env['HOST']?.trim() || '0.0.0.0',
     token,
+    dataDir: defaultDataDir(env),
     corsOrigin: origins.length ? origins : true,
-    rateLimitMax: int(env, 'RATE_LIMIT_MAX', 120, 1, 100_000),
+    // 600/min: 1 s polling and two tabs from one IP must not hit the old cap.
+    // T1.6 re-keys this by user/token/IP; per-route limits still apply.
+    rateLimitMax: int(env, 'RATE_LIMIT_MAX', 600, 1, 100_000),
     trustProxy: env['TRUST_PROXY'] === 'true' || env['TRUST_PROXY'] === '1',
     maxConcurrentResolves: int(env, 'MAX_CONCURRENT_RESOLVES', 2, 1, 16),
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
+    castEnabled: bool(env, 'CAST_ENABLED', true),
+    castMediaBaseUrl: httpUrl(env, 'CAST_MEDIA_BASE_URL', null),
+    castRelayTtlSec: int(env, 'CAST_RELAY_TTL_SEC', 900, 60, 86_400),
+    castCacheMb: int(env, 'CAST_CACHE_MB', 2048, 0, 1_048_576),
+    castUploadMaxMb: int(env, 'CAST_UPLOAD_MAX_MB', 200, 1, 4096),
+    sessionEnabled: bool(env, 'SESSION_ENABLED', true),
+    sessionIdleTimeoutMin: int(env, 'SESSION_IDLE_TIMEOUT_MIN', 120, 1, 1440),
+    sessionTargetStaleMin: int(env, 'SESSION_TARGET_STALE_MIN', 30, 1, 1440),
+    ffmpegPath: env['FFMPEG_PATH']?.trim() || 'ffmpeg',
     // Never validated here: a missing or unreadable file only disables cookies,
     // so a stale path in an old .env cannot stop the server from starting.
     ytdlpCookiesFile: env['YTDLP_COOKIES_FILE']?.trim() || null,

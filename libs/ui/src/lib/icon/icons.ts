@@ -121,6 +121,21 @@ export const OR_ICONS = {
     p('m7.5 9.5 4.5-4.5 4.5 4.5'),
     p('M5 19.5h14'),
   ],
+  cast: [
+    p('M9 17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4'),
+    p('M8.5 20.5h7'),
+    p('M5 13.5a7 7 0 0 1 7 7'),
+    p('M5 17a3.5 3.5 0 0 1 3.5 3.5'),
+  ],
+  phone: [
+    { kind: 'rect', x: 7, y: 3, width: 10, height: 18, rx: 2.5 },
+    p('M10.5 18.2h3'),
+  ],
+  desktop: [
+    { kind: 'rect', x: 3, y: 4.5, width: 18, height: 12, rx: 2 },
+    p('M12 16.5v4'),
+    p('M8.5 20.5h7'),
+  ],
 } as const satisfies Record<string, readonly IconShape[]>;
 
 export type IconName = keyof typeof OR_ICONS;

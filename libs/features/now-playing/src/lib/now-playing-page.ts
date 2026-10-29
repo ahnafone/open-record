@@ -13,11 +13,13 @@ import {
 import { RouterLink } from '@angular/router';
 import type { Track } from '@open-record/models';
 import {
+  AuthStore,
   LibraryStore,
+  LOCAL_PROVIDER_ID,
   OfflineStore,
   PlayerStore,
   REMOTE_PROVIDER_ID,
-  AuthStore,
+  SessionStore,
 } from '@open-record/state';
 import {
   OrButton,
@@ -33,6 +35,8 @@ import {
   OrToast,
   lazyWindow,
 } from '@open-record/ui';
+import { DevicePickerService } from './device-picker';
+import { deviceTargetName } from './device-label';
 import { OrSeekRow } from './seek-row';
 import { formatTime } from './time';
 import { injectTrackArt } from './track-art';
@@ -43,6 +47,14 @@ interface UpNextRow {
   readonly queueIndex: number;
   /** Added with "Play next". */
   readonly playNext: boolean;
+  /** Session entry for this row; null while playback is local. */
+  readonly entryId: string | null;
+  /** The session's current entry (never a duplicate entry with the same song). */
+  readonly current: boolean;
+  /** Not playable from this client (missing on the speaker, or a local file). */
+  readonly disabled: boolean;
+  /** Why the row is disabled; rendered as a tag, never colour alone. */
+  readonly note: string;
 }
 
 
@@ -86,9 +98,16 @@ interface UpNextRow {
       </div>
       <div class="np-body">
       <div class="meta">
-        <span class="eyebrow">{{
-          player.isPlaying() ? 'On the turntable' : 'Paused'
-        }}</span>
+        <button
+          type="button"
+          class="eyebrow"
+          aria-haspopup="dialog"
+          [attr.aria-label]="eyebrowLabel()"
+          (click)="picker.show()"
+        >
+          {{ eyebrowText() }}
+        </button>
+        <span class="sr-only" aria-live="polite">{{ eyebrowText() }}</span>
         <h2 class="title">{{ track.title }}</h2>
         <p class="artist">{{ track.artist }}</p>
         @if (albumLine(track); as album) {
@@ -119,15 +138,35 @@ interface UpNextRow {
       </div>
 
       @if (!panel()) {
-        <or-seek-row />
+        <or-seek-row [disabled]="controlsBlocked()" />
       }
 
       <div class="status" aria-live="polite">
         @if (player.isLoading()) {
-          <span class="status-load"><or-spinner [size]="18" />Loading record…</span>
+          <span class="status-text"><or-spinner [size]="18" />Loading record…</span>
         } @else if (player.error(); as err) {
           <span class="status-bad"
             ><or-icon name="alert" [size]="18" />{{ err.message }}</span
+          >
+        } @else if (reconnecting()) {
+          <span class="status-text"
+            ><or-spinner [size]="18" />Reconnecting to the server…</span
+          >
+        } @else if (staleTarget()) {
+          <span class="status-bad"
+            ><or-icon name="alert" [size]="18" />Not responding ·</span
+          >
+          <or-button size="sm" (click)="playOnThisDevice()" [disabled]="transferring()">
+            play on this device?
+          </or-button>
+        } @else if (session.needsGesture()) {
+          <span class="status-text">Paused ·</span>
+          <or-button size="sm" (click)="resumeHere()">
+            Tap play on this device
+          </or-button>
+        } @else if (session.mirroring()) {
+          <span class="status-text"
+            >Playing on {{ targetName() }} · controls are remote</span
           >
         }
       </div>
@@ -152,6 +191,7 @@ interface UpNextRow {
           [icon]="player.isPlaying() ? 'pause' : 'play'"
           [iconSize]="28"
           [label]="player.isPlaying() ? 'Pause' : 'Play'"
+          [disabled]="controlsBlocked()"
           (click)="player.togglePlay()"
         />
         <or-icon-button
@@ -189,16 +229,19 @@ interface UpNextRow {
       @if (upNext().length) {
         <ol class="queue">
           @for (row of upNextWindow.items(); track row.queueIndex) {
-            <li class="row">
+            <li class="row" [class.current]="row.current">
               <button
                 type="button"
                 class="row-main"
+                [disabled]="row.disabled"
+                [attr.aria-current]="row.current ? 'true' : null"
                 [attr.aria-label]="
                   'Play ' +
                   row.track.title +
                   ' by ' +
                   row.track.artist +
-                  (row.playNext ? ', queued to play next' : '')
+                  (row.playNext ? ', queued to play next' : '') +
+                  (row.note ? ', ' + row.note : '')
                 "
                 (click)="player.playAt(row.queueIndex)"
               >
@@ -206,8 +249,18 @@ interface UpNextRow {
                 <span class="row-txt">
                   <span class="row-title">{{ row.track.title }}</span>
                   <span class="row-artist">{{ row.track.artist }}</span>
-                  @if (row.playNext) {
-                    <span class="row-tags"><or-tag>Play next</or-tag></span>
+                  @if (row.playNext || row.note || row.current) {
+                    <span class="row-tags">
+                      @if (row.current) {
+                        <or-tag ivory>Now playing</or-tag>
+                      }
+                      @if (row.playNext) {
+                        <or-tag>Play next</or-tag>
+                      }
+                      @if (row.note) {
+                        <or-tag>{{ row.note }}</or-tag>
+                      }
+                    </span>
                   }
                 </span>
                 @if (row.track.durationSec) {
@@ -302,10 +355,37 @@ interface UpNextRow {
       margin-bottom: 10px;
     }
     .eyebrow {
+      position: relative;
+      justify-self: start;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--color-muted);
+      font: inherit;
       font-size: var(--type-eyebrow-font-size);
       letter-spacing: var(--type-eyebrow-letter-spacing);
       text-transform: uppercase;
-      color: var(--color-muted);
+      cursor: pointer;
+    }
+    /* 44px hit area without changing the 11px eyebrow's visual size. */
+    .eyebrow::after {
+      content: '';
+      position: absolute;
+      /* 11px type plus 15px above/below clears the 44px target. */
+      inset: -15px calc(var(--spacing-sm) * -1);
+    }
+    .eyebrow:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
     .title {
       margin: 0;
@@ -341,17 +421,18 @@ interface UpNextRow {
       color: var(--color-muted);
     }
     .status {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-sm);
       min-height: 24px;
       margin: var(--spacing-xxs) 0;
     }
-    .status-load,
+    .status-text,
     .status-bad {
       display: inline-flex;
       align-items: center;
       gap: var(--spacing-sm);
       font-size: var(--type-body-sm-font-size);
-    }
-    .status-load {
       color: var(--color-muted);
     }
     .status-bad {
@@ -368,9 +449,6 @@ interface UpNextRow {
       margin: 14px 0 0;
       font-size: var(--type-meta-font-size);
       color: var(--color-muted);
-    }
-    .note + .note {
-      margin-block-start: var(--spacing-xxs);
     }
     .sentinel {
       block-size: 1px;
@@ -415,6 +493,10 @@ interface UpNextRow {
     }
     .row-main:hover {
       background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    }
+    .row-main:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
     .row-main:focus-visible,
     .link-btn:focus-visible {
@@ -478,6 +560,8 @@ interface UpNextRow {
 })
 export class NowPlayingPage {
   protected readonly player = inject(PlayerStore);
+  protected readonly session = inject(SessionStore);
+  protected readonly picker = inject(DevicePickerService);
   private readonly library = inject(LibraryStore);
   private readonly offline = inject(OfflineStore);
   protected readonly auth = inject(AuthStore);
@@ -490,9 +574,55 @@ export class NowPlayingPage {
 
   /** Up next row whose options modal is open. */
   protected readonly optionsFor = signal<UpNextRow | null>(null);
+  /** A transfer back to this device is in flight (stale-target CTA). */
+  protected readonly transferring = signal(false);
 
   protected readonly fmt = formatTime;
   protected readonly art = injectTrackArt();
+
+  /** Name of the device (or speaker) that owns playback; "This device" locally. */
+  protected readonly targetName = computed(() =>
+    deviceTargetName(
+      this.session.target(),
+      this.session.clientId(),
+      this.session.devices(),
+    ),
+  );
+
+  /** One phrasing for the header button and the muted mirroring line. */
+  protected readonly playbackWord = computed(() => {
+    if (this.session.mirroring() && this.session.targetStale()) {
+      return 'Not responding';
+    }
+    return this.player.isPlaying() ? 'Playing' : 'Paused';
+  });
+
+  protected readonly eyebrowText = computed(
+    () => `Playing on ${this.targetName()} · ${this.playbackWord()}`,
+  );
+
+  protected readonly eyebrowLabel = computed(
+    () => `Change playback device. ${this.eyebrowText()}`,
+  );
+
+  /** Another device is playing and has stopped responding; offer a transfer. */
+  protected readonly staleTarget = computed(
+    () => this.session.mirroring() && this.session.targetStale(),
+  );
+
+  protected readonly reconnecting = computed(
+    () => this.session.connection() === 'retrying',
+  );
+
+  /**
+   * A `local:` entry this client cannot rehydrate. Only while this client is
+   * the output: mirroring can still control a remote target's play/pause.
+   */
+  protected readonly controlsBlocked = computed(() => {
+    if (this.session.mirroring()) return false;
+    const id = this.player.current()?.id;
+    return !!id && this.session.localUnavailable().has(id);
+  });
 
   protected readonly saved = computed(() => {
     const id = this.player.current()?.id;
@@ -511,12 +641,66 @@ export class NowPlayingPage {
   });
 
   /** Upcoming tracks ("Play next" picks first) with their queue indices. */
-  protected readonly upNext = computed<readonly UpNextRow[]>(() =>
-    this.player.upcomingEntries(),
-  );
+  protected readonly upNext = computed<readonly UpNextRow[]>(() => {
+    const remote = this.session.ownsPlayback()
+      ? this.session.remoteEntries()
+      : null;
+    const currentEntryId = this.player.currentEntryId();
+    const remoteUnavailable = this.session.remoteUnavailable();
+    const mirroring = this.session.mirroring();
+    const target = this.targetName();
+
+    return this.player.upcomingEntries().map((entry) => {
+      const entryId = remote?.[entry.queueIndex]?.entryId ?? null;
+      // `local:` files stay on the device that can actually play them.
+      const localElsewhere =
+        mirroring && entry.track.providerId === LOCAL_PROVIDER_ID;
+      const unavailable = !!entryId && remoteUnavailable.has(entryId);
+      return {
+        ...entry,
+        entryId,
+        current: !!entryId && entryId === currentEntryId,
+        disabled: localElsewhere || unavailable,
+        note: localElsewhere
+          ? `On ${target}`
+          : unavailable
+            ? 'Not on speaker'
+            : '',
+      };
+    });
+  });
 
   /** Rendered slice of `upNext` (long queues grow as the end nears). */
   protected readonly upNextWindow = lazyWindow(this.upNext);
+
+  /** Stale-target CTA: move playback back to this tab/device in one tap. */
+  protected async playOnThisDevice(): Promise<void> {
+    if (this.transferring()) return;
+    this.transferring.set(true);
+    try {
+      const moved = await this.session.transferTo({
+        kind: 'device',
+        clientId: this.session.clientId(),
+        deviceId: this.session.deviceId(),
+      });
+      if (!moved) {
+        this.toast.show(
+          this.session.error() ?? 'Could not transfer playback to this device.',
+        );
+      }
+    } finally {
+      this.transferring.set(false);
+    }
+  }
+
+  /** One-tap resume after an autoplay refusal; a refusal is surfaced, never retried. */
+  protected async resumeHere(): Promise<void> {
+    try {
+      await this.player.play();
+    } catch {
+      this.toast.show('Could not start playback on this device.');
+    }
+  }
 
   /** Options: move a normal-order row into the "Play next" list. */
   protected async playNextFromOptions(): Promise<void> {
@@ -524,7 +708,7 @@ export class NowPlayingPage {
     this.optionsFor.set(null);
     if (!row || row.playNext) return;
     try {
-      if (!this.player.removeUpcoming(row.queueIndex)) return;
+      if (!(await this.player.removeUpcoming(row.queueIndex))) return;
       await this.player.playNext([row.track]);
       this.toast.show(`“${row.track.title}” plays next`);
       // The row moved (and was re-rendered): focus its options button.
@@ -536,12 +720,12 @@ export class NowPlayingPage {
   }
 
   /** Options: drop the row from the queue (by queue index, not id). */
-  protected removeFromOptions(): void {
+  protected async removeFromOptions(): Promise<void> {
     const row = this.optionsFor();
     this.optionsFor.set(null);
     if (!row) return;
     const at = this.upNext().findIndex((r) => r.queueIndex === row.queueIndex);
-    if (!this.player.removeUpcoming(row.queueIndex)) {
+    if (!(await this.player.removeUpcoming(row.queueIndex))) {
       this.toast.show('Could not remove that record');
       return;
     }

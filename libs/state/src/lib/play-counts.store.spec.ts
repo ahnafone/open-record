@@ -113,6 +113,80 @@ describe('PlayCountsStore', () => {
     });
   });
 
+  it('records a start without counting or uploading it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { port, received } = fakePort(10);
+    const { storage, store, ready } = boot({ signedIn: true, port });
+    await ready;
+    const flush = vi.spyOn(store, 'flush');
+
+    await store.recordStart(track, 100);
+    vi.runAllTimers();
+
+    expect(store.loaded()).toBe(true);
+    expect(store.counts().get('fake:a')).toMatchObject({
+      count: 0,
+      pending: 0,
+      firstPlayedAt: 100,
+      lastPlayedAt: 100,
+      track: { id: 'fake:a', title: 'A' },
+    });
+    expect(await storage.playCounts.get('fake:a')).toMatchObject({
+      count: 0,
+      pending: 0,
+      firstPlayedAt: 100,
+      lastPlayedAt: 100,
+      track: { id: 'fake:a', title: 'A' },
+    });
+    expect(flush).not.toHaveBeenCalled();
+    expect(received).toEqual([]);
+  });
+
+  it('moves a started track to the front of recently played, keeping its count', async () => {
+    const { store, ready } = boot({ signedIn: false, port: fakePort(0).port });
+    await ready;
+    const next: Track = { ...track, id: 'fake:b', title: 'B' };
+    const renamed: Track = { ...track, title: 'A (remastered)' };
+    await store.recordPlay(track, 100);
+    await store.recordPlay(next, 200);
+
+    expect(store.recentlyPlayed().map((r) => r.trackId)).toEqual([
+      'fake:b',
+      'fake:a',
+    ]);
+
+    await store.recordStart(renamed, 300);
+
+    expect(store.recentlyPlayed().map((r) => r.trackId)).toEqual([
+      'fake:a',
+      'fake:b',
+    ]);
+    expect(store.counts().get('fake:a')).toMatchObject({
+      count: 1,
+      firstPlayedAt: 100,
+      lastPlayedAt: 300,
+      track: { id: 'fake:a', title: 'A (remastered)' },
+    });
+  });
+
+  it('lists a started track once however often it is played', async () => {
+    const { store, ready } = boot({ signedIn: false, port: fakePort(0).port });
+    await ready;
+
+    await store.recordStart(track, 100);
+    await store.recordPlay(track, 200);
+    await store.recordStart(track, 300);
+    await store.recordStart(track, 400);
+
+    const rows = store.recentlyPlayed().filter((r) => r.trackId === 'fake:a');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      count: 1,
+      firstPlayedAt: 100,
+      lastPlayedAt: 400,
+    });
+  });
+
   it('uploads pending plays on flush and takes the account total', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { port, received } = fakePort(10);

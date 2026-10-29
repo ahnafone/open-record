@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   createRemoteJWKSet,
   decodeProtectedHeader,
@@ -24,6 +24,8 @@ declare module 'fastify' {
      * token; null for the static token (legacy single-user mode) and public routes.
      */
     userId: string | null;
+    /** Expiry (`exp`, unix seconds) of the verified Supabase token; null otherwise. */
+    userExp: number | null;
   }
 }
 
@@ -37,8 +39,11 @@ export function tokenMatches(presented: string, expected: string): boolean {
   return timingSafeEqual(digest(presented), digest(expected));
 }
 
-/** Verifies a bearer value as a Supabase access token; resolves to the user id or null. */
-export type JwtVerifier = (token: string) => Promise<string | null>;
+/**
+ * Verifies a bearer value as a Supabase access token; resolves to the user id
+ * and the token's expiry (unix seconds), or null.
+ */
+export type JwtVerifier = (token: string) => Promise<{ userId: string; exp?: number } | null>;
 
 const JWT_SHAPE = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const ASYMMETRIC = ['ES256', 'RS256', 'EdDSA'];
@@ -70,19 +75,66 @@ export function createSupabaseVerifier(
       } else {
         return null;
       }
-      return typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
+      if (typeof payload.sub !== 'string' || !payload.sub) return null;
+      return { userId: payload.sub, exp: payload.exp };
     } catch {
       return null;
     }
   };
 }
 
+/** A checked credential: the static token (`userId: null`) or a Supabase JWT. */
+export interface VerifiedToken {
+  /** Supabase user id; null only for the static token. */
+  userId: string | null;
+  /** JWT expiry (unix seconds) when signed with one. */
+  exp?: number;
+  kind: 'static' | 'jwt';
+}
+
+/** Verifies a presented bearer value; pre-bound to the config by `buildApp`. */
+export type VerifyToken = (value: string) => Promise<VerifiedToken | null>;
+
 /**
- * Rate-limit key for per-client limits: the Supabase user when signed in,
- * otherwise a hash of the presented credential (the static token).
+ * Verifies the static token or a Supabase JWT. The static token is compared in
+ * constant time and reported with `userId: null`, which lets session routes
+ * refuse it with 403 while legacy routes keep accepting it.
  */
-export function rateLimitKey(request: Pick<FastifyRequest, 'userId' | 'headers'>): string {
-  return request.userId ? `user:${request.userId}` : tokenKey(request.headers.authorization);
+export async function verifyToken(
+  value: string,
+  staticToken: string,
+  verifyJwt?: JwtVerifier,
+): Promise<VerifiedToken | null> {
+  if (value && tokenMatches(value, staticToken)) return { userId: null, kind: 'static' };
+  const verified = verifyJwt ? await verifyJwt(value) : null;
+  if (!verified) return null;
+  return { userId: verified.userId, exp: verified.exp, kind: 'jwt' };
+}
+
+/**
+ * Rate-limit key for per-client limits: the Supabase user when signed in, a
+ * hash of the presented credential (the static token) when one was sent, and
+ * otherwise the client IP so public routes are still keyed.
+ */
+export function rateLimitKey(
+  request: Pick<FastifyRequest, 'userId' | 'headers' | 'ip'>,
+): string {
+  if (request.userId) return `user:${request.userId}`;
+  if (request.headers.authorization) return tokenKey(request.headers.authorization);
+  return `ip:${request.ip}`;
+}
+
+/**
+ * Pre-handler guard for account-only routes (`/session/*`, `/cast/uploads*`):
+ * the static token is authenticated but not an account, so it gets 403.
+ */
+export async function requireAccount(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  if (request.userId === null) {
+    await reply.code(403).send({ error: 'account-required' });
+  }
 }
 
 /**
@@ -90,23 +142,23 @@ export function rateLimitKey(request: Pick<FastifyRequest, 'userId' | 'headers'>
  * on every route except those marked `config: { public: true }`. Unknown routes
  * (404s) also require auth so the route table cannot be probed anonymously.
  *
- * The static token is always accepted (legacy single-user mode). When
- * `verifyJwt` is given, a valid Supabase access token is accepted too and
- * its user id is exposed as `request.userId`.
+ * `verify` is pre-bound by `buildApp`: it accepts the static token (legacy
+ * single-user mode) and Supabase access tokens. A verified user id is exposed
+ * as `request.userId`, and a JWT's expiry as `request.userExp`.
  */
-export function registerAuth(app: FastifyInstance, token: string, verifyJwt?: JwtVerifier): void {
+export function registerAuth(app: FastifyInstance, verify: VerifyToken): void {
   app.decorateRequest('userId', null);
+  app.decorateRequest('userExp', null);
   app.addHook('onRequest', async (request, reply) => {
     if (request.routeOptions.config?.public) return;
 
     const header = request.headers.authorization ?? '';
     const match = /^Bearer\s+(.+)$/i.exec(header);
     const presented = match?.[1].trim() ?? '';
-    if (presented && tokenMatches(presented, token)) return;
-
-    const userId = presented && verifyJwt ? await verifyJwt(presented) : null;
-    if (userId) {
-      request.userId = userId;
+    const verified = presented ? await verify(presented) : null;
+    if (verified) {
+      request.userId = verified.userId;
+      request.userExp = verified.exp ?? null;
       return;
     }
     reply.header('WWW-Authenticate', 'Bearer');

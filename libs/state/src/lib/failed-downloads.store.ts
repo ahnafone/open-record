@@ -1,4 +1,4 @@
-import { Injectable, computed, inject } from '@angular/core';
+import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import type { Track } from '@open-record/models';
 import { ImportSessionsStore } from './import-sessions.store';
 import { ImportStore, type ImportCandidate } from './import.store';
@@ -79,8 +79,9 @@ export function linkCheckError(error: unknown): string {
 
 /**
  * Tracks whose download failed for a reason of their own, and the tools to
- * fix them: replacement suggestions (the import review's search), checking a
- * candidate link without downloading it, and swapping a track's source.
+ * fix them: retrying the same source, replacement suggestions (the import
+ * review's search), checking a candidate link without downloading it, and
+ * swapping a track's source.
  */
 @Injectable({ providedIn: 'root' })
 export class FailedDownloadsStore {
@@ -93,16 +94,76 @@ export class FailedDownloadsStore {
   private readonly remote = inject(RemoteServerPort, { optional: true });
   private readonly resolver = inject(StreamResolverPort, { optional: true });
 
+  /** Tracks whose retry was asked for (kept listed while it is in flight). */
+  private readonly retryingIds = signal<ReadonlySet<string>>(new Set());
+  /** In-flight retry calls, including the record write before the queue flip. */
+  private readonly pending = new Set<string>();
+
+  constructor() {
+    effect(() => {
+      const retrying = this.retryingIds();
+      if (!retrying.size) return;
+      const next = new Set<string>();
+      for (const id of retrying) {
+        if (this.pending.has(id)) {
+          next.add(id);
+          continue;
+        }
+        const status = this.offline.status(id);
+        if (status === 'queued' || status === 'saving') next.add(id);
+      }
+      if (next.size !== retrying.size) untracked(() => this.retryingIds.set(next));
+    });
+  }
+
+  /** A track whose save failed for a reason of its own (not cancelled or waiting for Wi-Fi). */
+  private isFailed(track: Track): boolean {
+    if (!isSavable(track)) return false;
+    const error = this.offline.error(track.id);
+    return this.offline.status(track.id) === 'failed' && error !== 'Cancelled.' && error !== WAITING_FOR_WIFI;
+  }
+
   /** Reactive: remote tracks whose save failed (not cancelled or waiting for Wi-Fi). */
   readonly tracks = computed<readonly Track[]>(() =>
-    this.library.importedTracks().filter((t) => {
-      if (!isSavable(t)) return false;
-      const error = this.offline.error(t.id);
-      return this.offline.status(t.id) === 'failed' && error !== 'Cancelled.' && error !== WAITING_FOR_WIFI;
-    }),
+    this.library.importedTracks().filter((t) => this.isFailed(t)),
+  );
+
+  /**
+   * Reactive: failed tracks plus those being retried, so a row stays listed
+   * while its retry is queued or saving instead of dropping out.
+   */
+  readonly listed = computed<readonly Track[]>(() =>
+    this.library.importedTracks().filter((t) => isSavable(t) && (this.isRetrying(t.id) || this.isFailed(t))),
   );
 
   readonly count = computed(() => this.tracks().length);
+
+  /**
+   * Reactive: the track's retry is queued or saving. The status gate hides a
+   * phantom "Retrying…" while the record write is still in flight.
+   */
+  isRetrying(trackId: string): boolean {
+    if (!this.retryingIds().has(trackId)) return false;
+    const status = this.offline.status(trackId);
+    return status === 'queued' || status === 'saving';
+  }
+
+  /** Retry a failed track's download, keeping it listed until it is queued or saving. */
+  async retry(trackId: string): Promise<void> {
+    if (this.pending.has(trackId) || this.isRetrying(trackId)) return;
+    this.pending.add(trackId);
+    this.retryingIds.update((ids) => new Set(ids).add(trackId));
+    try {
+      await this.offline.retry(trackId);
+      const status = this.offline.status(trackId);
+      if (status !== 'queued' && status !== 'saving') this.clearRetrying(trackId);
+    } catch (error) {
+      this.clearRetrying(trackId);
+      throw error;
+    } finally {
+      this.pending.delete(trackId);
+    }
+  }
 
   /** Short reason for a failed track ("Video unavailable", "Download error"...). */
   reason(trackId: string): string {
@@ -171,7 +232,7 @@ export class FailedDownloadsStore {
     if (!old.artUrl && candidate.artUrl) next.artUrl = candidate.artUrl;
     if (next.id === oldId) {
       // Same video: nothing to migrate, just try again.
-      await this.offline.retry(oldId);
+      await this.retry(oldId);
       return next;
     }
     this.offline.forget([oldId]);
@@ -182,5 +243,15 @@ export class FailedDownloadsStore {
     await this.importer.replaceMatchId(oldId, next);
     await this.offline.ensureSaved(next);
     return next;
+  }
+
+  /** Drop a track id from the retrying set (no write when it is not there). */
+  private clearRetrying(trackId: string): void {
+    if (!this.retryingIds().has(trackId)) return;
+    this.retryingIds.update((ids) => {
+      const next = new Set(ids);
+      next.delete(trackId);
+      return next;
+    });
   }
 }

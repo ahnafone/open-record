@@ -314,9 +314,12 @@ Then restart the server (`npm run server:up -- --stop` followed by
 need a specific build or a second copy, set `YTDLP_PATH` in
 `apps/server/.env` to its path.
 
-`pipx` installs `yt-dlp[default]`, which includes the YouTube JS challenge
-solver; the Node 24 on `PATH` serves as its JavaScript runtime
-(`--js-runtimes node`).
+`pipx` installs `yt-dlp[default]`, which brings the dependencies for YouTube's
+JS challenges; the Node 24 on `PATH` serves as its JavaScript runtime
+(`--js-runtimes node`). The EJS challenge solver is **not** bundled: it is a
+remote component that yt-dlp fetches from GitHub on first use (see
+[Age-restricted videos](#age-restricted-videos-cookies)), which is why the
+signed-in retry passes `--remote-components ejs:github`.
 
 ## Age-restricted videos (cookies)
 
@@ -332,9 +335,20 @@ usable jar is configured is the same request retried **once** with the cookies.
 The common case stays as fast as before; age- and private songs take two yt-dlp
 runs, so they are slower (up to about twice the wait).
 
+That signed-in retry also enables yt-dlp's EJS challenge solver with
+`--remote-components ejs:github`. Without it, a valid signed-in jar still fails
+age-gated YouTube videos (no formats, or "only available on YouTube"). yt-dlp
+downloads the solver from GitHub on first use and caches it under its own cache
+directory (by default `~/.cache/yt-dlp`), so the first such run needs network
+access to GitHub, and the installed yt-dlp must support the flag (verified on
+2026.10.26; update with `pipx upgrade yt-dlp`). The solver is used only on the
+cookie retry; anonymous requests are unchanged.
+
 1. In a browser signed in to youtube.com with an **age-verified** account,
    export the cookies for youtube.com in Netscape format, e.g. with the
-   "Get cookies.txt LOCALLY" extension. Keep the `.txt` file.
+   "Get cookies.txt LOCALLY" extension. Keep the `.txt` file. The server
+   prepends the Netscape header when an exporter omits it, but the file must
+   still contain Netscape data rows.
 2. Put it on this machine somewhere the server can read. The simplest place is
    the data directory: `~/.config/open-record/cookies.txt`, i.e.
    `<OPEN_RECORD_DATA_DIR>/cookies.txt`, which needs no configuration at all —
@@ -352,16 +366,16 @@ runs, so they are slower (up to about twice the wait).
    the server still starts. The data-directory default is optional: when
    `<OPEN_RECORD_DATA_DIR>/cookies.txt` does not exist it is skipped silently —
    no banner line and no warning.
-4. In the app, open Failed downloads and retry the song. Each yt-dlp run that
-   needs cookies gets a fresh writable copy of the file in its own temporary
-   directory, deleted when the run ends (yt-dlp rewrites its jar; copies left by
-   a crash are removed at the next start). The file in use is re-read on
-   every request, so replacing its **contents** takes effect immediately. The
-   data-directory file is only consulted while no explicit path is set, so
-   dropping it in or deleting it is picked up without a restart. A restart is
-   only needed when the **path** changes — i.e. when `YTDLP_COOKIES_FILE` is
-   added, changed or removed (start the server with `npm run server:up`, or
-   `systemctl --user restart open-record-server`).
+4. In the app, click Retry (or Retry all) on the Failed downloads page. Each
+   yt-dlp run that needs cookies gets a fresh writable copy of the file in its
+   own temporary directory, deleted when the run ends (yt-dlp rewrites its
+   jar; copies left by a crash are removed at the next start). The file in use
+   is re-read on every request, so replacing its **contents** takes effect
+   immediately. The data-directory file is only consulted while no explicit
+   path is set, so dropping it in or deleting it is picked up without a
+   restart. A restart is only needed when the **path** changes — i.e. when
+   `YTDLP_COOKIES_FILE` is added, changed or removed (start the server with
+   `npm run server:up`, or `systemctl --user restart open-record-server`).
 5. YouTube signs sessions out eventually. When age-restricted songs start
    failing again, export a fresh `cookies.txt` and replace the file (no
    restart needed). A song that still hits the age gate with cookies in use

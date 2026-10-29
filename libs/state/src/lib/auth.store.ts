@@ -233,6 +233,19 @@ export class AuthStore {
     }
   }
 
+  /**
+   * Force a token refresh after a rejected request (session sync retries a
+   * `401` once). Null when signed out or the refresh fails; never prompts.
+   */
+  async refreshAccessToken(): Promise<string | null> {
+    if (!this.port || !this.signedIn()) return null;
+    try {
+      return await this.port.refreshAccessToken();
+    } catch {
+      return null;
+    }
+  }
+
   clearMessages(): void {
     this._error.set(null);
     this._notice.set(null);

@@ -63,6 +63,17 @@ export const appRoutes: Route[] = [
       import('@open-record/features/playlist').then((m) => m.PlaylistPage),
   },
   {
+    path: 'curated/:id',
+    title: 'Curated · Open Record',
+    data: {
+      screen: 'playlist',
+      root: false,
+      title: 'Curated',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/playlist').then((m) => m.PlaylistPage),
+  },
+  {
     path: 'now-playing',
     title: 'Now playing · Open Record',
     data: {

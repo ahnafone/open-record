@@ -405,7 +405,7 @@ async function stop() {
 
 const args = parseArgs(process.argv.slice(2));
 const port = Number(configured('PORT')) || 8787;
-// Must match defaultDataDir() in apps/server/src/services/token-store.ts.
+// Must match defaultDataDir() in apps/server/src/config.ts.
 const dataDir = configured('OPEN_RECORD_DATA_DIR') || join(homedir(), '.config', 'open-record');
 const pidFile = join(dataDir, 'server.pid');
 const logFile = join(dataDir, 'server.log');
