@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { RouteOptions } from './index';
 
-/** Unauthenticated liveness probe (used by Docker healthcheck). */
+/** Unauthenticated liveness probe (`npm run server:up` waits for it; uptime checks use it too). */
 export const healthRoutes: FastifyPluginAsync = async (app) => {
   app.get('/health', { config: { public: true } }, async () => ({ status: 'ok' }));
 };

@@ -55,7 +55,7 @@ M3.7 PC web + Supabase sync: first version shipped (last-write-wins sync of meta
 
 ## Downloader server: what v2 adds
 
-v1 ships `apps/server` (Fastify + yt-dlp, Docker): single user, one shared bearer token. It only searches and returns direct stream links (no downloads, tags or file serving); the device downloads saved songs. It runs only on a server since yt-dlp needs a native process. v2 work:
+v1 ships `apps/server` (Fastify + yt-dlp, on the host): single user, one shared bearer token. It only searches and returns direct stream links (no downloads, tags or file serving); the device downloads saved songs. It runs only on a server since yt-dlp needs a native process. v2 work:
 
 - [ ] Accounts and auth: server already accepts Supabase JWTs next to `OPEN_RECORD_TOKEN` (per-user rate limits); the app now sends the user JWT (M3.8) and the UI no longer asks for the shared token; still to do: retiring the shared token on the server, revocation
 - [ ] Multi-user: per-user quotas and resolve limits; no cross-user cache sharing

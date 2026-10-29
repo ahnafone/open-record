@@ -1,6 +1,7 @@
 import { buildPairingLink } from '@open-record/models';
 import QRCode from 'qrcode';
 import type { ResolvedToken } from './token-store';
+import type { CookiesStatus } from './ytdlp';
 
 /** Printed once the server listens. Also used by scripts/server-up.mjs to find the banner. */
 export const BANNER_MARKER = 'Open Record server is ready';
@@ -15,6 +16,8 @@ export interface BannerOptions {
   /** True when PUBLIC_URL was set, so the URL is already the right one. */
   fromPublicUrl: boolean;
   token: ResolvedToken;
+  /** Optional yt-dlp cookies file; null when none is configured. */
+  cookies: CookiesStatus | null;
 }
 
 function tokenNote(token: ResolvedToken): string {
@@ -30,7 +33,7 @@ function tokenNote(token: ResolvedToken): string {
 
 /** Startup banner: URLs, token, pairing link and a terminal QR code. */
 export async function formatBanner(options: BannerOptions): Promise<string> {
-  const { url, candidates, token } = options;
+  const { url, candidates, token, cookies } = options;
   const pairing = buildPairingLink({ url, token: token.token });
   const qr = await QRCode.toString(pairing, { type: 'terminal', small: true });
 
@@ -40,6 +43,9 @@ export async function formatBanner(options: BannerOptions): Promise<string> {
     `  URL:      ${url}`,
     ...candidates.slice(1).map((other) => `  Also:     ${other}`),
     `  Token:    ${token.token}  (${tokenNote(token)})`,
+    ...(cookies?.ok
+      ? [`  Cookies:  ${cookies.path}  (only when a video needs sign-in)`]
+      : []),
     `  Pairing:  ${pairing}`,
     '',
     'In the app: Settings > Download server > Scan QR code (or paste the pairing link).',
@@ -50,6 +56,14 @@ export async function formatBanner(options: BannerOptions): Promise<string> {
       '',
       'Only a container or loopback address was found, so phones cannot reach it.',
       'Start from the repository root with "npm run server:up" to publish on your LAN address.',
+    );
+  }
+  if (cookies && !cookies.ok) {
+    const reason = cookies.reason ? ` (${cookies.reason})` : '';
+    lines.push(
+      '',
+      `The cookies file ${cookies.path} cannot be used${reason}, so yt-dlp ` +
+        'runs without cookies (age-restricted videos will fail).',
     );
   }
   return `${lines.join('\n')}\n\n${qr.trimEnd()}\n`;

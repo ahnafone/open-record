@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import type { Track } from '@open-record/models';
 import {
+  AGE_RESTRICTED_REASON,
   FailedDownloadsStore,
   LibraryStore,
   OfflineStore,
@@ -38,6 +39,12 @@ import { MatchCandidates } from './match-candidates';
     @if (!loaded()) {
       <p class="loading" role="status"><or-spinner [size]="16" />Loading…</p>
     } @else if (store.tracks().length) {
+      @if (ageHint()) {
+        <p class="note age-hint">
+          Some songs are age-restricted. Add or refresh signed-in YouTube cookies on your download server (see its
+          README), then use Fix link to try again.
+        </p>
+      }
       <ul class="crate">
         @for (t of store.tracks(); track t.id) {
           @let source = sourceLabel(t.source?.site);
@@ -151,6 +158,7 @@ import { MatchCandidates } from './match-candidates';
     .for-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
     .label { margin: 0; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-muted); }
     .note { margin: 0; font-size: 12px; color: var(--color-muted); }
+    .age-hint { margin-bottom: var(--spacing-md); }
     .paste { display: grid; gap: var(--spacing-xs); }
     .paste-row { display: flex; align-items: center; gap: var(--spacing-sm); }
     input { flex: 1; min-inline-size: 0; min-block-size: var(--spacing-touch); padding: 10px; font: inherit; color: var(--color-text);
@@ -183,6 +191,10 @@ export class FailedDownloadsPage {
   protected readonly pasteId = '__paste__';
 
   protected readonly loaded = signal(false);
+  /** True when any listed song failed because YouTube asked for an age check. */
+  protected readonly ageHint = computed(() =>
+    this.store.tracks().some((t) => this.store.reason(t.id) === AGE_RESTRICTED_REASON),
+  );
   protected readonly fixing = signal<Track | null>(null);
   protected readonly suggestions = signal<readonly ImportCandidate[]>([]);
   protected readonly searching = signal(false);

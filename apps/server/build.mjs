@@ -1,6 +1,6 @@
 // Bundles the server with esbuild. Workspace libs (tsconfig path aliases) are
-// inlined; npm packages stay external and are listed in a generated
-// package.json so the Docker image can install only what the server needs.
+// inlined, npm packages stay external, and the generated package.json records
+// exactly which ones the host must resolve at runtime.
 import { build } from 'esbuild';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

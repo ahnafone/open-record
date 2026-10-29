@@ -5,6 +5,9 @@ import {
 } from '@open-record/models';
 import { MAX_URL_LENGTH, UrlRejectedError } from './url-guard';
 import {
+  AGE_GATE,
+  ageGateHint,
+  cookieState,
   normalizeArtist,
   runYtDlpJson,
   toSearchResult,
@@ -137,6 +140,13 @@ export function toPlaylistEntry(e: YtDlpInfo, site: YoutubeTarget['site']): Remo
 /** Clear, client-safe messages for the usual playlist or song failures. */
 function linkError(err: unknown, noun: 'playlist' | 'song'): unknown {
   if (!(err instanceof YtDlpError) || err.status !== 502) return err;
+  // Age gate first: its message also says "Sign in", which the private branch
+  // would otherwise turn into "This song is private".
+  if (AGE_GATE.test(err.message)) {
+    // 422, not 403: the app treats every 401/403 as an auth failure, which both
+    // hides this guidance and pauses imports as a systemic failure.
+    return new YtDlpError(ageGateHint(err.message, cookieState()), 422);
+  }
   const msg = err.message.toLowerCase();
   if (/private|sign in|members[- ]only|login/.test(msg)) {
     return new YtDlpError(`This ${noun} is private. Make it public or unlisted, then try again.`, 403);

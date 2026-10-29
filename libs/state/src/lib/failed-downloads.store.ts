@@ -8,7 +8,7 @@ import { PlayerStore } from './player.store';
 import { PlaylistsStore } from './playlists.store';
 import { RemoteServerPort, StreamResolverPort } from './ports';
 import { isAbort, isBusy, remoteErrorMessage } from './remote-errors';
-import { failureReason } from './track-format';
+import { AGE_RESTRICTED_REASON, failureReason } from './track-format';
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com']);
 const SHORT_HOSTS = new Set(['youtu.be', 'www.youtu.be']);
@@ -56,8 +56,8 @@ export function linkCheckError(error: unknown): string {
   if (status === 415) return 'The link does not point to audio.';
   if (isBusy(error)) return remoteErrorMessage(error);
   switch (failureReason(message)) {
-    case 'Age-restricted':
-      return 'This video is age-restricted, so it can’t be downloaded.';
+    case AGE_RESTRICTED_REASON:
+      return 'This video is age-restricted. Add or refresh signed-in YouTube cookies on your download server, then try again.';
     case 'Private video':
       return 'This video is private.';
     case 'Blocked in region':

@@ -50,7 +50,7 @@ Plans for v1 (frontend app), v2 (backend) and later are in [roadmap/](roadmap/RE
 
 ## Run on Android
 
-Prerequisites: Node 24, the Android SDK (Android Studio is not required), a phone with USB debugging on (or an emulator), Docker (for the server), and the phone on the same Wi-Fi as the PC.
+Prerequisites: Node 24, the Android SDK (Android Studio is not required), a phone with USB debugging on (or an emulator), yt-dlp installed with `pipx install yt-dlp` (for the server), and the phone on the same Wi-Fi as the PC.
 
 1. Install dependencies: `npm install`
 2. Start the stream server: `npm run server:up`. It prints one link, `http://<lan-ip>:8787/`, and a QR code. If several LAN addresses exist and it runs in a terminal, it asks which one matches the phone's Wi-Fi; override with `npm run server:up -- --ip 10.0.0.139`. If the `/health` hint says port 8787 is blocked, allow it through the PC firewall.
@@ -116,14 +116,14 @@ Sign in with the same Supabase account on both devices (see [Supabase accounts](
 
 ## Run the server
 
-`npm run server:up` starts the server in Docker (see [Stream-link server](#stream-link-server) below). There is no stop script; stop it with `docker compose -f apps/server/docker-compose.yml down`. A manual Docker alternative is below.
+`npm run server:up` builds and starts the server on this machine (see [Stream-link server](#stream-link-server) below) and exits, leaving it running in the background. Stop it with `npm run server:up -- --stop` (or `npm run server:stop`). For development, `npm run server:dev` runs it in the foreground.
 
 ## Repo layout
 
 ```
 apps/app/            Angular + Capacitor app (android/, ios/)
 supabase/           Supabase config and SQL migrations (optional accounts)
-apps/server/        Self-hosted stream-link server (Fastify, yt-dlp, Docker)
+apps/server/        Self-hosted stream-link server (Fastify, yt-dlp)
 libs/                Shared libraries (models, state, storage, player, ui, providers, metadata-lookup, features)
 mockup/              Interactive HTML mockup (index.html, assets/, ATTRIBUTION.md)
 docs/screenshots/    Screenshots of the six screens
@@ -160,17 +160,19 @@ The optional server in [apps/server](apps/server/README.md) uses yt-dlp to searc
 npm run server:up
 ```
 
-It starts the server in Docker and prints one link, `http://<lan-ip>:8787/`, and a QR code. In the app, open Settings > Stream server and tap "Scan QR code" (Android uses ML Kit, iOS scans in-app) or type the address; only the server address is stored, then sign in. Users sign in with Supabase and the app sends their token; the shared token is not asked for in the UI.
+It starts the server on this machine and prints one link, `http://<lan-ip>:8787/`, and a QR code. In the app, open Settings > Stream server and tap "Scan QR code" (Android uses ML Kit, iOS scans in-app) or type the address; only the server address is stored, then sign in. Users sign in with Supabase and the app sends their token; the shared token is not asked for in the UI.
 
-Manual Docker run:
+To use your own token instead of the generated one:
 
 ```bash
 export OPEN_RECORD_TOKEN=$(openssl rand -hex 32)
-docker compose -f apps/server/docker-compose.yml up -d --build
-curl http://127.0.0.1:8787/health
+npm run server:up
+curl http://192.168.1.20:8787/health   # the address the script printed
 ```
 
-Expose it over HTTPS (Tailscale or a Cloudflare tunnel), or on a trusted home network publish it on your LAN with `BIND_ADDRESS=<lan-ip>` and use `http://<lan-ip>:8787` (unencrypted: tokens are visible to others on the network; see the [server README](apps/server/README.md#plain-http-on-your-home-lan)). Then enter the address in the app under Settings, Stream server (or scan the QR code). More in [roadmap/downloader-server.md](roadmap/downloader-server.md).
+The server needs Node 24 and `yt-dlp` (`pipx install yt-dlp`) on the host. Its state, including the generated token, lives in `~/.config/open-record/`. On an always-on machine, `deploy/open-record-server.service` runs it as a systemd user unit instead (see the [server README](apps/server/README.md)).
+
+Expose it over HTTPS (Tailscale or a Cloudflare tunnel), or on a trusted home network use the plain `http://<lan-ip>:8787` address (unencrypted: tokens are visible to others on the network; see the [server README](apps/server/README.md#plain-http-on-your-home-lan)). Then enter the address in the app under Settings, Stream server (or scan the QR code). More in [roadmap/downloader-server.md](roadmap/downloader-server.md).
 
 ## License
 

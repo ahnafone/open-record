@@ -34,7 +34,7 @@ libs/storage/             persistence port + SQLite/IndexedDB adapters
 libs/player/              audio engine + media-session wrapper
 libs/ui/                  tokens.css, buttons, chips, sleeve/disc, modal, toast
 libs/features/<screen>/   browse, search, library, playlist, collab, now-playing, settings
-apps/server/              self-hosted stream-link server (Fastify + yt-dlp, Docker)
+apps/server/              self-hosted stream-link server (Fastify + yt-dlp)
 ```
 
 Enforce boundaries with Nx module-boundary lint tags (features -> state/ui; providers -> models only).
@@ -96,7 +96,7 @@ M3 extras (all untested on device):
 
 Optional; off until a server URL and token are set. All items untested on device. Details in [downloader-server.md](downloader-server.md).
 
-- [x] `apps/server`: Fastify + yt-dlp, Docker, single-user bearer token; returns stream links only (`POST /stream`, `/search`, `/resolve`, `/ping`), never downloads, tags or serves files; load safeguards (concurrency cap, queue, 503 Retry-After, rate limits, link cache)
+- [x] `apps/server`: Fastify + yt-dlp on the host, single-user bearer token; returns stream links only (`POST /stream`, `/search`, `/resolve`, `/ping`), never downloads, tags or serves files; load safeguards (concurrency cap, queue, 503 Retry-After, rate limits, link cache)
 - [x] Search (YouTube, YouTube Music, SoundCloud) and pasted links (Bandcamp, Audiomack, Mixcloud, any yt-dlp site)
 - [x] Metadata from iTunes Search + Deezer (hi-res art) looked up by the app (`libs/metadata-lookup`) and saved with the track; the server has no `/metadata`
 - [x] MusicBrainz and Cover Art Archive removed (code, toggle, credits, setting)
@@ -104,10 +104,10 @@ Optional; off until a server URL and token are set. All items untested on device
 - [x] Settings > Stream server (URL, token, Test connection via `/ping`); Search > Download sources (planned rename: Find online); Android and iOS both use the server URL
 - [x] One-command start `npm run server:up` (prints one link and a QR; token persisted in `/data` or `~/.config/open-record`) and a QR for the server address: Settings > Stream server > Scan QR code (both platforms scan; superseded in part by M3.8)
 - [x] One-command mobile build scripts: `npm run android` (cap sync, then `cap run android`) and `npm run android:open` (opens Android Studio)
-- [x] LAN address chooser in `server:up`: skips 192.0.2.* and Docker bridges, prompts when several candidates exist in a terminal, `--ip` overrides
+- [x] LAN address chooser in `server:up`: skips 192.0.2.* and container bridges, prompts when several candidates exist in a terminal, `--ip` overrides
 - [x] iOS QR scanner: in-app JS scanner (jsQR); device test pending
 - [x] Token stored in plain text in the settings collection (no secure-storage plugin yet)
-- [x] Server URL over HTTPS (Tailscale / Cloudflare tunnel, recommended) or plain HTTP on the home LAN. Decision: Android network security config allows cleartext (base-config; IP ranges cannot be scoped), iOS `NSAllowsLocalNetworking` + local-network usage string, server compose `BIND_ADDRESS` (default `127.0.0.1`). LAN HTTP exposes the token on the network; documented
+- [x] Server URL over HTTPS (Tailscale / Cloudflare tunnel, recommended) or plain HTTP on the home LAN. Decision: Android network security config allows cleartext (base-config; IP ranges cannot be scoped), iOS `NSAllowsLocalNetworking` + local-network usage string, `server:up --ip` binds the chosen LAN address (`--host` for a tunnel). LAN HTTP exposes the token on the network; documented
 - [x] Audio quality, auto-download and preloading (all untested on device): Settings > Audio quality (streaming and download quality: Highest default, High ~160, Medium ~128, Low ~64 kbps; optional "use streaming quality for downloads"); `POST /stream` accepts optional `quality` (400 if invalid, link cache per quality); Library auto-download switch (off by default) and per-playlist auto-download switch, Wi-Fi only unless Settings > Allow auto-download on mobile data (`@capacitor/network`, needs `npx cap sync`); saved tracks always play from the device file; the player pre-resolves and preloads the next track ~15 s before the current one ends. Device test pending
 - [ ] Device test (pending): stream with the server on the LAN; bookmark, file appears and plays in airplane mode; unbookmark from library and all playlists, file deleted
 - [ ] Keep the downloader out of store builds (decide how before M5)

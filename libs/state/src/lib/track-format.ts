@@ -24,11 +24,17 @@ export function sourceLabel(site: string | undefined | null): string | null {
 
 export type DownloadStateKind = 'saved' | 'downloading' | 'failed';
 
+/**
+ * Short reason for a save that failed on an age check. Exported so callers can
+ * match the label (e.g. to show the age hint) instead of copying the wording.
+ */
+export const AGE_RESTRICTED_REASON = 'Age-restricted';
+
 /** [pattern, short reason], first match wins (age before the generic "sign in"). */
 const FAILURE_REASONS: readonly (readonly [RegExp, string])[] = [
   [/cancelled/i, 'Cancelled'],
   [/wi-?fi/i, 'Waiting for Wi-Fi'],
-  [/confirm your age|age[- ]restricted|inappropriate/i, 'Age-restricted'],
+  [/confirm your age|age[- ]restricted|inappropriate/i, AGE_RESTRICTED_REASON],
   [/private video/i, 'Private video'],
   [/country|region|geo/i, 'Blocked in region'],
   [/not a bot/i, 'Blocked by YouTube'],

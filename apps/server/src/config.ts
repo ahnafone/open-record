@@ -17,6 +17,8 @@ export interface ServerConfig {
   streamCacheTtl: number;
   /** Requests per minute per token for the yt-dlp routes (/search, /stream). */
   resolveRateLimitMax: number;
+  /** Optional Netscape cookies.txt handed to yt-dlp (age-restricted videos, bot checks). */
+  ytdlpCookiesFile: string | null;
   /**
    * Optional Supabase Auth: when set, a Supabase access token (JWT) is accepted
    * as a bearer credential next to the static token. Null = static token only.
@@ -88,6 +90,9 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     maxConcurrentResolves: int(env, 'MAX_CONCURRENT_RESOLVES', 2, 1, 16),
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
+    // Never validated here: a missing or unreadable file only disables cookies,
+    // so a stale path in an old .env cannot stop the server from starting.
+    ytdlpCookiesFile: env['YTDLP_COOKIES_FILE']?.trim() || null,
     supabase: supabaseConfig(env),
     webDir: env['WEB_DIR']?.trim() || null,
     appConfig: appConfig(env),

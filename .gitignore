@@ -74,3 +74,7 @@ vitest.config.*.timestamp*
 # Download server local config and data
 apps/server/.env
 apps/server/data
+# Live YouTube session tokens handed to yt-dlp for age-restricted videos
+apps/server/cookies.txt
+# Any exported jar, wherever it is kept
+cookies.txt

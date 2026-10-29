@@ -1,0 +1,38 @@
+# Runs the Open Record server as a systemd user service, directly on the host
+# (no Docker).
+#
+#   npx nx build app && npx nx build server      # or: npm run server:up (also prints the pairing QR)
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf "$PWD/deploy/open-record-server.service" ~/.config/systemd/user/
+#   loginctl enable-linger "$USER"               # start at boot, before you log in
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now open-record-server
+#   journalctl --user -u open-record-server -f
+#
+# The symlink matters: systemctl --user only scans ~/.config/systemd/user,
+# /etc/systemd/user and /usr/lib/systemd/user, not this repository.
+#
+# ~/.local/bin/node is a symlink to the nvm-managed node. After an nvm upgrade,
+# repoint it: ln -sf "$(command -v node)" ~/.local/bin/node
+#
+# Binds HOST=0.0.0.0 by default: firewall the port, e.g.
+#   sudo ufw allow from 192.168.1.0/24 to any port 8787 proto tcp
+[Unit]
+Description=Open Record server
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Github/open-record
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The built web app, served at / (dist/apps/app/browser).
+Environment=WEB_DIR=%h/Github/open-record/dist/apps/app/browser
+# Node's env-file loading never overrides a variable that is already set, so
+# the two values above win over the same names in apps/server/.env. Everything
+# else (PORT, PUBLIC_URL, SUPABASE_*, YTDLP_*) comes from that file.
+ExecStart=%h/.local/bin/node --env-file-if-exists=%h/Github/open-record/apps/server/.env %h/Github/open-record/dist/apps/server/main.mjs
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

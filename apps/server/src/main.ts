@@ -1,14 +1,17 @@
 import { networkInterfaces } from 'node:os';
+import { join } from 'node:path';
 import { buildApp } from './app';
 import { ConfigError, loadConfig } from './config';
 import { formatBanner } from './services/banner';
 import { pickLanUrl } from './services/network';
 import { defaultDataDir, resolveToken } from './services/token-store';
+import { configureCookies, cookiesStatus } from './services/ytdlp';
 
 async function main(): Promise<void> {
+  const dataDir = defaultDataDir(process.env);
   let token;
   try {
-    token = resolveToken({ env: process.env, dataDir: defaultDataDir(process.env) });
+    token = resolveToken({ env: process.env, dataDir });
   } catch (err) {
     console.error(`open-record-server: ${(err as Error).message}`);
     process.exit(1);
@@ -24,6 +27,11 @@ async function main(): Promise<void> {
     }
     throw err;
   }
+
+  // Here rather than in buildApp on purpose: specs call buildApp, and the
+  // fallback jar must not make server tests depend on whether the developer's
+  // own ~/.config/open-record/cookies.txt happens to exist.
+  configureCookies(config.ytdlpCookiesFile, join(dataDir, 'cookies.txt'));
 
   const app = await buildApp(config, { logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
 
@@ -50,6 +58,7 @@ async function main(): Promise<void> {
       ...picked,
       fromPublicUrl: !!publicUrl,
       token,
+      cookies: cookiesStatus(),
     }),
   );
 }

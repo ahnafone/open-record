@@ -115,4 +115,21 @@ describe('POST /playlist URL allow-list', () => {
     expect(args.at(-1)).toBe('https://music.youtube.com/playlist?list=PLabc_DEF-123');
     expect(res.json().entries).toHaveLength(1);
   });
+
+  it('answers 422 with the cookie guidance for an age-gated song', async () => {
+    // Not 403: the app turns every 401/403 into AuthError, which hides this text.
+    vi.mocked(execFile).mockImplementation(((_f: string, _a: string[], _o: unknown, cb: (e: Error, out: string, err: string) => void) =>
+      cb(new Error('exit 1'), '', 'ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm your age\n')) as unknown as typeof execFile);
+    const res = await app.inject({ method: 'POST', url: '/playlist', headers, payload: { url: 'https://youtu.be/dQw4w9WgXcQ' } });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toMatch(/confirm your age.*cookies/i);
+  });
+
+  it('still answers 403 with the private wording for a private playlist', async () => {
+    vi.mocked(execFile).mockImplementation(((_f: string, _a: string[], _o: unknown, cb: (e: Error, out: string, err: string) => void) =>
+      cb(new Error('exit 1'), '', 'ERROR: [youtube:tab] PLabc_DEF-123: This playlist is private\n')) as unknown as typeof execFile);
+    const res = await app.inject({ method: 'POST', url: '/playlist', headers, payload: { url: 'https://www.youtube.com/playlist?list=PLabc_DEF-123' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/This playlist is private/i);
+  });
 });

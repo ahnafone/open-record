@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app';
 import { loadConfig } from '../config';
@@ -6,7 +9,13 @@ import { searchRoutes } from '../routes/search';
 import { streamRoutes } from '../routes/stream';
 import { isBlockedAddress, validateUrl, type LookupFn } from './url-guard';
 import {
+  ageGateHint,
   artistOf,
+  BASE_ARGS,
+  configureCookies,
+  cookieState,
+  cookiesStatus,
+  lastError,
   parseTitle,
   rankByRelevance,
   search,
@@ -14,6 +23,21 @@ import {
 } from './ytdlp';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
+
+/** Set to make `mkdtempSync` fail, as when the temp directory is full or read-only. */
+const fsMock = vi.hoisted(() => ({ failMkdtemp: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    mkdtempSync: ((...args: unknown[]) => {
+      if (fsMock.failMkdtemp)
+        throw new Error('ENOSPC: no space left on device');
+      return (actual.mkdtempSync as (...a: unknown[]) => unknown)(...args);
+    }) as typeof actual.mkdtempSync,
+  };
+});
 
 const publicLookup: LookupFn = async () => ['93.184.215.14'];
 
@@ -304,5 +328,388 @@ describe('stream response mapping', () => {
       caught = err;
     }
     expect(caught).toMatchObject({ status: 422 });
+  });
+});
+
+describe('yt-dlp cookies', () => {
+  const emptySearch = { _type: 'playlist', entries: [] };
+  const AGE_STDERR =
+    'ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm your age\n';
+  const PRIVATE_STDERR =
+    'ERROR: [youtube] dQw4w9WgXcQ: Private video. Sign in if you have access\n';
+
+  /** Answers successive `execFile` calls from `runs`; the last one repeats. */
+  function mockRuns(
+    ...runs: { payload?: unknown; stderr?: string; error?: boolean }[]
+  ): void {
+    const mocked = vi.mocked(execFile);
+    mocked.mockImplementation(((
+      _file: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (...a: unknown[]) => void,
+    ) => {
+      const run = runs[Math.min(mocked.mock.calls.length - 1, runs.length - 1)];
+      if (run.error) cb(new Error('exit 1'), '', run.stderr ?? '');
+      else cb(null, JSON.stringify(run.payload ?? emptySearch), '');
+    }) as unknown as typeof execFile);
+  }
+
+  /** Every `execFile` call fails with `err`, keeping extra fields (code, killed). */
+  function mockFailure(err: Error): void {
+    vi.mocked(execFile).mockImplementation(((
+      _file: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (...a: unknown[]) => void,
+    ) => {
+      cb(err, '', '');
+    }) as unknown as typeof execFile);
+  }
+
+  function callArgs(index: number): string[] {
+    return vi.mocked(execFile).mock.calls[index][1] as string[];
+  }
+
+  function lastArgs(): string[] {
+    return callArgs(vi.mocked(execFile).mock.calls.length - 1);
+  }
+
+  /** A cookies.txt on disk; returns its path and a cleanup function. */
+  function cookiesFile(contents?: string): {
+    path: string;
+    cleanup: () => void;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'open-record-test-'));
+    const path = join(dir, 'cookies.txt');
+    writeFileSync(
+      path,
+      contents ??
+        '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n',
+    );
+    return {
+      path,
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  }
+
+  // The cookies path is module state shared by every test in this file.
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.mocked(execFile).mockReset();
+    // Never let a timeout or early abort in one test poison mkdtempSync later.
+    fsMock.failMkdtemp = false;
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    configureCookies(null);
+  });
+
+  it('runs anonymously first and retries once with --cookies on the age gate', async () => {
+    const { path, cleanup } = cookiesFile();
+    let copy = '';
+    let mode = 0;
+    try {
+      configureCookies(path);
+      expect(cookiesStatus()).toEqual({ path, ok: true });
+      let calls = 0;
+      vi.mocked(execFile).mockImplementation(((
+        _file: string,
+        args: string[],
+        _opts: unknown,
+        cb: (...a: unknown[]) => void,
+      ) => {
+        calls += 1;
+        if (calls === 1) {
+          expect(args).not.toContain('--cookies');
+          cb(new Error('exit 1'), '', AGE_STDERR);
+          return;
+        }
+        copy = args[args.indexOf('--cookies') + 1];
+        mode = statSync(copy).mode & 0o777;
+        cb(null, JSON.stringify(emptySearch), '');
+      }) as unknown as typeof execFile);
+
+      await expect(search('x', 'youtube')).resolves.toEqual([]);
+
+      expect(calls).toBe(2);
+      // The retry's --cookies sits right after the global args.
+      expect(lastArgs().indexOf('--cookies')).toBe(BASE_ARGS.length);
+      expect(copy).not.toBe(path);
+      expect(dirname(copy)).not.toBe(dirname(path));
+      expect(mode).toBe(0o600); // tokens are never world-readable
+      // The per-run directory is removed once the promise settles.
+      expect(() => statSync(dirname(copy))).toThrow();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('retries a sign-in refusal once and keeps its own message', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(path);
+      mockRuns(
+        { error: true, stderr: PRIVATE_STDERR },
+        { error: true, stderr: PRIVATE_STDERR },
+      );
+      // "Private video" must still classify as a per-track failure in the app,
+      // so a retry that fails the same way is not turned into age-gate copy.
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        message: expect.stringMatching(/Private video/),
+        status: 502,
+      });
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
+      expect(callArgs(0)).not.toContain('--cookies');
+      expect(callArgs(1)).toContain('--cookies');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not retry errors that are not about signing in', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(path);
+      mockRuns({
+        error: true,
+        stderr: 'ERROR: [youtube] dQw4w9WgXcQ: Video unavailable\n',
+      });
+      await expect(search('x', 'youtube')).rejects.toThrow(/Video unavailable/);
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('hints adding cookies and does not retry without a jar', async () => {
+    mockRuns({ error: true, stderr: AGE_STDERR });
+    await expect(search('x', 'youtube')).rejects.toMatchObject({
+      message: expect.stringMatching(/confirm your age.*cookies/i),
+      status: 502,
+    });
+    expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+  });
+
+  it('hints a broken file and does not retry', async () => {
+    configureCookies('/nonexistent/open-record-cookies.txt');
+    expect(cookiesStatus()).toMatchObject({
+      path: '/nonexistent/open-record-cookies.txt',
+      ok: false,
+      reason: expect.stringMatching(/ENOENT/),
+    });
+    mockRuns({ error: true, stderr: AGE_STDERR });
+    const err = await search('x', 'youtube').catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 502 });
+    const message = (err as Error).message;
+    expect(message).toMatch(/confirm your age/i);
+    expect(message).toMatch(/cookies file cannot be read/i);
+    // The hint must name both places the operator can fix the jar.
+    expect(message).toContain('YTDLP_COOKIES_FILE');
+    expect(message).toMatch(/data-directory cookies\.txt/);
+    expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/ENOENT/)); // broken once
+  });
+
+  it('reports a stale jar when the retry also hits the age gate, and cleans up', async () => {
+    const { path, cleanup } = cookiesFile();
+    let copy = '';
+    try {
+      configureCookies(path);
+      vi.mocked(execFile).mockImplementation(((
+        _file: string,
+        args: string[],
+        _opts: unknown,
+        cb: (...a: unknown[]) => void,
+      ) => {
+        if (args.includes('--cookies'))
+          copy = args[args.indexOf('--cookies') + 1];
+        cb(new Error('exit 1'), '', AGE_STDERR);
+      }) as unknown as typeof execFile);
+
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        message: expect.stringMatching(/confirm your age.*may be stale/),
+        status: 502,
+      });
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
+      // The failed retry's copy is gone too.
+      expect(copy).not.toBe('');
+      expect(() => statSync(copy)).toThrow();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('hints the temp directory when the per-run copy cannot be written', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      // A usable jar on disk; only this run's private copy fails to be created.
+      configureCookies(path);
+      expect(cookieState()).toBe('ok');
+      fsMock.failMkdtemp = true;
+      mockRuns({ error: true, stderr: AGE_STDERR });
+
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        message: expect.stringMatching(/confirm your age.*temporary copy/i),
+        status: 502,
+      });
+      // The retry never starts: the run could not get its own copy of the jar.
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+      expect(callArgs(0)).not.toContain('--cookies');
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/ENOSPC/));
+    } finally {
+      fsMock.failMkdtemp = false;
+      cleanup();
+    }
+  });
+
+  it('resolves <data dir>/cookies.txt per request: absent, added, removed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'open-record-test-'));
+    const path = join(dir, 'cookies.txt');
+    try {
+      configureCookies(null, path);
+      // Nothing on disk yet: the optional default is skipped silently.
+      expect(cookieState()).toBe('none');
+      expect(cookiesStatus()).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+
+      // Dropped in later: the next run picks it up without reconfiguring.
+      writeFileSync(
+        path,
+        '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n',
+      );
+      mockRuns({ error: true, stderr: AGE_STDERR }, { payload: emptySearch });
+      await expect(search('x', 'youtube')).resolves.toEqual([]);
+      expect(callArgs(0)).not.toContain('--cookies');
+      expect(lastArgs()).toContain('--cookies');
+
+      // Deleted again: back to anonymous, still without reconfiguring.
+      rmSync(path);
+      expect(cookieState()).toBe('none');
+      expect(cookiesStatus()).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not retry when yt-dlp is missing, and keeps the 500', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(path);
+      expect(cookieState()).toBe('ok');
+      mockFailure(
+        Object.assign(new Error('spawn yt-dlp ENOENT'), { code: 'ENOENT' }),
+      );
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        status: 500,
+      });
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+      expect(callArgs(0)).not.toContain('--cookies');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not retry a timeout, and keeps the 504', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(path);
+      expect(cookieState()).toBe('ok');
+      mockFailure(Object.assign(new Error('yt-dlp killed'), { killed: true }));
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        status: 504,
+      });
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+      expect(callArgs(0)).not.toContain('--cookies');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('keeps a broken explicit path even when the fallback file exists', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies('/nonexistent/explicit-cookies.txt', path);
+      expect(cookiesStatus()).toMatchObject({
+        path: '/nonexistent/explicit-cookies.txt',
+        ok: false,
+      });
+
+      mockRuns({ error: true, stderr: AGE_STDERR });
+      await expect(search('x', 'youtube')).rejects.toMatchObject({
+        message: expect.stringMatching(/cookies file cannot be read/i),
+      });
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('stays silent when neither a path nor the fallback file exists', () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(null, join(dirname(path), 'missing', 'cookies.txt'));
+      expect(cookiesStatus()).toBeNull();
+      expect(cookieState()).toBe('none');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reports jars it cannot use, with the reason', () => {
+    const empty = cookiesFile('');
+    const page = cookiesFile('<html><body>not cookies</body></html>\n');
+    // Real exports mark HttpOnly cookies this way: a data row, not a comment.
+    const httpOnly = cookiesFile(
+      '# Netscape HTTP Cookie File\n' +
+        '#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n',
+    );
+    try {
+      configureCookies(empty.path);
+      expect(cookiesStatus()).toEqual({
+        path: empty.path,
+        ok: false,
+        reason: 'empty',
+      });
+      configureCookies(page.path);
+      expect(cookiesStatus()).toEqual({
+        path: page.path,
+        ok: false,
+        reason: 'not a Netscape cookies.txt',
+      });
+      configureCookies(httpOnly.path);
+      expect(cookiesStatus()).toEqual({ path: httpOnly.path, ok: true });
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      empty.cleanup();
+      page.cleanup();
+      httpOnly.cleanup();
+    }
+  });
+
+  it('keeps yt-dlp wording when the jar is usable and hints otherwise', () => {
+    const own = 'Sign in to confirm your age';
+    expect(ageGateHint(own, 'ok')).toBe(own);
+    expect(ageGateHint(own, 'broken')).toMatch(
+      /confirm your age.*cookies file cannot be read/i,
+    );
+    expect(ageGateHint('some other error', 'none')).toBe('some other error');
+  });
+});
+
+describe('client-facing yt-dlp errors', () => {
+  it('redacts the temp directory and stays undefined without an ERROR line', () => {
+    const tmp = tmpdir();
+    const message = lastError(
+      `ERROR: [youtube] dQw4w9WgXcQ: unable to load cookies from ` +
+        `${tmp}/open-record-cookies-abc/cookies.txt\n`,
+    );
+    expect(message).toContain('<tmp>');
+    expect(message).not.toContain(tmp);
+
+    expect(lastError('')).toBeUndefined();
+    expect(lastError('WARNING: [youtube] nothing failed\n')).toBeUndefined();
   });
 });

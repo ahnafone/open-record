@@ -14,7 +14,7 @@ token.
 > rights holder allows it). You run it on your own hardware and you are
 > responsible for how you use it. It is not part of the app-store builds.
 
-## Quick start (recommended)
+## Quick start
 
 From the repository root:
 
@@ -22,71 +22,133 @@ From the repository root:
 npm run server:up
 ```
 
-This detects your LAN IP, builds the web app (`nx build app`), builds and
-starts the server in Docker, and prints one link, `http://<lan-ip>:8787/`: the image serves the web app
-and the API on the same origin. Open it in a browser, or in the phone app open **Settings > Stream
-server > Scan QR code** (or type the address); the app stores only the address, then sign in. Use `npm run server:up -- --ip 192.168.1.20`
-to choose the address yourself.
+This detects your LAN IP, builds the web app (`nx build app`) and the server,
+starts the server detached on this machine, then prints one link,
+`http://<lan-ip>:8787/` — the server serves the web app and the API on the same
+origin — plus the startup banner and a pairing QR code, and exits. Open it in a
+browser, or in the phone app open **Settings > Stream server > Scan QR code**
+(or type the address); the app stores only the address, then sign in.
 
-The token is generated on first start and saved in the `server-data` Docker
-volume, so it stays the same across restarts. Set `OPEN_RECORD_TOKEN` yourself
-if you prefer your own token. The token is shown in the terminal and the QR
-code; anyone with it can use the server.
+The token is generated on first start and saved in
+`~/.config/open-record/token` (mode 0600), so it stays the same across
+restarts. Set `OPEN_RECORD_TOKEN` if you prefer your own token. It is shown in
+the terminal and the QR code; anyone with it can use the server.
 
-## Run with Docker
+## Prerequisites
 
-The image contains Node 24 and a pinned yt-dlp, and runs as a non-root user.
-Run from the repository root:
+- **Node 24** on `PATH` (`node --version`). The machine this was set up on uses
+  nvm.
+- **yt-dlp**, installed with `pipx install yt-dlp`. It lands at
+  `~/.local/bin/yt-dlp`, which shadows the older distro copy at
+  `/usr/bin/yt-dlp`; keep `~/.local/bin` ahead of `/usr/bin` in `PATH`.
+- **ffmpeg 6+**, optional: needed by the planned casting work. The distro
+  package (`sudo apt install ffmpeg`, 6.1.1) satisfies it and resolves as
+  `/usr/bin/ffmpeg`.
 
-```sh
-npx nx build app                                               # web app, copied into the image
-docker compose -f apps/server/docker-compose.yml up -d --build
-docker compose -f apps/server/docker-compose.yml logs server   # banner: URL, QR
-curl http://127.0.0.1:8787/health                              # {"status":"ok"}
-```
+Then `npm install` once in the repository root.
 
-Without `PUBLIC_URL` the banner shows the container address, which phones
-cannot reach; use `npm run server:up` (or set `PUBLIC_URL`) for LAN use. You
-can also put variables in `apps/server/.env` (copy `.env.example`); compose
-reads it automatically.
-
-The compose file publishes the port on `127.0.0.1` by default; `npm run server:up`
-sets `BIND_ADDRESS` to the LAN IP (see
-[Plain HTTP on your home LAN](#plain-http-on-your-home-lan)).
-
-## Run without Docker (development)
-
-Needs Node 24 and `yt-dlp` on `PATH`.
+## Run on this machine
 
 ```sh
-npm install
-npx nx serve server                            # builds, then runs dist/apps/server/main.mjs
+npm run server:up                   # detect the LAN IP, build, start detached, print banner + QR, exit
+npm run server:up -- --ip 10.0.0.5  # choose the LAN address
+npm run server:up -- --host 127.0.0.1
+                                    # bind this address instead (e.g. behind a tunnel)
+npm run server:up -- --follow       # stay attached and stream the server output
+npm run server:up -- --stop         # stop the detached server
+npm run server:start                # alias for server:up
+npm run server:stop                 # alias for server:up --stop
+npm run server:dev                  # npx nx serve server (foreground, development)
 ```
 
-The startup banner (URL and QR code) is printed as soon
-as the server listens. Optionally copy `apps/server/.env.example` to
-`apps/server/.env` to set variables.
+`server:up` keeps its state in `~/.config/open-record/`, created mode 0700: the
+`token` (0600), plus `server.pid` and `server.log` for the detached process
+(`--stop` uses the pid file; the log collects the output while detached and
+holds the banner, so it is 0600 too). `OPEN_RECORD_DATA_DIR` moves them
+elsewhere. The token never changes across restarts unless the file is deleted
+or `OPEN_RECORD_TOKEN` is set.
 
+`PORT`, `PUBLIC_URL` and `OPEN_RECORD_DATA_DIR` are read from the environment or
+from `apps/server/.env`, so the address the script prints and probes is the one
+the server really uses. `PUBLIC_URL`, when set, is used verbatim (that is what
+the banner and QR show); otherwise the printed address comes from `--host`, then
+`--ip`, then `HOST` in that file, then the detected LAN address. The script reads
+nothing else from the file; the server reads all of it.
+
+The banner (URL, token, QR code) is printed as soon as the server listens.
+Optionally copy `apps/server/.env.example` to `apps/server/.env` to set
+variables.
+
+`server:dev` is the development path: it builds and runs
+`dist/apps/server/main.mjs` in the foreground, with logs going to the terminal.
 Other targets: `npx nx run-many -t lint,typecheck,build,test --projects=server`.
 
+## Run as a systemd user service
+
+On a machine that should keep the server up, use the user unit in
+`deploy/open-record-server.service` instead of `server:up`; both bind port
+8787, so run one or the other. From the repository root:
+
+```sh
+mkdir -p ~/.config/systemd/user
+ln -sf "$PWD/deploy/open-record-server.service" ~/.config/systemd/user/
+loginctl enable-linger $USER
+systemctl --user daemon-reload
+systemctl --user enable --now open-record-server
+journalctl --user -u open-record-server -f
+```
+
+The symlink is required: `systemctl --user` only scans `~/.config/systemd/user`,
+`/etc/systemd/user` and `/usr/lib/systemd/user`, never this repository.
+
+The unit assumes the repository is at `~/Github/open-record` (`%h` is your home
+directory) and runs:
+
+```sh
+~/.local/bin/node --env-file-if-exists=%h/Github/open-record/apps/server/.env \
+  %h/Github/open-record/dist/apps/server/main.mjs
+```
+
+with `WorkingDirectory` at the repository root, `WEB_DIR` at
+`dist/apps/app/browser` and `PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin`.
+Build both first (`npx nx build app`, `npx nx build server`), then reload and
+start.
+
+It starts `~/.local/bin/node`, a symlink to the nvm-managed Node; after an nvm
+upgrade, repoint it:
+
+```sh
+ln -sf "$(command -v node)" ~/.local/bin/node
+```
+
+The unit binds `HOST=0.0.0.0` by default, so firewall the port:
+`sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. This is an
+ordinary host process, so `ufw` rules apply to it.
+
 ## Environment variables
+
+Values come from `apps/server/.env` (copy `.env.example`), read with
+`node --env-file-if-exists` by `server:up` and by the systemd unit alike.
+Variables the unit sets itself (`WEB_DIR`, `PATH`, `NODE_ENV`) win over the
+same names in `.env`: Node's env-file loading never overrides a variable that
+is already set.
 
 | Variable            | Default      | Notes                                                                 |
 | ------------------- | ------------ | --------------------------------------------------------------------- |
 | `OPEN_RECORD_TOKEN` | (generated)  | Shared bearer token, at least 16 characters. When unset, a random token is generated once and saved to `<OPEN_RECORD_DATA_DIR>/token` (mode 0600) and reused on restart. |
-| `OPEN_RECORD_DATA_DIR` | `~/.config/open-record` | Where the generated token is stored. Docker uses `/data` (the `server-data` volume). |
+| `OPEN_RECORD_DATA_DIR` | `~/.config/open-record` | Where the generated token is stored, with `server.pid` and `server.log` while started with `server:up`. Absolute path: `~` is not expanded. |
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
-| `HOST`              | `0.0.0.0`    | Listen interface. A specific address limits the banner to that address. |
-| `BIND_ADDRESS`      | `127.0.0.1`  | Docker compose only: host address the port is published on. Set to the LAN IP or `0.0.0.0` for home-LAN use. |
+| `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit leaves the default. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
 | `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
 | `SUPABASE_JWT_SECRET` | (unset) | Optional. Also accept signed-in users' Supabase access tokens (HS256, shared-secret projects; at least 32 characters). Local stack: "JWT secret" from `supabase status`. |
 | `SUPABASE_URL`      | (unset)      | Optional. Verifies asymmetric (ES256/RS256) Supabase tokens via `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, and is served at `GET /app-config` when `SUPABASE_ANON_KEY` is set. Must be `http(s)`. |
 | `SUPABASE_ANON_KEY` | (unset)      | Optional, public. With `SUPABASE_URL`, served at `GET /app-config` so the web app can sign in. Setting it without `SUPABASE_URL` is a startup error. |
-| `WEB_DIR`           | (unset)      | Optional. Directory of a built web app (`dist/apps/app/browser`) served at `/` without a token, with SPA fallback to `index.html` for HTML GETs. API routes keep their auth and are never shadowed. Unset (or no `index.html`) = API only. The Docker image sets `/app/web`. |
+| `WEB_DIR`           | (unset)      | Optional. Host path of a built web app (`dist/apps/app/browser`) served at `/` without a token, with SPA fallback to `index.html` for HTML GETs. API routes keep their auth and are never shadowed. Unset (or no `index.html`) = API only. |
 | `YTDLP_PATH`        | `yt-dlp`     | yt-dlp binary to run.                                                 |
+| `YTDLP_COOKIES_FILE` | `<data dir>/cookies.txt` when present | Optional Netscape `cookies.txt` on this machine, e.g. `/home/you/cookies.txt`. Every request goes out without cookies first; only a video refused for sign-in (age gate, private, members-only, bot check) is retried once with them, so those songs take two yt-dlp runs. When unset, `<OPEN_RECORD_DATA_DIR>/cookies.txt` is used if that file exists; when neither exists the server has no cookies at all (no warning). An explicit path always wins, even when it is broken. A path that is unreadable, empty or not a Netscape file only logs a warning and a banner note; it never stops the server, and requests run anonymously. See [Age-restricted videos (cookies)](#age-restricted-videos-cookies). |
 
 Every request needs `Authorization: Bearer <token>`, except `GET /health`,
 `GET /app-config` and, with `WEB_DIR` set, the web app's static files.
@@ -111,13 +173,13 @@ StreamResponse = {
 
 | Endpoint | Body / query | Response |
 | --- | --- | --- |
-| `GET /health` | | `{ status: "ok" }` (no auth; Docker healthcheck) |
+| `GET /health` | | `{ status: "ok" }` (no auth; liveness check) |
 | `GET /app-config` | | `{ supabaseUrl: string \| null, supabaseAnonKey: string \| null }` (no auth, `cache-control: no-store`); both null unless `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set |
 | `GET /ping` | | `{ status: "ok" }`; the app's "Test connection" uses it to check the token |
 | `GET /search?q=&source=` | `source`: `youtube` (default), `ytmusic`, `soundcloud`, `bandcamp`, `audiomack`, `mixcloud`; `q` max 200 chars | `{ results: SearchResult[] }` (max 15) |
 | `POST /resolve` | `{ url }` | `SearchResult` (metadata only, `yt-dlp -J --no-playlist`) |
 | `POST /stream` | `{ url, quality? }` | `StreamResponse` (`yt-dlp -J --no-playlist -f bestaudio[ext=m4a]/bestaudio/best` by default). Optional `quality` picks a lower-bitrate format (Highest, High ~160, Medium ~128, Low ~64 kbps); an invalid value returns `400`. Untested on device. |
-| `POST /playlist` | `{ url }`: a public or unlisted `youtube.com/playlist?list=`, `youtube.com/watch?v=…&list=`, `music.youtube.com/playlist?list=` or `music.youtube.com/browse/VL…` link, or a single song link: `youtube.com/watch?v=…`, `music.youtube.com/watch?v=…` or `youtu.be/…` (no `list=`; the 11-character id is validated) | `RemotePlaylist` `{ id, title, url, site, uploader?, entries, unavailable, truncated, single? }`. Playlists: `yt-dlp -J --flat-playlist`, first 500 entries. Song links: `yt-dlp -J --no-playlist` on a canonical watch URL, one entry, `single: true`. Each entry: `{ id, url, site, title, artist, originalTitle, uploader?, durationSec?, thumbnailUrl? }`. Private playlists or songs return `403`, missing ones `404`, anything else on the allow-list `400`. Metadata only: nothing is downloaded. |
+| `POST /playlist` | `{ url }`: a public or unlisted `youtube.com/playlist?list=`, `youtube.com/watch?v=…&list=`, `music.youtube.com/playlist?list=` or `music.youtube.com/browse/VL…` link, or a single song link: `youtube.com/watch?v=…`, `music.youtube.com/watch?v=…` or `youtu.be/…` (no `list=`; the 11-character id is validated) | `RemotePlaylist` `{ id, title, url, site, uploader?, entries, unavailable, truncated, single? }`. Playlists: `yt-dlp -J --flat-playlist`, first 500 entries. Song links: `yt-dlp -J --no-playlist` on a canonical watch URL, one entry, `single: true`. Each entry: `{ id, url, site, title, artist, originalTitle, uploader?, durationSec?, thumbnailUrl? }`. Private playlists or songs return `403`, missing ones `404`, anything else on the allow-list `400`. An age-gated song returns `422` with the cookie guidance in the body (see [Age-restricted videos](#age-restricted-videos-cookies)). Metadata only: nothing is downloaded. |
 | `POST /meta/enrich` | `{ items: [{ title, artist?, album?, durationSec? }] }`, 1 to 10 items, fields max 300 chars | `{ results: (EnrichMatch \| null)[] }` in item order. `EnrichMatch = { title, artist, album?, year?, genre?, artUrl?, durationSec?, confidence, sources }`; `null` when no catalogue match reaches 0.82 confidence. |
 
 - **`/stream` links are tied to this server.** The source issues them for the
@@ -146,7 +208,8 @@ StreamResponse = {
 
 ### Load safeguards
 
-Each request is one short yt-dlp run, so the server bounds how many run at once:
+Each request is one short yt-dlp run (two when a refused video is retried with
+cookies), so the server bounds how many run at once:
 
 - **Concurrency cap.** At most `MAX_CONCURRENT_RESOLVES` yt-dlp processes run at
   a time across `/search`, `/resolve` and `/stream`. Up to 16 further calls wait
@@ -191,10 +254,9 @@ by the app's network security config) and on iOS for local-network hosts
 (`NSAllowsLocalNetworking`; iOS asks for Local Network permission the first
 time). To use the server from your phone on the same Wi-Fi:
 
-`npm run server:up` does this for you: it picks the LAN IP and publishes the
+`npm run server:up` does this for you: it picks the LAN IP and starts the
 server there. To choose the address yourself, pass it with `--ip`
-(`npm run server:up -- --ip 192.168.1.20`), or start compose manually with
-`BIND_ADDRESS=192.168.1.20 PUBLIC_URL=http://192.168.1.20:8787`.
+(`npm run server:up -- --ip 192.168.1.20`).
 
 Then scan the QR code in the app under Settings, Stream server (or enter
 `http://192.168.1.20:8787` by hand), and sign in.
@@ -210,8 +272,7 @@ Caveats:
 - **Firewall.** The host firewall may block the port. `npm run server:up`
   warns when `/health` is unreachable from its own LAN address. Allow the port
   only from your LAN, e.g. `sudo ufw allow from 192.168.1.0/24 to any port 8787 proto tcp`.
-  Note that Docker-published ports bypass `ufw` rules on many Linux setups, so
-  prefer binding to the LAN IP over `0.0.0.0`.
+  The server is an ordinary host process, so `ufw` filters the port.
 - **Stable address.** Give the server a DHCP reservation so its IP does not
   change.
 - Leave `TRUST_PROXY=false` (no proxy in front).
@@ -230,28 +291,96 @@ request, so it must be encrypted. Put the server behind an HTTPS tunnel:
   `cloudflared tunnel --url http://127.0.0.1:8787`, or a named tunnel with
   Cloudflare Access in front.
 
+The tunnel dials `127.0.0.1`, but `npm run server:up` binds the LAN address by
+default. Start it with `--host 127.0.0.1` for a tunnel (the systemd unit
+already binds `0.0.0.0`, so it needs no change).
+
 Set `TRUST_PROXY=true` and `PUBLIC_URL` to the HTTPS URL when running behind
 either, so the banner and QR code show it. Scan the QR code (or enter the URL)
 in the app under Settings, Stream server.
 
 ## Updating yt-dlp
 
-Sites change often and yt-dlp releases fixes quickly. The version is pinned in
-the image so builds are reproducible. To update:
+Sites change often and yt-dlp releases fixes quickly. There is no pinned
+version here: the server runs whatever `yt-dlp` is installed, so update the
+host tool. To update:
 
-1. Find the latest version at <https://pypi.org/project/yt-dlp/#history>.
-2. Rebuild with it:
+```sh
+pipx upgrade yt-dlp            # or: pipx install --force yt-dlp
+```
 
-   ```sh
-   YTDLP_VERSION=2026.10.21 docker compose -f apps/server/docker-compose.yml up -d --build
-   ```
+Then restart the server (`npm run server:up -- --stop` followed by
+`npm run server:up`, or `systemctl --user restart open-record-server`). If you
+need a specific build or a second copy, set `YTDLP_PATH` in
+`apps/server/.env` to its path.
 
-3. Once it works, bump the default `YTDLP_VERSION` in `apps/server/Dockerfile`
-   and `apps/server/docker-compose.yml`.
-
-The image installs `yt-dlp[default]`, which includes the YouTube JS challenge
-solver; Node in the image can serve as its JavaScript runtime
+`pipx` installs `yt-dlp[default]`, which includes the YouTube JS challenge
+solver; the Node 24 on `PATH` serves as its JavaScript runtime
 (`--js-runtimes node`).
+
+## Age-restricted videos (cookies)
+
+Age-restricted YouTube videos (and some bot checks) need a signed-in session:
+run anonymously, yt-dlp fails with `ERROR: [youtube] <id>: Sign in to confirm
+your age` and the app shows the song as **Age-restricted** on the Failed
+downloads page. The server can hand yt-dlp a Netscape-format `cookies.txt` for
+those cases; it is optional and everything else keeps working without it.
+
+Every request goes out **without** cookies first. Only when yt-dlp refuses a
+video for a sign-in reason (age gate, private, members-only, bot check) and a
+usable jar is configured is the same request retried **once** with the cookies.
+The common case stays as fast as before; age- and private songs take two yt-dlp
+runs, so they are slower (up to about twice the wait).
+
+1. In a browser signed in to youtube.com with an **age-verified** account,
+   export the cookies for youtube.com in Netscape format, e.g. with the
+   "Get cookies.txt LOCALLY" extension. Keep the `.txt` file.
+2. Put it on this machine somewhere the server can read. The simplest place is
+   the data directory: `~/.config/open-record/cookies.txt`, i.e.
+   `<OPEN_RECORD_DATA_DIR>/cookies.txt`, which needs no configuration at all —
+   the server picks it up automatically when it exists. For another location,
+   set `YTDLP_COOKIES_FILE` to that absolute path in `apps/server/.env` (or the
+   environment), e.g. `YTDLP_COOKIES_FILE=/home/you/cookies.txt`; an explicit
+   path always wins over the data-directory file. The server runs as you, so
+   the file only needs to be readable by your user; keep it out of the
+   repository (`.gitignore` covers `apps/server/cookies.txt` and any
+   `cookies.txt` inside it).
+3. The banner shows `Cookies:  <path>  (only when a video needs sign-in)` when
+   the jar in use is usable. An **explicit** `YTDLP_COOKIES_FILE` that is
+   missing, unreadable, empty, or not a Netscape `cookies.txt` logs a warning
+   and the banner warns with the reason; requests still run anonymously and
+   the server still starts. The data-directory default is optional: when
+   `<OPEN_RECORD_DATA_DIR>/cookies.txt` does not exist it is skipped silently —
+   no banner line and no warning.
+4. In the app, open Failed downloads and retry the song. Each yt-dlp run that
+   needs cookies gets a fresh writable copy of the file in its own temporary
+   directory, deleted when the run ends (yt-dlp rewrites its jar; copies left by
+   a crash are removed at the next start). The file in use is re-read on
+   every request, so replacing its **contents** takes effect immediately. The
+   data-directory file is only consulted while no explicit path is set, so
+   dropping it in or deleting it is picked up without a restart. A restart is
+   only needed when the **path** changes — i.e. when `YTDLP_COOKIES_FILE` is
+   added, changed or removed (start the server with `npm run server:up`, or
+   `systemctl --user restart open-record-server`).
+5. YouTube signs sessions out eventually. When age-restricted songs start
+   failing again, export a fresh `cookies.txt` and replace the file (no
+   restart needed). A song that still hits the age gate with cookies in use
+   says the cookies "may be stale", which is the cue to re-export.
+
+Caveats:
+
+- The file holds **live account session tokens**. Treat it like a password:
+  never commit it or share it. `.gitignore` covers `apps/server/cookies.txt` and
+  any `cookies.txt` inside the repository; keep a copy outside the repository
+  and nothing can commit it.
+- Using cookies from a server or datacenter IP can get the Google account
+  flagged or blocked. Prefer a throwaway account you do not care about.
+- Cookies stay on the server: the app only ever receives the CDN audio link,
+  and `/stream` still forwards only `User-Agent`, `Referer` and `Origin`.
+- Delete the file to stop using cookies on the next request: everything except
+  age-restricted videos keeps working. Unsetting `YTDLP_COOKIES_FILE` also
+  stops using an explicit jar, but only after a restart (the path is read at
+  startup).
 
 ## Code layout
 

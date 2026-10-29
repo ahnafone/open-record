@@ -1,4 +1,16 @@
 import { execFile } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AudioQuality } from '@open-record/models';
 import { createLimiter } from './resolve-limiter';
 
@@ -343,38 +355,423 @@ export function runYtDlpJson(args: string[]): Promise<YtDlpInfo> {
   return limiter.run(() => execYtDlpJson(args));
 }
 
-function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      YTDLP_BIN,
-      [...BASE_ARGS, ...args],
-      {
-        timeout: INFO_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-        maxBuffer: INFO_MAX_BUFFER,
-        windowsHide: true,
-      },
-      (err, stdout, stderr) => {
-        if (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code === 'ENOENT')
-            return reject(
-              new YtDlpError('yt-dlp is not installed on the server', 500),
-            );
-          if ((err as { killed?: boolean }).killed)
-            return reject(new YtDlpError('yt-dlp timed out', 504));
-          return reject(
-            new YtDlpError(lastError(String(stderr)) ?? 'yt-dlp failed'),
-          );
-        }
+/** Prefix of the per-run temp directory holding the cookie copy. */
+const COOKIES_TMP_PREFIX = 'open-record-cookies-';
+
+/** Cookies file from config (null = no explicit path). */
+let cookiesSource: string | null = null;
+/**
+ * Default jar inside the data directory (`<data dir>/cookies.txt`). Only a path
+ * to look at: it is checked per run, never cached, so dropping the file in later
+ * works without a restart.
+ */
+let cookiesFallback: string | null = null;
+/** A broken cookies file is reported once, not on every request. */
+let cookiesWarned = false;
+/**
+ * A failed per-run cookie copy is reported once too. It needs its own flag:
+ * `checkCookies` re-arms `cookiesWarned` on every request that finds the jar
+ * usable, which is exactly the case when only the copy failed.
+ */
+let cookiesCopyWarned = false;
+
+/** Whether cookies are configured, and whether they are usable. */
+export type CookieState = 'none' | 'ok' | 'broken';
+
+/** Cookies file in use and whether yt-dlp can actually read it. */
+export interface CookiesStatus {
+  path: string;
+  ok: boolean;
+  /** Why the file cannot be used: "empty", "not a Netscape cookies.txt", an fs error. */
+  reason?: string;
+}
+
+/** Largest file accepted as a cookies jar; anything bigger is a wrong path or garbage. */
+const COOKIES_MAX_BYTES = 1024 * 1024;
+
+/** One inspection of the jar in use: usable (with its text) or broken (with why). */
+interface CookiesCheck {
+  state: CookieState;
+  /** File contents, so a run must not read the file a second time. */
+  text?: string;
+  /** Short, banner-sized reason; only set when `state` is 'broken'. */
+  reason?: string;
+}
+
+/**
+ * True for a Netscape data row: at least the six tab-separated fields. Real
+ * exports mark HttpOnly cookies as `#HttpOnly_<domain>` rows, which are data,
+ * not comments.
+ */
+function isCookieRow(line: string): boolean {
+  const row = line.trim().replace(/^#HttpOnly_/, '');
+  return !!row && !row.startsWith('#') && row.split('\t').length >= 6;
+}
+
+/**
+ * Inspects the file without reading it twice: `statSync` first so a directory,
+ * FIFO, device or huge file is refused before anything is read (a FIFO would
+ * otherwise block the event loop).
+ */
+function readCookies(source: string): CookiesCheck {
+  let size: number;
+  try {
+    const stats = statSync(source);
+    if (!stats.isFile())
+      return { state: 'broken', reason: 'not a regular file' };
+    size = stats.size;
+  } catch (err) {
+    return { state: 'broken', reason: (err as Error).message.trim() };
+  }
+  if (size > COOKIES_MAX_BYTES) {
+    return { state: 'broken', reason: 'file is larger than 1 MiB' };
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(source, 'utf8');
+  } catch (err) {
+    return { state: 'broken', reason: (err as Error).message.trim() };
+  }
+  if (!text.trim()) return { state: 'broken', reason: 'empty' };
+  if (!text.split('\n').some(isCookieRow)) {
+    return { state: 'broken', reason: 'not a Netscape cookies.txt' };
+  }
+  return { state: 'ok', text };
+}
+
+/**
+ * Reads and checks the configured file, warning once per break. The file is
+ * read again on every check, so replacing it takes effect without a restart.
+ */
+function checkCookies(source: string): CookiesCheck {
+  const check = readCookies(source);
+  if (check.state === 'broken') warnCookies(source, check.reason ?? 'unknown');
+  // A usable jar re-arms the warning, so a jar that breaks again warns again.
+  else cookiesWarned = false;
+  return check;
+}
+
+/** The jar in use for one check: the explicit path, else the data-dir file when it exists. */
+function cookiesFile(): string | null {
+  if (cookiesSource) return cookiesSource;
+  return cookiesFallback && existsSync(cookiesFallback)
+    ? cookiesFallback
+    : null;
+}
+
+/** One check of the jar in use; null when nothing is configured. */
+function inspectCookies(): { source: string; check: CookiesCheck } | null {
+  const source = cookiesFile();
+  return source ? { source, check: checkCookies(source) } : null;
+}
+
+/**
+ * Reads the jar in use and checks it is a usable Netscape jar: a regular file
+ * of at most 1 MiB, non-empty, holding at least one cookie row (not a `#`
+ * comment, at least the six tab-separated fields of a Netscape line).
+ *
+ * 'ok' only means "parses as a Netscape jar": a stale but valid jar still hits
+ * the age gate, and a refused video is retried with it once. A broken jar is
+ * reported once, with the reason, and requests run anonymously.
+ */
+export function cookieState(): CookieState {
+  return inspectCookies()?.check.state ?? 'none';
+}
+
+function warnCookies(source: string, reason: string): void {
+  if (cookiesWarned) return;
+  cookiesWarned = true;
+  console.warn(
+    `open-record-server: cannot use the cookies file ${source} ` +
+      `(${reason}); yt-dlp runs without cookies, ` +
+      'so age-restricted videos will fail',
+  );
+}
+
+/**
+ * Warns once that a run could not get its own copy of the (perfectly good)
+ * cookies jar, so the message names the copy as the cause, not the jar.
+ */
+function warnCookiesCopy(source: string, reason: string): void {
+  if (cookiesCopyWarned) return;
+  cookiesCopyWarned = true;
+  console.warn(
+    `open-record-server: cannot write a copy of the cookies file ${source} ` +
+      `(${reason}); yt-dlp runs without cookies, ` +
+      'so age-restricted videos will fail',
+  );
+}
+
+/** A cookie copy newer than this may belong to a live run, so the sweep leaves it. */
+const COOKIES_SWEEP_MIN_AGE_MS = 10 * 60 * 1000;
+
+/**
+ * Removes cookie copies left behind by a crash, SIGKILL or a failed cleanup.
+ * Best effort: every error is ignored.
+ *
+ * Deliberately conservative, because `os.tmpdir()` is shared: another server
+ * instance may be running with its own copy right now, and deleting it would
+ * break that run. Non-directories are skipped (a planted file or symlink is not
+ * ours to remove, and following a symlink would delete its target), as is
+ * anything modified in the last ten minutes — an orphan is by definition old,
+ * so a younger entry is assumed live.
+ */
+function sweepCookieCopies(): void {
+  const tmp = tmpdir();
+  let entries: string[];
+  try {
+    entries = readdirSync(tmp);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(COOKIES_TMP_PREFIX)) continue;
+    const target = join(tmp, name);
+    try {
+      const stats = lstatSync(target);
+      if (!stats.isDirectory()) continue;
+      if (Date.now() - stats.mtimeMs < COOKIES_SWEEP_MIN_AGE_MS) continue;
+      rmSync(target, { recursive: true, force: true });
+    } catch {
+      // Not ours to remove, already gone, or unreadable.
+    }
+  }
+}
+
+/**
+ * Sets the optional cookies.txt yt-dlp falls back to (called from `main.ts`).
+ * An explicit path always wins, even when it is broken: the operator asked for
+ * that file. The fallback (`<data dir>/cookies.txt`) applies only while no
+ * explicit path is set and is used only when it exists, so it is optional.
+ * Only paths are stored: both are checked when the banner asks for the status
+ * and again before a run that needs cookies, so replacing the file takes effect
+ * without a restart. Leftover copies from a previous process are swept now, so
+ * live session tokens do not linger in the temp dir.
+ */
+export function configureCookies(
+  explicit: string | null,
+  fallback?: string,
+): void {
+  cookiesSource = explicit;
+  cookiesFallback = fallback ?? null;
+  cookiesWarned = false;
+  cookiesCopyWarned = false;
+  if (explicit || cookiesFallback) sweepCookieCopies();
+}
+
+/**
+ * This run's private copy of a usable jar as `['--cookies', <copy>]`, with the
+ * cleanup that deletes it; null when the copy cannot be written, so the run
+ * would go out anonymously.
+ *
+ * The copy lives in its own `mkdtemp` directory per run, never at a fixed
+ * path: a predictable path lets a local attacker pre-create a symlink or a
+ * world-readable file, two concurrent runs truncate each other's jar, several
+ * server instances collide, and the copy (which holds live session tokens)
+ * would survive shutdown. The copy is still needed because yt-dlp rewrites the
+ * jar after a run, which fails on a read-only mount.
+ */
+function copyCookies(
+  source: string,
+  check: CookiesCheck,
+): { args: string[]; cleanup: () => void } | null {
+  if (check.text === undefined) return null;
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), COOKIES_TMP_PREFIX));
+    const copy = join(dir, 'cookies.txt');
+    // O_EXCL + mode 0o600 from creation: never briefly world-readable and
+    // never following a file planted in the fresh directory.
+    writeFileSync(copy, check.text, { flag: 'wx', mode: 0o600 });
+
+    const runDir = dir;
+    let cleaned = false;
+    return {
+      args: ['--cookies', copy],
+      cleanup: () => {
+        if (cleaned) return;
+        cleaned = true;
         try {
-          resolve(JSON.parse(String(stdout)) as YtDlpInfo);
+          rmSync(runDir, { recursive: true, force: true });
         } catch {
-          reject(new YtDlpError('yt-dlp returned invalid output'));
+          // Best effort: `force` covers ENOENT, not EPERM/EBUSY. A leftover
+          // directory is swept on the next startup.
         }
       },
-    );
+    };
+  } catch (err) {
+    warnCookiesCopy(source, (err as Error).message);
+    if (dir) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Best effort, as above.
+      }
+    }
+    return null;
+  }
+}
+
+/** Cookies state for the startup banner; null when no cookies file is in use. */
+export function cookiesStatus(): CookiesStatus | null {
+  const found = inspectCookies();
+  if (!found) return null;
+  return found.check.state === 'ok'
+    ? { path: found.source, ok: true }
+    : { path: found.source, ok: false, reason: found.check.reason };
+}
+
+/** yt-dlp phrasings YouTube uses for age-restricted videos. */
+export const AGE_GATE = /confirm your age|age[- ]restricted|inappropriate/i;
+
+/**
+ * Refusals that a signed-in session can fix, i.e. when the one retry with
+ * cookies is worth a second run. Deliberately no "video unavailable",
+ * geo-block, timeout, ENOENT or busy wording: those need an update, a proxy or
+ * patience, not a session.
+ */
+const SIGN_IN =
+  /confirm your age|age[- ]restricted|inappropriate|sign in|log ?in|login required|private video|members[- ]only|join this channel|requires payment|not a bot/i;
+
+/**
+ * Guidance shown instead of yt-dlp's error for age-restricted videos when the
+ * server cannot use cookies. The hints keep the phrase "confirm your age"
+ * because the app classifies failed downloads by it.
+ */
+const AGE_GATE_HINT_NONE =
+  'Sign in to confirm your age. This video is age-restricted; add YouTube cookies ' +
+  'to the server (see the download server README).';
+
+const AGE_GATE_HINT_BROKEN =
+  "Sign in to confirm your age. This video is age-restricted; the server's " +
+  "cookies file cannot be read. Check YTDLP_COOKIES_FILE (or the data-directory " +
+  "cookies.txt) and the file's permissions, or export a fresh cookies.txt.";
+
+/** The retry with a usable jar hit the age gate too: the jar is probably stale. */
+const AGE_GATE_HINT_STALE =
+  "Sign in to confirm your age. This video is age-restricted and the server's " +
+  'cookies did not help; they may be stale — export a fresh cookies.txt.';
+
+/**
+ * The jar is usable, but this run could not write its own temporary copy of it.
+ * The fix is free space or permissions in the temp directory, so the message
+ * must not send the operator looking at the cookies file.
+ */
+const AGE_GATE_HINT_COPY_FAILED =
+  'Sign in to confirm your age. This video is age-restricted; the server could ' +
+  'not write a temporary copy of its cookies file. Check free space and ' +
+  "permissions in the server's temp directory.";
+
+/**
+ * Maps an age-gate error to the fix: an anonymous or broken-cookie server gets
+ * guidance, a working cookies file keeps yt-dlp's own wording.
+ *
+ * Exported for the error-mapping test; other callers get the state from
+ * `cookieState()`.
+ */
+export function ageGateHint(message: string, state: CookieState): string {
+  if (state === 'ok' || !AGE_GATE.test(message)) return message;
+  return state === 'broken' ? AGE_GATE_HINT_BROKEN : AGE_GATE_HINT_NONE;
+}
+
+/** Cleanup for a run that never writes a temporary file. */
+const NO_CLEANUP = (): void => undefined;
+
+/**
+ * One yt-dlp process on top of `BASE_ARGS`; `cleanup` runs on every exit path
+ * (success, error, timeout, missing binary, synchronous throw). Rejects with
+ * yt-dlp's own message — plus the friendly ENOENT and timeout ones — so the
+ * caller can decide whether a refusal is worth a retry.
+ */
+function execOnce(
+  args: string[],
+  cleanup: () => void = NO_CLEANUP,
+): Promise<YtDlpInfo> {
+  return new Promise((resolve, reject) => {
+    try {
+      execFile(
+        YTDLP_BIN,
+        [...BASE_ARGS, ...args],
+        {
+          timeout: INFO_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: INFO_MAX_BUFFER,
+          windowsHide: true,
+        },
+        (err, stdout, stderr) => {
+          cleanup();
+          if (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT')
+              return reject(
+                new YtDlpError('yt-dlp is not installed on the server', 500),
+              );
+            if ((err as { killed?: boolean }).killed)
+              return reject(new YtDlpError('yt-dlp timed out', 504));
+            return reject(
+              new YtDlpError(lastError(String(stderr)) ?? 'yt-dlp failed'),
+            );
+          }
+          try {
+            resolve(JSON.parse(String(stdout)) as YtDlpInfo);
+          } catch {
+            reject(new YtDlpError('yt-dlp returned invalid output'));
+          }
+        },
+      );
+    } catch (err) {
+      // execFile can throw synchronously (bad arguments); clean up too.
+      cleanup();
+      reject(err);
+    }
   });
+}
+
+/**
+ * Runs yt-dlp for metadata: anonymously first, because most videos need no
+ * session, then — only when a refusal is one a session can fix and a usable jar
+ * is configured — once more with a fresh private copy of the cookies. Both
+ * attempts run inside the caller's limiter slot, so the pair never waits for a
+ * second slot or reorders the queue.
+ */
+async function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
+  // Checked once per run, never cached: a jar that is dropped in, replaced or
+  // broken while the server runs is used (or reported) as it is now.
+  const found = inspectCookies();
+  const state = found?.check.state ?? 'none';
+  try {
+    return await execOnce(args);
+  } catch (err) {
+    if (!(err instanceof YtDlpError)) throw err;
+    const message = err.message;
+    // Not a session problem, or nothing usable to retry with: today's hint
+    // mapping, one run, done.
+    if (!SIGN_IN.test(message) || state !== 'ok' || !found) {
+      throw new YtDlpError(ageGateHint(message, state), err.status);
+    }
+    const copy = copyCookies(found.source, found.check);
+    // The jar itself is fine; only this run's copy failed, so the client gets
+    // guidance about the temp directory, not about the cookies file.
+    if (!copy)
+      throw new YtDlpError(
+        AGE_GATE.test(message) ? AGE_GATE_HINT_COPY_FAILED : message,
+        err.status,
+      );
+    try {
+      // One retry, never a loop.
+      return await execOnce([...copy.args, ...args], copy.cleanup);
+    } catch (retryErr) {
+      if (!(retryErr instanceof YtDlpError)) throw retryErr;
+      // A second age gate with a usable jar means the jar is stale (or the
+      // account is not age-verified). Anything else keeps yt-dlp's own wording,
+      // so "Private video" and friends still classify correctly in the app.
+      if (AGE_GATE.test(retryErr.message)) {
+        throw new YtDlpError(AGE_GATE_HINT_STALE);
+      }
+      throw retryErr;
+    }
+  }
 }
 
 /** Last `ERROR:` line from yt-dlp stderr, trimmed for the client. */
@@ -383,7 +780,14 @@ export function lastError(stderr: string): string | undefined {
     .split('\n')
     .reverse()
     .find((l) => l.startsWith('ERROR:'));
-  return line?.replace(/^ERROR:\s*/, '').slice(0, 300) || undefined;
+  // yt-dlp can name its per-run cookie copy; never leak the temp directory.
+  return (
+    line
+      ?.replace(/^ERROR:\s*/, '')
+      .split(tmpdir())
+      .join('<tmp>')
+      .slice(0, 300) || undefined
+  );
 }
 
 /** Searches a source; returns at most SEARCH_LIMIT results, official uploads first. */
