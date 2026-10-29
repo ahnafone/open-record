@@ -17,6 +17,7 @@ export * from './lib/remote-errors';
 export * from './lib/import.store';
 export * from './lib/metadata-enrich.store';
 export * from './lib/sync.store';
+export * from './lib/play-counts.store';
 export * from './lib/preview-player.service';
 export * from './lib/import-sessions.store';
 export * from './lib/background-work';

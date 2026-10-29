@@ -8,6 +8,7 @@ import { AuthStore } from './auth.store';
 import { AutoDownloadStore } from './auto-download.store';
 import { ImportStore } from './import.store';
 import { OfflineStore } from './offline.store';
+import { PlayCountsStore } from './play-counts.store';
 import { PlayerStore } from './player.store';
 import { SettingsStore } from './settings.store';
 import { SyncStore } from './sync.store';
@@ -26,6 +27,8 @@ export function provideState(): EnvironmentProviders {
       void inject(AuthStore).start();
       // Account sync: a no-op without SyncPort or when signed out.
       inject(SyncStore).start();
+      // Play counts are local-first, synced when signed in.
+      inject(PlayCountsStore).start();
       void inject(PlayerStore).restore();
       // Registers the Spotify placeholder source; resumes a running import
       // (Spotify matching and YouTube song-detail lookup).

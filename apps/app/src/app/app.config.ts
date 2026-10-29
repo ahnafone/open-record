@@ -26,6 +26,7 @@ import {
   METADATA_FETCH,
   NetworkStatusPort,
   PairingScannerPort,
+  PlayCountsPort,
   RemoteServerPort,
   SettingsStore,
   StreamResolverPort,
@@ -42,6 +43,7 @@ import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
 import { SupabaseAuth } from './supabase-auth';
+import { SupabasePlayCounts } from './supabase-play-counts';
 import { SupabaseSync } from './supabase-sync';
 import { SUPABASE_BUILD_CONFIG } from './supabase.config';
 import { autoPairWeb } from './web-pairing';
@@ -152,6 +154,8 @@ export const appConfig: ApplicationConfig = {
     { provide: AuthPort, useValue: supabase },
     // Library + playlist metadata sync for signed-in users (same client).
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
+    // Additive per-track play counts for signed-in users (same client).
+    { provide: PlayCountsPort, useValue: new SupabasePlayCounts(supabase) },
     provideStorage(),
     // capacitor-plugin-playlist is installed: on device createAudioEngine()
     // uses NativeAudioEngine (foreground-service ExoPlayer, 1 Hz position

@@ -21,6 +21,50 @@ export interface SavedRecord {
 }
 
 /**
+ * Play count for one track, keyed by track id. Device-local bookkeeping
+ * lives next to the total so guest plays can be uploaded later.
+ */
+export interface PlayCountRecord {
+  trackId: string;
+  /**
+   * Plays known for this track: the device's own while offline, the account
+   * total after a sync. Never lower than this device's plays (it includes
+   * `pending`).
+   */
+  count: number;
+  /** Plays recorded here and not yet uploaded; 0 for local-only tracks. */
+  pending: number;
+  /** Epoch milliseconds. */
+  firstPlayedAt: number;
+  /** Epoch milliseconds. */
+  lastPlayedAt: number;
+  /**
+   * Metadata snapshot so a count survives independently of the library
+   * (streamed tracks that were never saved). Never synced as-is.
+   */
+  track?: Track;
+}
+
+export interface PlayCountsRepository {
+  /** Most recently played first. */
+  list(): Promise<PlayCountRecord[]>;
+  get(trackId: string): Promise<PlayCountRecord | undefined>;
+  save(record: PlayCountRecord): Promise<void>;
+  /** Insert or replace several records in one write. */
+  saveMany(records: readonly PlayCountRecord[]): Promise<void>;
+  /**
+   * Re-key a count to another track id (e.g. a replaced source URL).
+   * When both exist their counts and pending are summed, first/last
+   * played are the earliest/latest known values (0 means unknown and never
+   * wins), and `track` prefers the new record's then the old one's. Resolves
+   * the merged record, or undefined when `oldId` is not counted (or is
+   * already `newId`).
+   */
+  replace(oldId: string, newId: string): Promise<PlayCountRecord | undefined>;
+  clear(): Promise<void>;
+}
+
+/**
  * Lifecycle of a track's on-device audio copy.
  * - `saving`: record persisted, file download in progress or queued.
  * - `saved`: audio file is on device and playable offline.
@@ -147,6 +191,7 @@ export interface SettingsRepository {
 export abstract class StoragePort {
   abstract readonly playlists: PlaylistRepository;
   abstract readonly savedRecords: SavedRecordsRepository;
+  abstract readonly playCounts: PlayCountsRepository;
   abstract readonly importedTracks: ImportedTracksRepository;
   abstract readonly queueState: QueueStateRepository;
   abstract readonly settings: SettingsRepository;

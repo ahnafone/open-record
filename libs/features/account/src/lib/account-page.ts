@@ -12,6 +12,7 @@ import {
   AuthStore,
   ImportStore,
   LibraryStore,
+  PlayCountsStore,
   PlaylistsStore,
   SyncStore,
 } from '@open-record/state';
@@ -417,6 +418,7 @@ export class AccountPage {
   private readonly library = inject(LibraryStore);
   private readonly playlists = inject(PlaylistsStore);
   private readonly imports = inject(ImportStore);
+  private readonly playCounts = inject(PlayCountsStore);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
 
@@ -502,6 +504,8 @@ export class AccountPage {
 
   protected async signOut(): Promise<void> {
     this.begin('signOut');
+    // Upload this session's plays before the account goes away.
+    await this.playCounts.flush().catch(() => undefined);
     if (await this.auth.signOut()) this.toast.show('Signed out');
   }
 
@@ -514,6 +518,8 @@ export class AccountPage {
       confirmLabel: 'Sign out everywhere',
     });
     if (!ok) return;
+    // Upload this session's plays before the account goes away.
+    await this.playCounts.flush().catch(() => undefined);
     if (await this.auth.signOutEverywhere()) this.toast.show('Signed out of all devices');
   }
 
@@ -529,6 +535,8 @@ export class AccountPage {
     if (!deleted) return;
     // The account is gone: drop this device's Spotify import data too.
     await this.imports.deleteImportData().catch(() => undefined);
+    // and this device's play counts.
+    await this.playCounts.clear().catch(() => undefined);
     this.toast.show('Account deleted');
   }
 

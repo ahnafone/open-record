@@ -7,6 +7,8 @@ import {
   ImportSession,
   ImportSessionsRepository,
   MetadataTracksRepository,
+  PlayCountRecord,
+  PlayCountsRepository,
   PlaylistRepository,
   QueueState,
   QueueStateRepository,
@@ -122,6 +124,54 @@ export class DocumentStorage extends StoragePort {
     },
   };
 
+  readonly playCounts: PlayCountsRepository = {
+    list: async () => {
+      const all = await (
+        await this.db()
+      ).getAll<PlayCountRecord>(COLLECTIONS.playCounts);
+      return all.sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
+    },
+    get: async (trackId) =>
+      (await this.db()).get<PlayCountRecord>(COLLECTIONS.playCounts, trackId),
+    save: async (record) =>
+      (await this.db()).put(COLLECTIONS.playCounts, record.trackId, record),
+    saveMany: async (records) => {
+      if (!records.length) return;
+      await (
+        await this.db()
+      ).putMany(
+        COLLECTIONS.playCounts,
+        records.map((r) => [r.trackId, r] as const),
+      );
+    },
+    replace: async (oldId, newId) => {
+      const db = await this.db();
+      const old = await db.get<PlayCountRecord>(COLLECTIONS.playCounts, oldId);
+      if (!old || oldId === newId) return undefined;
+      const existing = await db.get<PlayCountRecord>(
+        COLLECTIONS.playCounts,
+        newId,
+      );
+      const merged: PlayCountRecord = existing
+        ? {
+            trackId: newId,
+            count: old.count + existing.count,
+            pending: old.pending + existing.pending,
+            firstPlayedAt: earliestPlay(
+              old.firstPlayedAt,
+              existing.firstPlayedAt,
+            ),
+            lastPlayedAt: Math.max(old.lastPlayedAt, existing.lastPlayedAt),
+            track: existing.track ?? old.track,
+          }
+        : { ...old, trackId: newId };
+      await db.put(COLLECTIONS.playCounts, newId, merged);
+      await db.delete(COLLECTIONS.playCounts, oldId);
+      return merged;
+    },
+    clear: async () => (await this.db()).clear(COLLECTIONS.playCounts),
+  };
+
   readonly importedTracks: ImportedTracksRepository = {
     list: async () => {
       const all = await (
@@ -205,4 +255,10 @@ export class DocumentStorage extends StoragePort {
     },
     clear: async () => (await this.db()).clear(COLLECTIONS.metadataTracks),
   };
+}
+
+/** Smallest positive timestamp (0 means unknown and never wins). */
+function earliestPlay(a: number, b: number): number {
+  const present = [a, b].filter((v) => v > 0);
+  return present.length ? Math.min(...present) : 0;
 }

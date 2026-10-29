@@ -14,6 +14,7 @@ import type { RepeatMode } from '@open-record/player';
 import { StoragePort } from '@open-record/storage';
 import type { QueueState } from '@open-record/storage';
 import { LibraryStore } from './library.store';
+import { PlayCountsStore } from './play-counts.store';
 import { PlaylistsStore } from './playlists.store';
 
 /** localStorage key for the per-device volume and mute (a convenience, not synced). */
@@ -40,6 +41,7 @@ export class PlayerStore {
   private readonly storage = inject(StoragePort);
   private readonly library = inject(LibraryStore);
   private readonly playlists = inject(PlaylistsStore);
+  private readonly playCounts = inject(PlayCountsStore);
   private readonly document = inject(DOCUMENT, { optional: true });
 
   readonly queue = this.engine.queue;
@@ -50,6 +52,8 @@ export class PlayerStore {
   readonly currentIndex = this.engine.currentIndex;
   readonly status = this.engine.status;
   readonly isPlaying = this.engine.isPlaying;
+  /** Last counted play from the engine; `seq` increments once per play. */
+  readonly lastPlay = this.engine.lastPlay;
   readonly isLoading = computed(() => this.engine.status() === 'loading');
   readonly position = this.engine.position;
   readonly duration = this.engine.duration;
@@ -75,6 +79,8 @@ export class PlayerStore {
 
   private restoring?: Promise<void>;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `seq` of the last play handed to the counts store. */
+  private seenPlaySeq = 0;
   private lastSaved = '';
 
   /**
@@ -101,6 +107,19 @@ export class PlayerStore {
       this.engine.status();
       this.savedPosition();
       untracked(() => this.scheduleSave());
+    });
+
+    // Each play the engine counts (90% listened or the track ended) is saved
+    // by the counts store, signed in or not.
+    effect(() => {
+      const play = this.engine.lastPlay();
+      if (!play || play.seq === this.seenPlaySeq) return;
+      this.seenPlaySeq = play.seq;
+      untracked(() =>
+        void this.playCounts
+          .recordPlay(play.track, play.at)
+          .catch(() => undefined),
+      );
     });
 
     this.restoreVolume();

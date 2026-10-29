@@ -4,6 +4,7 @@ import type { Track } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
 import { StoragePort, createInMemoryStorage } from '@open-record/storage';
 import { LibraryStore } from './library.store';
+import { PlayCountsStore } from './play-counts.store';
 import { PlaylistsStore } from './playlists.store';
 import { PlayerStore, QUEUE_SAVE_INTERVAL_MS } from './player.store';
 
@@ -12,20 +13,27 @@ const queue: Track[] = [
   { id: 'fake:b', providerId: 'fake', title: 'B', artist: 'Y' },
 ];
 
+/** Just enough of `PlayerService`'s engine for `PlayerStore`. */
+function fakeEngine() {
+  return {
+    queue: signal<readonly Track[]>([]),
+    currentIndex: signal(-1),
+    playNextIndices: signal<readonly number[]>([]),
+    shuffle: signal(false),
+    repeat: signal('off'),
+    status: signal('idle'),
+    position: signal(0),
+    canSetVolume: false,
+    lastPlay: signal<{ seq: number; track: Track; at: number } | null>(null),
+  };
+}
+
 describe('PlayerStore queue persistence', () => {
+  beforeEach(() => TestBed.resetTestingModule());
   afterEach(() => vi.useRealTimers());
 
   it('does not rewrite the queue on every position tick, and saves the exact position on pause', async () => {
-    const engine = {
-      queue: signal<readonly Track[]>([]),
-      currentIndex: signal(-1),
-      playNextIndices: signal<readonly number[]>([]),
-      shuffle: signal(false),
-      repeat: signal('off'),
-      status: signal('idle'),
-      position: signal(0),
-      canSetVolume: false,
-    };
+    const engine = fakeEngine();
     const storage = createInMemoryStorage();
     const save = vi.spyOn(storage.queueState, 'save');
     TestBed.configureTestingModule({
@@ -65,5 +73,32 @@ describe('PlayerStore queue persistence', () => {
       trackIds: ['fake:a', 'fake:b'],
       positionSec: 9,
     });
+  });
+
+  it('hands each counted play to the counts store exactly once', async () => {
+    const engine = fakeEngine();
+    const recordPlay = vi.fn(async () => undefined);
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: StoragePort, useValue: createInMemoryStorage() },
+        { provide: PlayerService, useValue: { engine } },
+        { provide: LibraryStore, useValue: { ready: async () => undefined } },
+        { provide: PlaylistsStore, useValue: {} },
+        { provide: PlayCountsStore, useValue: { recordPlay } },
+      ],
+    });
+    TestBed.inject(PlayerStore);
+
+    const play = { seq: 1, track: queue[0], at: 1700000000000 };
+    engine.lastPlay.set(play);
+    TestBed.tick();
+    await Promise.resolve();
+    // A rebuilt object with the same seq is not a new play.
+    engine.lastPlay.set({ ...play });
+    TestBed.tick();
+    await Promise.resolve();
+
+    expect(recordPlay).toHaveBeenCalledTimes(1);
+    expect(recordPlay).toHaveBeenCalledWith(play.track, play.at);
   });
 });

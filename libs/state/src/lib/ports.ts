@@ -360,6 +360,47 @@ export abstract class SyncPort {
   abstract push(changes: SyncSnapshot): Promise<void>;
 }
 
+/** One track's play count as it syncs with the account. */
+export interface SyncPlayCount {
+  trackId: string;
+  /** Total plays for the account, all devices included. */
+  count: number;
+  /** Epoch milliseconds. */
+  firstPlayedAt: number;
+  /** Epoch milliseconds. */
+  lastPlayedAt: number;
+  track?: SyncTrack;
+}
+
+/** Plays recorded on this device that the account does not have yet. */
+export interface SyncPlayIncrement {
+  trackId: string;
+  /** How many plays to add; at least 1. */
+  count: number;
+  /**
+   * Epoch ms of the track's earliest known play; it can predate this
+   * increment.
+   */
+  firstPlayedAt: number;
+  /** Epoch ms of the most recent one. */
+  at: number;
+  track?: SyncTrack;
+}
+
+/**
+ * Additive play-count sync with the signed-in account. Unlike `SyncPort` the
+ * remote side *adds* increments instead of overwriting, so two devices playing
+ * the same song both count. Provided by the app; without it counts stay local.
+ */
+export abstract class PlayCountsPort {
+  /** The account the counts belong to, or null when signed out / unconfigured. */
+  abstract userId(): Promise<string | null>;
+  /** Every count of the account. */
+  abstract pull(): Promise<SyncPlayCount[]>;
+  /** Upload increments; resolves the account totals for the affected tracks. */
+  abstract record(plays: readonly SyncPlayIncrement[]): Promise<SyncPlayCount[]>;
+}
+
 /**
  * Keeps downloads running while the app is in the background or the screen
  * is off (Android: a foreground service with an ongoing notification plus

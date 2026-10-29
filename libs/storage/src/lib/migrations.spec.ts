@@ -158,7 +158,7 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([4, 5, 6]);
+    expect(result.applied).toEqual([4, 5, 6, 7]);
     expect(await backend.get(COLLECTIONS.importedTracks, 'local:1')).toMatchObject({ status: 'saved', filePath: 'imported/1.audio.mp3' });
     expect(await backend.get(COLLECTIONS.importedTracks, 'remote:2')).toMatchObject({ status: 'saving', filePath: '' });
   });
@@ -175,11 +175,25 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([6]);
+    expect(result.applied).toEqual([6, 7]);
     expect(await backend.getAll(COLLECTIONS.metadataTracks)).toEqual([blob[0], blob[1]]);
     expect(await backend.get(COLLECTIONS.metadataTracks, 'spotify:2')).toEqual(blob[1]);
     // The legacy blob is kept as a fallback for older builds.
     expect(await backend.get(COLLECTIONS.settings, SETTINGS_KEYS.metadataTracks)).toEqual(blob);
     expect((await runMigrations(backend, MIGRATIONS)).applied).toEqual([]);
+  });
+
+  it('v7 creates an empty play_counts collection', async () => {
+    const backend = new InMemoryBackend();
+    await runMigrations(backend, MIGRATIONS.slice(0, 6));
+    // v1 already creates every collection in COLLECTIONS, so drop it first to
+    // stand in for a database written before v7 existed.
+    backend.tables.delete(COLLECTIONS.playCounts);
+
+    const result = await runMigrations(backend, MIGRATIONS);
+
+    expect(result.applied).toEqual([7]);
+    expect(backend.tables.has(COLLECTIONS.playCounts)).toBe(true);
+    expect(await backend.getAll(COLLECTIONS.playCounts)).toEqual([]);
   });
 });

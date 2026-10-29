@@ -76,6 +76,15 @@ export const RESTART_THRESHOLD_SEC = 3;
 /** Seconds before the end of a track at which the next one is pre-resolved. */
 export const PRELOAD_LEAD_SEC = 15;
 
+/** Largest time gap between ticks that still counts as listened time. */
+export const MAX_LISTEN_TICK_SEC = 3;
+
+/** Fraction of a track that must be listened to before a play counts. */
+export const PLAY_COMPLETE_RATIO = 0.9;
+
+/** Seconds within which a seek back to the start starts a new play instance. */
+export const SEEK_RESTART_SEC = 1;
+
 /**
  * Queue and transport logic on top of an AudioEngine. Framework-light: only
  * Angular signals, no DI, so it runs in plain unit tests with a fake engine.
@@ -101,6 +110,12 @@ export class PlayerEngine {
   private readonly _skipOnError = signal(true);
   private readonly _volume = signal(1);
   private readonly _muted = signal(false);
+  /** The last play counted as complete; `seq` increments once per play. */
+  private readonly _lastPlay = signal<{
+    seq: number;
+    track: Track;
+    at: number;
+  } | null>(null);
 
   readonly queue = this._queue.asReadonly();
   readonly status = this._status.asReadonly();
@@ -113,6 +128,8 @@ export class PlayerEngine {
   /** Output volume 0..1, independent of mute. */
   readonly volume = this._volume.asReadonly();
   readonly muted = this._muted.asReadonly();
+  /** Last counted play; `seq` increments once per play. */
+  readonly lastPlay = this._lastPlay.asReadonly();
   /** False when the engine has no software volume (native: hardware keys). */
   readonly canSetVolume: boolean;
 
@@ -157,6 +174,12 @@ export class PlayerEngine {
   private playIntent = false;
   /** Load token that already reported a failure (avoid double handling). */
   private failedToken = -1;
+  /** Load token that already reported a play. */
+  private countedToken = -1;
+  /** Last `onTime` position, to measure real listened time. */
+  private lastTick = 0;
+  /** Listened seconds since the current play instance began. */
+  private listenedSec = 0;
   /** `${loadToken}|${trackId}` of the last preload, so it runs once per track. */
   private preloadKey = '';
   private readonly transientError?: (err: unknown) => string | undefined;
@@ -185,6 +208,13 @@ export class PlayerEngine {
       onTime: (sec) => {
         this._position.set(sec);
         this.maybePreload(sec);
+        // Only a small forward step is real listening; a seek earns nothing.
+        const delta = sec - this.lastTick;
+        if (delta > 0 && delta <= MAX_LISTEN_TICK_SEC) {
+          this.listenedSec += delta;
+        }
+        this.lastTick = sec;
+        this.countPlay();
       },
       onDuration: (sec) => this._duration.set(sec),
       onEnded: () => void this.handleEnded(),
@@ -327,7 +357,10 @@ export class PlayerEngine {
       await this.loadCurrent(true);
       return;
     }
-    if (status === 'ended') await this.engine.seek(0);
+    if (status === 'ended') {
+      await this.engine.seek(0);
+      this.resetListen();
+    }
     await this.startEngine();
   }
 
@@ -362,6 +395,7 @@ export class PlayerEngine {
     const target = this.peek(-1);
     if (this._position() > RESTART_THRESHOLD_SEC || target === -1) {
       await this.seek(0);
+      this.resetListen();
       return;
     }
     this.moveTo(target);
@@ -373,6 +407,11 @@ export class PlayerEngine {
     const max = this._duration() || Number.POSITIVE_INFINITY;
     const clamped = Math.min(Math.max(0, positionSec), max);
     this._position.set(clamped);
+    this.lastTick = clamped;
+    // Dragging back to the very start is a fresh listen once it plays again.
+    if (clamped <= SEEK_RESTART_SEC && this.countedToken === this.loadToken) {
+      this.resetListen();
+    }
     await this.engine.seek(clamped);
   }
 
@@ -506,9 +545,11 @@ export class PlayerEngine {
   }
 
   private async handleEnded(): Promise<void> {
+    this.countPlay(true);
     if (this._repeat() === 'one') {
       await this.engine.seek(0);
       this._position.set(0);
+      this.resetListen();
       await this.startEngine();
       return;
     }
@@ -518,10 +559,55 @@ export class PlayerEngine {
     }
   }
 
-  /** The native layer already moved to a neighbour: follow it. */
+  /**
+   * Counts the current track as played once, after 90% listened or at the end.
+   * A zero duration can only count on end.
+   */
+  private countPlay(final = false): void {
+    if (this.countedToken === this.loadToken) return;
+    const track = this.current();
+    if (!track) return;
+    const duration = this._duration() || track.durationSec || 0;
+    if (
+      !final &&
+      (duration <= 0 || this.listenedSec < duration * PLAY_COMPLETE_RATIO)
+    ) {
+      return;
+    }
+    this.countedToken = this.loadToken;
+    this._lastPlay.set({
+      seq: (this._lastPlay()?.seq ?? 0) + 1,
+      track,
+      at: Date.now(),
+    });
+  }
+
+  /** Forget listened time and the counted play, for a new play instance. */
+  private resetListen(): void {
+    this.listenedSec = 0;
+    this.lastTick = 0;
+    this.countedToken = -1;
+  }
+
+  /**
+   * A "skip" from the last seconds is a completion: the native player advances
+   * by itself (reporting TRACK_CHANGED, not an end) and its position ticks stop
+   * while the WebView is suspended. The 90% rule applies, with up to two ticks
+   * of slack so a track that ends just before a tick still counts.
+   */
   private async handleSkipped(direction: SkipDirection): Promise<void> {
     const target = this.peek(direction === 'next' ? 1 : -1);
     if (target === -1) return;
+    if (direction === 'next') {
+      const duration = this._duration() || this.current()?.durationSec || 0;
+      const threshold = Math.max(
+        duration * PLAY_COMPLETE_RATIO,
+        duration - MAX_LISTEN_TICK_SEC * 2,
+      );
+      if (duration > 0 && this._position() >= threshold) {
+        this.countPlay(true);
+      }
+    }
     this.moveTo(target);
     await this.loadCurrent(true);
   }
@@ -539,6 +625,8 @@ export class PlayerEngine {
 
   private async loadCurrent(autoplay: boolean): Promise<void> {
     const token = ++this.loadToken;
+    this.listenedSec = 0;
+    this.lastTick = 0;
     const track = this.current();
     if (!track) return;
     this.playIntent = autoplay;

@@ -47,6 +47,8 @@ export const COLLECTIONS = {
   importSessions: 'import_sessions',
   /** Tracks known by metadata only (e.g. unmatched imports), keyed by track id. Added in v6. */
   metadataTracks: 'metadata_tracks',
+  /** Per-track play counts. Added in v7. */
+  playCounts: 'play_counts',
 } as const;
 
 /** Well-known keys in the `settings` collection. */
@@ -178,6 +180,13 @@ export const MIGRATIONS: readonly Migration[] = [
       }
       // The blob is kept (not deleted) so an older build can still read it;
       // the app reads it only when the collection is empty.
+    },
+  },
+  {
+    version: 7,
+    description: 'Play counts collection (one record per played track)',
+    async up(ctx) {
+      await ctx.createCollection('play_counts');
     },
   },
 ];

@@ -185,7 +185,7 @@ export class SupabaseSync extends SyncPort {
   }
 }
 
-async function pageAll<T>(
+export async function pageAll<T>(
   client: SupabaseClient,
   table: string,
   columns: string,

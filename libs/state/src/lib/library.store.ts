@@ -9,6 +9,7 @@ import {
   type SavedRecord,
 } from '@open-record/storage';
 // Circular with these stores; only used at call time, never at module load.
+import { PlayCountsStore } from './play-counts.store';
 import { PlayerStore } from './player.store';
 import { PlaylistsStore } from './playlists.store';
 import { LocalMediaPort, type LocalImportFailure } from './ports';
@@ -422,6 +423,8 @@ export class LibraryStore {
   /** Move a bookmark to another track id, keeping its position. Never saves to the device. */
   async replaceSaved(oldId: string, newId: string): Promise<void> {
     await this.loaded;
+    // Counts follow the id even when the track is not bookmarked.
+    await this.playCounts.move(oldId, newId);
     if (oldId === newId || !this.isSaved(oldId)) return;
     await this.storage.savedRecords.replace(oldId, newId);
     const at = this._savedAt().get(oldId);
@@ -450,6 +453,7 @@ export class LibraryStore {
     await this.loaded;
     if (oldId === next.id) return;
     await this.addMetadataTracks([next]);
+    // Also moves the play count (see `replaceSaved`).
     await this.replaceSaved(oldId, next.id);
     if (this._stored().has(oldId)) await this.dropRecord(oldId);
     if (this._metadata().has(oldId)) await this.forgetMetadata([oldId]);
@@ -630,6 +634,10 @@ export class LibraryStore {
     await this.player()?.clear();
     this.offline().forgetAll();
     await this.media?.cleanup([]).catch(() => 0);
+    // Counts live in storage too: clear them so the in-memory map cannot
+    // write the deleted history back on the next play. Best effort: a failure
+    // here must not abort the reset.
+    await this.playCounts.clear().catch(() => undefined);
     await this.storage.clearAll();
     await this.reload();
     await Promise.all([
@@ -725,6 +733,14 @@ export class LibraryStore {
 
   private playlists() {
     return this.injector.get(PlaylistsStore);
+  }
+
+  /**
+   * Resolved lazily: clearing or replacing a track id is rarely on a hot path,
+   * and this store must build even when nothing ever counts a play.
+   */
+  private get playCounts(): PlayCountsStore {
+    return this.injector.get(PlayCountsStore);
   }
 
   private offline() {

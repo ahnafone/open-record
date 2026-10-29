@@ -50,6 +50,18 @@ const track = (id: string): Track => ({
   artist: 'Artist',
 });
 const tracks = ['a', 'b', 'c', 'd', 'e'].map(track);
+
+/** A track with a known duration, for play-completion tests. */
+const timed = (id: string, durationSec: number): Track => ({
+  ...track(id),
+  durationSec,
+});
+
+/** Feed 1 Hz time ticks from `from` to `to` inclusive. */
+function listen(fake: FakeEngine, from: number, to: number): void {
+  for (let sec = from; sec <= to; sec++) fake.listener?.onTime(sec);
+}
+
 const resolve = async (t: Track): Promise<PlayableSource> => ({
   url: `/${t.id}.mp3`,
   kind: 'bundled',
@@ -237,5 +249,159 @@ describe('PlayerEngine', () => {
     await flush();
     expect(offline.current()?.id).toBe('a');
     expect(offline.status()).toBe('error');
+  });
+
+  describe('play counting', () => {
+    it('counts a play once 90% is listened to, and only once', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 200)]);
+      expect(player.lastPlay()).toBeNull();
+
+      listen(fake, 1, 179);
+      expect(player.lastPlay()).toBeNull();
+
+      listen(fake, 180, 181);
+      const play = player.lastPlay();
+      expect(play?.track.id).toBe('a');
+      expect(play?.seq).toBe(1);
+      expect(typeof play?.at).toBe('number');
+
+      // Later ticks, a pause and a resume do not count it again.
+      listen(fake, 182, 190);
+      await player.pause();
+      await player.play();
+      listen(fake, 191, 195);
+      expect(player.lastPlay()?.seq).toBe(1);
+    });
+
+    it('does not count a track skipped early', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 200), timed('b', 200)]);
+      listen(fake, 1, 20);
+      await player.next();
+      expect(player.current()?.id).toBe('b');
+      expect(player.lastPlay()).toBeNull();
+    });
+
+    it('counts a track of unknown duration only on end', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([track('a')]);
+      listen(fake, 1, 60);
+      expect(player.lastPlay()).toBeNull();
+
+      fake.listener?.onEnded();
+      await flush();
+      expect(player.lastPlay()).toMatchObject({ seq: 1 });
+      expect(player.lastPlay()?.track.id).toBe('a');
+    });
+
+    it('counts each repeat-one loop', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 100)]);
+      player.setRepeat('one');
+
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(1);
+
+      // The end is already counted, so it does not add another.
+      fake.listener?.onEnded();
+      await flush();
+      expect(player.lastPlay()?.seq).toBe(1);
+
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(2);
+
+      fake.listener?.onEnded();
+      await flush();
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(3);
+    });
+
+    it('counts again when a finished track is replayed', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 100)]);
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(1);
+
+      fake.listener?.onEnded();
+      await flush();
+      expect(player.status()).toBe('ended');
+      expect(player.lastPlay()?.seq).toBe(1);
+
+      await player.play();
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(2);
+    });
+
+    it('counts a native auto-advance that starts from the end of the track', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 200), timed('b', 200)]);
+      listen(fake, 1, 120);
+      // The screen was off: the 78 s gap earns no listen time, so 90% is never
+      // reached even though the position is at the end.
+      fake.listener?.onTime(198);
+      expect(player.lastPlay()).toBeNull();
+
+      // A neighbour is queued, so the native layer advances on its own and
+      // reports a skip instead of an end (also when the WebView was suspended).
+      fake.listener?.onSkipped('next');
+      await flush();
+
+      expect(player.lastPlay()?.track.id).toBe('a');
+      expect(player.lastPlay()?.seq).toBe(1);
+      expect(player.current()?.id).toBe('b');
+    });
+
+    it('counts again when the listener drags back to the start', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 100)]);
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(1);
+
+      await player.seek(0);
+      listen(fake, 1, 90);
+      expect(player.lastPlay()?.seq).toBe(2);
+    });
+
+    it('does not count a short track skipped before 90%', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 5), timed('b', 5)]);
+      listen(fake, 1, 2);
+
+      fake.listener?.onSkipped('next');
+      await flush();
+
+      expect(player.current()?.id).toBe('b');
+      expect(player.lastPlay()).toBeNull();
+    });
+
+    it('does not count a native skip from the middle of a track', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([timed('a', 200), timed('b', 200)]);
+      listen(fake, 1, 100);
+
+      fake.listener?.onSkipped('next');
+      await flush();
+
+      expect(player.current()?.id).toBe('b');
+      expect(player.lastPlay()).toBeNull();
+    });
+
+    it('never counts a failed load', async () => {
+      const { player, fake } = setup({ skipOnError: false });
+      fake.failOn.add('a');
+      await player.setQueue([timed('a', 100)]);
+      await flush();
+      expect(player.status()).toBe('error');
+      expect(player.lastPlay()).toBeNull();
+
+      const unresolved = new PlayerEngine(new FakeEngine(), async () => {
+        throw new Error('offline');
+      });
+      await unresolved.setQueue([timed('a', 100)]);
+      await flush();
+      expect(unresolved.status()).toBe('error');
+      expect(unresolved.lastPlay()).toBeNull();
+    });
   });
 });
