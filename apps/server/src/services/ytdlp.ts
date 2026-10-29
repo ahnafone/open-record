@@ -546,8 +546,9 @@ function sweepCookieCopies(): void {
  * explicit path is set and is used only when it exists, so it is optional.
  * Only paths are stored: both are checked when the banner asks for the status
  * and again before a run that needs cookies, so replacing the file takes effect
- * without a restart. Leftover copies from a previous process are swept now, so
- * live session tokens do not linger in the temp dir.
+ * without a restart. Leftover copies from a previous process are swept now —
+ * with or without a jar configured — so live session tokens do not linger in
+ * the temp dir.
  */
 export function configureCookies(
   explicit: string | null,
@@ -557,7 +558,9 @@ export function configureCookies(
   cookiesFallback = fallback ?? null;
   cookiesWarned = false;
   cookiesCopyWarned = false;
-  if (explicit || cookiesFallback) sweepCookieCopies();
+  // Unconditional, even with no jar configured: a crash or SIGTERM can leave
+  // copies holding live session tokens, and they are promised gone at startup.
+  sweepCookieCopies();
 }
 
 /**
@@ -630,9 +633,22 @@ export const AGE_GATE = /confirm your age|age[- ]restricted|inappropriate/i;
  * cookies is worth a second run. Deliberately no "video unavailable",
  * geo-block, timeout, ENOENT or busy wording: those need an update, a proxy or
  * patience, not a session.
+ *
+ * The short phrases are word-bounded: unbounded `sign in`/`log ?in` also match
+ * inside unrelated words and paths ("login" in a URL), which would retry a
+ * request that a session can never fix.
  */
 const SIGN_IN =
-  /confirm your age|age[- ]restricted|inappropriate|sign in|log ?in|login required|private video|members[- ]only|join this channel|requires payment|not a bot/i;
+  /\bsign in\b|\blog ?in\b|\blogin required\b|confirm your age|age[- ]restricted|inappropriate|private video|members[- ]only|channel'?s members|join this channel|requires payment|not a bot/i;
+
+/**
+ * Whether yt-dlp refused the video for a reason a session can fix. URLs are
+ * stripped first so a "/login" path in an unrelated error (an unsupported URL,
+ * say) cannot look like a sign-in refusal.
+ */
+function signInRefused(message: string): boolean {
+  return SIGN_IN.test(message.replace(/https?:\/\/\S+/g, ' '));
+}
 
 /**
  * Guidance shown instead of yt-dlp's error for age-restricted videos when the
@@ -648,10 +664,11 @@ const AGE_GATE_HINT_BROKEN =
   "cookies file cannot be read. Check YTDLP_COOKIES_FILE (or the data-directory " +
   "cookies.txt) and the file's permissions, or export a fresh cookies.txt.";
 
-/** The retry with a usable jar hit the age gate too: the jar is probably stale. */
+/** The retry with a usable jar hit the age gate too: the jar is stale or unverified. */
 const AGE_GATE_HINT_STALE =
   "Sign in to confirm your age. This video is age-restricted and the server's " +
-  'cookies did not help; they may be stale — export a fresh cookies.txt.';
+  'cookies did not help; they may be stale, or the account is not age-verified. ' +
+  'Export a fresh cookies.txt.';
 
 /**
  * The jar is usable, but this run could not write its own temporary copy of it.
@@ -736,18 +753,20 @@ function execOnce(
  * second slot or reorders the queue.
  */
 async function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
-  // Checked once per run, never cached: a jar that is dropped in, replaced or
-  // broken while the server runs is used (or reported) as it is now.
-  const found = inspectCookies();
-  const state = found?.check.state ?? 'none';
   try {
     return await execOnce(args);
   } catch (err) {
     if (!(err instanceof YtDlpError)) throw err;
     const message = err.message;
-    // Not a session problem, or nothing usable to retry with: today's hint
-    // mapping, one run, done.
-    if (!SIGN_IN.test(message) || state !== 'ok' || !found) {
+    // Not something a session can fix: keep yt-dlp's wording, and do not touch
+    // the cookies file at all (an unrelated error must not warn about it).
+    if (!signInRefused(message)) throw err;
+    // Checked once per run that needs it, never cached: a jar that is dropped
+    // in, replaced or broken while the server runs is used (or reported) as it
+    // is now. Anonymous searches and lookups never read it.
+    const found = inspectCookies();
+    const state = found?.check.state ?? 'none';
+    if (state !== 'ok' || !found) {
       throw new YtDlpError(ageGateHint(message, state), err.status);
     }
     const copy = copyCookies(found.source, found.check);

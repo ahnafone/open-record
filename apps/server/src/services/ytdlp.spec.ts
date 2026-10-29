@@ -1,5 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -456,10 +463,12 @@ describe('yt-dlp cookies', () => {
       );
       // "Private video" must still classify as a per-track failure in the app,
       // so a retry that fails the same way is not turned into age-gate copy.
-      await expect(search('x', 'youtube')).rejects.toMatchObject({
+      const err = await search('x', 'youtube').catch((e: unknown) => e);
+      expect(err).toMatchObject({
         message: expect.stringMatching(/Private video/),
         status: 502,
       });
+      expect((err as Error).message).not.toMatch(/confirm your age/i);
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
       expect(callArgs(0)).not.toContain('--cookies');
       expect(callArgs(1)).toContain('--cookies');
@@ -478,6 +487,49 @@ describe('yt-dlp cookies', () => {
       });
       await expect(search('x', 'youtube')).rejects.toThrow(/Video unavailable/);
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not retry a /login URL in an error, and gives it no age hint', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      // A usable jar is configured: only the refusal wording can stop a retry.
+      configureCookies(path);
+      expect(cookieState()).toBe('ok');
+      mockRuns({
+        error: true,
+        stderr: 'ERROR: Unsupported URL: https://example.com/login\n',
+      });
+      const err = await search('x', 'youtube').catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 502 });
+      expect((err as Error).message).toMatch(/Unsupported URL/);
+      // The "/login" path is not a sign-in refusal, so no age-gate guidance.
+      expect((err as Error).message).not.toMatch(/confirm your age/i);
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+      expect(callArgs(0)).not.toContain('--cookies');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('retries a bot check once with --cookies', async () => {
+    const { path, cleanup } = cookiesFile();
+    try {
+      configureCookies(path);
+      mockRuns(
+        {
+          error: true,
+          stderr:
+            "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot.\n",
+        },
+        { payload: emptySearch },
+      );
+      await expect(search('x', 'youtube')).resolves.toEqual([]);
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
+      expect(callArgs(0)).not.toContain('--cookies');
+      expect(callArgs(1)).toContain('--cookies');
     } finally {
       cleanup();
     }
@@ -528,10 +580,13 @@ describe('yt-dlp cookies', () => {
         cb(new Error('exit 1'), '', AGE_STDERR);
       }) as unknown as typeof execFile);
 
-      await expect(search('x', 'youtube')).rejects.toMatchObject({
+      const err = await search('x', 'youtube').catch((e: unknown) => e);
+      expect(err).toMatchObject({
         message: expect.stringMatching(/confirm your age.*may be stale/),
         status: 502,
       });
+      // Names both causes: an expired jar and an account that cannot pass the gate.
+      expect((err as Error).message).toMatch(/not age-verified/);
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
       // The failed retry's copy is gone too.
       expect(copy).not.toBe('');
@@ -643,6 +698,23 @@ describe('yt-dlp cookies', () => {
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
+    }
+  });
+
+  it('sweeps stale cookie copies at startup even with no jar configured', () => {
+    // Copies left behind by a crash hold live tokens; they are promised gone at
+    // the next start, whether or not this process has a jar of its own.
+    const stale = mkdtempSync(join(tmpdir(), 'open-record-cookies-'));
+    const fresh = mkdtempSync(join(tmpdir(), 'open-record-cookies-'));
+    try {
+      const old = new Date(Date.now() - 11 * 60 * 1000);
+      utimesSync(stale, old, old);
+      configureCookies(null);
+      expect(existsSync(stale)).toBe(false);
+      expect(existsSync(fresh)).toBe(true); // may belong to a live run
+    } finally {
+      rmSync(stale, { recursive: true, force: true });
+      rmSync(fresh, { recursive: true, force: true });
     }
   });
 
