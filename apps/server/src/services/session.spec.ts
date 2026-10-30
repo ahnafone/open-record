@@ -167,6 +167,7 @@ class StubHooks implements SessionCastHooks {
     force: boolean;
   }[] = [];
   controlCalls: { userId: string; castId: string; command: SessionCommand }[] = [];
+  stateCalls: { userId: string; castId: string; state: SessionState }[] = [];
   owner: { userId: string; deviceId: string; deviceName: string } | null = null;
   events: string[] = [];
   targetError: Error | null = null;
@@ -207,6 +208,15 @@ class StubHooks implements SessionCastHooks {
   async onControl(userId: string, castId: string, command: SessionCommand): Promise<void> {
     this.controlCalls.push({ userId, castId, command });
     if (this.controlError) throw this.controlError;
+  }
+
+  async onState(userId: string, castId: string, state: SessionState): Promise<void> {
+    // Clone: later commits mutate the live state object.
+    this.stateCalls.push({
+      userId,
+      castId,
+      state: JSON.parse(JSON.stringify(state)) as SessionState,
+    });
   }
 }
 
@@ -1003,6 +1013,39 @@ describe('cast target operations', () => {
     await service.command('u', 'a', { type: 'next' });
     expect(stateOf().cursor).toBe(1);
     expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({ type: 'next' });
+  });
+
+  it('forwards stop to the cast and reloads structural changes through onState', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    hooks.controlCalls.length = 0;
+    hooks.stateCalls.length = 0;
+
+    await service.command('u', 'a', { type: 'stop' });
+    expect(stateOf().playing).toBe(false);
+    expect(hooks.controlCalls).toEqual([
+      { userId: 'u', castId: 'cast-1', command: { type: 'stop' } },
+    ]);
+    // A forwarded transport command is not also applied structurally.
+    expect(hooks.stateCalls).toHaveLength(0);
+
+    await service.command('u', 'a', {
+      type: 'setQueue',
+      order: [track('c'), track('d')],
+      cursor: 0,
+      autoplay: true,
+      shuffle: false,
+    });
+    expect(hooks.controlCalls).toHaveLength(1);
+    expect(hooks.stateCalls).toHaveLength(1);
+    const applied = hooks.stateCalls[0];
+    expect(applied?.castId).toBe('cast-1');
+    expect(applied?.state.order.map((entry) => entry.entryId)).toEqual(['c', 'd']);
   });
 
   it('castEnded advances, loads via onControl and propagates load failures', async () => {

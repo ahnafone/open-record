@@ -51,6 +51,8 @@ export interface SessionCastHooks {
   ): Promise<void>;
   /** Transport/volume commands for an active cast target. */
   onControl(userId: string, castId: string, command: SessionCommand): Promise<void>;
+  /** Structural command applied while a cast is targeted (reload/stop). */
+  onState?(userId: string, castId: string, state: SessionState): void | Promise<void>;
 }
 
 export class CastBusyError extends Error {
@@ -451,6 +453,7 @@ export class SessionService {
       command.type === 'seek' ||
       command.type === 'next' ||
       command.type === 'previous' ||
+      command.type === 'stop' ||
       command.type === 'setCastVolume';
     if (castTarget && forwardsToCast && !this.castHooks) {
       return { ok: false, error: 'cast-disabled' };
@@ -490,6 +493,7 @@ export class SessionService {
         this.freezePosition(state, now);
         state.playing = false;
         mutated = true;
+        forward = { type: 'stop' };
         break;
       case 'clear':
         state.order = [];
@@ -760,6 +764,17 @@ export class SessionService {
       // A no-op command from the stale target is still contact.
       state.updatedBy = clientId;
       this.commit(room, now);
+    }
+
+    // A structural command without a transport forward (queue/replace/clear)
+    // must reach the speaker as a reload. The state is already committed, so a
+    // transport failure must not turn the ack into an error.
+    if (mutated && castTarget && !forward) {
+      try {
+        await this.castHooks?.onState?.(userId, castTarget, state);
+      } catch {
+        // CastService reports its own failures (unavailable + paused).
+      }
     }
 
     if (forward && castTarget) {

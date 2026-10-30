@@ -3,7 +3,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { rateLimitKey } from '../plugins/auth';
 import { createResolveCache, type ResolveCache } from '../services/stream-cache';
 import { resolveStream, type StreamResponse } from '../services/ytdlp';
-import { validateUrl } from '../services/url-guard';
+import { validateUrlString } from '../services/url-guard';
 import type { RouteOptions } from './index';
 import { sendError } from './errors';
 
@@ -50,7 +50,7 @@ export const streamRoutes: FastifyPluginAsync<RouteOptions> = async (app, { conf
     async (request, reply) => {
       try {
         const quality = request.body.quality ?? DEFAULT_AUDIO_QUALITY;
-        return await cacheFor(quality).get(await validateUrl(request.body.url));
+        return await cacheFor(quality).get(await validateUrlString(request.body.url));
       } catch (err) {
         return sendError(reply, err);
       }

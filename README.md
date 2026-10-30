@@ -114,6 +114,14 @@ Sign in with the same Supabase account on both devices (see [Supabase accounts](
 - Setup: create a Supabase project, apply the SQL in `supabase/migrations/`, set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `apps/server/.env`, run `npm run server:up`, open the printed link and create an account.
 - Not yet tested against a real Supabase project or in a browser.
 
+### Playback on another device
+
+Signing in also shares the playback session: every device sees the same queue, and the player's **Play on** picker lists the other open tabs/apps. Selecting one sends the sound there; playback follows the current device when it is responding, and the picker's **Play on this device** moves it back. Transport controls, seek, queue edits and "play next" work from any signed-in device.
+
+Google Cast speakers on the same LAN appear in the same picker. **Catalog** tracks and **remote** (yt-dlp) tracks cast through the server: it relays the audio to the speaker at a short-lived, signed URL. A phone's own imported files cannot be cast (the file is on the phone); casting a PC-browser import needs the upload cache (Phase 6). Discovery needs the server and the speaker on the same network, and UDP 5353 plus TCP 8787 reachable; if they are on different VLANs, cast rows will not appear.
+
+The server keeps the queue in memory, so a restart ends the shared session; a speaker that is already playing keeps its URL until the next command.
+
 ## Run the server
 
 `npm run server:up` builds and starts the server on this machine (see [Stream-link server](#stream-link-server) below) and exits, leaving it running in the background. Stop it with `npm run server:up -- --stop` (or `npm run server:stop`). For development, `npm run server:dev` runs it in the foreground.
@@ -154,7 +162,7 @@ When you configure the optional stream-link server, the app itself calls (from t
 
 ## Stream-link server
 
-The optional server in [apps/server](apps/server/README.md) uses yt-dlp to search and to return a direct stream link (`POST /stream`); it never downloads, tags or serves audio itself, and has load safeguards (concurrency cap, queue, `503` with `Retry-After`, rate limits, link cache; see `MAX_CONCURRENT_RESOLVES`, `STREAM_CACHE_TTL`, `RESOLVE_RATE_LIMIT_MAX`). Streaming or downloading may break the source site's terms of service; see the music disclaimer above and keep it out of store builds. Quick start:
+The optional server in [apps/server](apps/server/README.md) uses yt-dlp to search and to return a direct stream link (`POST /stream`). It never downloads or tags audio; for casting, it relays one track at a time to the speaker (`GET /cast/relay/<signed token>`). It has load safeguards (concurrency cap, queue, `503` with `Retry-After`, rate limits, link cache; see `MAX_CONCURRENT_RESOLVES`, `STREAM_CACHE_TTL`, `RESOLVE_RATE_LIMIT_MAX`). Streaming or downloading may break the source site's terms of service; see the music disclaimer above and keep it out of store builds. Quick start:
 
 ```bash
 npm run server:up

@@ -17,13 +17,30 @@ import {
 } from './plugins/auth';
 import { hasWebApp, registerWebApp } from './plugins/web';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
+import { CastService } from './services/cast';
+import { CastDiscovery } from './services/cast-discovery';
+import { loadOrCreateCastSecret, MediaRelay } from './services/media-relay';
 import { SessionService } from './services/session';
-import { configureResolveLimits } from './services/ytdlp';
+import { configureResolveLimits, resolveStream, type StreamResponse } from './services/ytdlp';
+import { validateUrl, type ValidatedUrl } from './services/url-guard';
+
+/** Cast services a caller (tests) can inject instead of constructing them. */
+export interface CastServices {
+  relay: MediaRelay;
+  cast?: CastService | null;
+  resolveStream?: (url: string) => Promise<StreamResponse>;
+  validateRelayUrl?: (url: string) => Promise<ValidatedUrl>;
+}
 
 export interface BuildAppOptions {
   logger?: FastifyServerOptions['logger'];
   /** Override the route list (tests). Defaults to `src/routes/index.ts`. */
   routes?: FastifyPluginAsync<RouteOptions>[];
+  /**
+   * Test seam: omit to build the real services from config, pass an object to
+   * inject fakes (the caller then owns their disposal), or `false` to disable.
+   */
+  cast?: CastServices | false;
 }
 
 /** Builds the Fastify instance: CORS, rate limit, bearer auth, then route plugins. */
@@ -70,8 +87,73 @@ export async function buildApp(
     app.addHook('onClose', async () => sessions.dispose());
   }
 
+  // Cast is optional and only meaningful with sessions: the speaker is a
+  // target of the shared session. Without a media base URL (or with
+  // CAST_ENABLED=false) nothing is constructed: no mDNS socket, no secret.
+  let castServices: CastServices | null = null;
+  let ownedCast: {
+    discovery: CastDiscovery;
+    cast: CastService;
+    relay: MediaRelay;
+  } | null = null;
+
+  const attachCast = (cast: CastService): void => {
+    if (!sessions) return;
+    sessions.setCastHooks({
+      devices: () => cast.devices(),
+      onTarget: (userId, requester, previousCastId, next, opts) =>
+        cast.setTarget(userId, requester, previousCastId, next, opts),
+      onControl: (userId, castId, command) => cast.control(userId, castId, command),
+      onState: (userId, castId, state) => cast.sync(userId, castId, state),
+    });
+    cast.setOnLost((ownerUserId, castId) => sessions.castLost(ownerUserId, castId));
+    cast.setSession(sessions);
+  };
+
+  if (options.cast !== false) {
+    if (options.cast) {
+      castServices = options.cast;
+      if (castServices.cast) attachCast(castServices.cast);
+    } else if (config.castEnabled && sessions && config.castMediaBaseUrl) {
+      const relay = new MediaRelay({
+        secret: loadOrCreateCastSecret(config.dataDir),
+        dataDir: config.dataDir,
+        baseUrl: config.castMediaBaseUrl,
+        ttlMs: config.castRelayTtlSec * 1000,
+      });
+      const discovery = new CastDiscovery();
+      const cast = new CastService({ relay, discovery, config });
+      discovery.start();
+      attachCast(cast);
+      castServices = { relay, cast };
+      ownedCast = { discovery, cast, relay };
+    } else if (config.castEnabled && !castServices) {
+      app.log.info('cast disabled: sessions or CAST_MEDIA_BASE_URL is unavailable');
+    }
+  }
+
+  if (ownedCast) {
+    const owned = ownedCast;
+    app.addHook('onClose', async () => {
+      owned.discovery.stop();
+      owned.cast.dispose();
+      owned.relay.dispose();
+    });
+  }
+
+  const routeOptions: RouteOptions = {
+    config,
+    verifyToken: verify,
+    sessions: sessions ?? undefined,
+    relay: castServices?.relay ?? null,
+    cast: castServices?.cast ?? null,
+    resolveStream:
+      castServices?.resolveStream ?? ((url: string) => resolveStream(url, 'highest')),
+    validateRelayUrl: castServices?.validateRelayUrl ?? validateUrl,
+  };
+
   for (const route of options.routes ?? defaultRoutes) {
-    await app.register(route, { config, verifyToken: verify, sessions: sessions ?? undefined });
+    await app.register(route, routeOptions);
   }
 
   if (config.webDir) {

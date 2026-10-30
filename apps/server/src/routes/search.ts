@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { rateLimitKey } from '../plugins/auth';
-import { validateUrl } from '../services/url-guard';
+import { validateUrlString } from '../services/url-guard';
 import { MAX_QUERY_LENGTH, resolveUrl, search, SEARCH_SOURCES, type SearchSource } from '../services/ytdlp';
 import type { RouteOptions } from './index';
 import { sendError } from './errors';
@@ -52,7 +52,7 @@ export const searchRoutes: FastifyPluginAsync<RouteOptions> = async (app, { conf
     },
     async (request, reply) => {
       try {
-        return await resolveUrl(await validateUrl(request.body.url));
+        return await resolveUrl(await validateUrlString(request.body.url));
       } catch (err) {
         return sendError(reply, err);
       }

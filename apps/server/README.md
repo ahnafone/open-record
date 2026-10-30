@@ -3,9 +3,11 @@
 A small self-hosted HTTP server (Node 24 + Fastify) that the Open Record app
 talks to for searching audio and finding a direct link to it, using
 [yt-dlp](https://github.com/yt-dlp/yt-dlp). The server never downloads,
-transcodes or proxies audio: it returns a link and the phone fetches the bytes
-straight from the source. It is single-user and protected by one shared bearer
-token.
+transcodes or proxies audio for `/stream`: it returns a link and the phone
+fetches the bytes straight from the source. The exception is casting: the
+`/cast/relay/<signed token>` route relays one track to a Google Cast speaker on
+the LAN. It is single-user and protected by one shared bearer token (the relay
+token is its own short-lived credential).
 
 > **Disclaimer.** Streaming or downloading from YouTube and many other sites breaks their
 > terms of service and may be illegal where you live, depending on the content.

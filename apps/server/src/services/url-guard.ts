@@ -65,15 +65,25 @@ export function isBlockedAddress(address: string): boolean {
   return true; // not an IP at all: refuse
 }
 
+/** A URL that passed {@link validateUrl}, plus the addresses that were vetted. */
+export interface ValidatedUrl {
+  /** Normalised URL (WHATWG serialisation). */
+  url: string;
+  /** Every address the host resolves to; a literal IP host returns itself. */
+  addresses: string[];
+}
+
 /**
  * Validates a user-supplied URL before it reaches yt-dlp: http(s) only, no
  * credentials, length cap, and every address the hostname resolves to must be
- * public (SSRF guard). Returns the normalised URL string.
+ * public (SSRF guard). Returns the normalised URL plus the vetted addresses so
+ * a fetcher can pin its connection to them.
  *
  * Note: yt-dlp follows redirects and resolves DNS again itself, so this does
- * not stop DNS rebinding; it blocks the direct cases.
+ * not stop DNS rebinding; it blocks the direct cases and gives callers what
+ * they need to pin their own fetch.
  */
-export async function validateUrl(raw: unknown, lookup: LookupFn = defaultLookup): Promise<string> {
+export async function validateUrl(raw: unknown, lookup: LookupFn = defaultLookup): Promise<ValidatedUrl> {
   if (typeof raw !== 'string' || !raw.trim()) throw new UrlRejectedError('url is required');
   const input = raw.trim();
   if (input.length > MAX_URL_LENGTH) throw new UrlRejectedError('url is too long');
@@ -107,5 +117,10 @@ export async function validateUrl(raw: unknown, lookup: LookupFn = defaultLookup
   if (!addresses.length || addresses.some(isBlockedAddress)) {
     throw new UrlRejectedError('url host is not allowed');
   }
-  return url.toString();
+  return { url: url.toString(), addresses };
+}
+
+/** Compatibility wrapper for callers that only need the normalised URL. */
+export async function validateUrlString(raw: unknown, lookup: LookupFn = defaultLookup): Promise<string> {
+  return (await validateUrl(raw, lookup)).url;
 }

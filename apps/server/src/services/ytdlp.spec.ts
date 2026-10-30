@@ -78,7 +78,10 @@ describe('URL validation (SSRF guard)', () => {
   it('accepts a public https URL', async () => {
     await expect(
       validateUrl('https://www.youtube.com/watch?v=abc', publicLookup),
-    ).resolves.toBe('https://www.youtube.com/watch?v=abc');
+    ).resolves.toEqual({
+      url: 'https://www.youtube.com/watch?v=abc',
+      addresses: ['93.184.215.14'],
+    });
     expect(isBlockedAddress('2606:4700::1111')).toBe(false);
   });
 });

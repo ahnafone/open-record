@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { buildApp } from './app';
 import { ConfigError, defaultDataDir, loadConfig } from './config';
 import { formatBanner } from './services/banner';
+import { redactRelayUrl } from './services/log-redact';
 import { isLoopbackUrl, pickLanUrl } from './services/network';
 import { resolveToken } from './services/token-store';
 import { configureCookies, cookiesStatus } from './services/ytdlp';
@@ -59,7 +60,26 @@ async function main(): Promise<void> {
     console.log(`open-record-server: cast media base URL ${config.castMediaBaseUrl}`);
   }
 
-  const app = await buildApp(config, { logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
+  const app = await buildApp(config, {
+    logger: {
+      level: process.env['LOG_LEVEL'] ?? 'info',
+      serializers: {
+        req: (request: {
+          method?: string;
+          url?: string;
+          hostname?: string;
+          remoteAddress?: string;
+          remotePort?: number;
+        }) => ({
+          method: request.method,
+          url: redactRelayUrl(request.url),
+          hostname: request.hostname,
+          remoteAddress: request.remoteAddress,
+          remotePort: request.remotePort,
+        }),
+      },
+    },
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
