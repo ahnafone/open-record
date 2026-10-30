@@ -20,6 +20,7 @@ import {
   PlayerStore,
   REMOTE_PROVIDER_ID,
   SessionStore,
+  SourceFixService,
 } from '@open-record/state';
 import {
   OrButton,
@@ -108,7 +109,9 @@ interface UpNextRow {
           {{ eyebrowText() }}
         </button>
         <span class="sr-only" aria-live="polite">{{ eyebrowText() }}</span>
-        <h2 class="title">{{ track.title }}</h2>
+        <h2 class="title" tabindex="-1" data-now-playing-title>
+          {{ track.title }}
+        </h2>
         <p class="artist">{{ track.artist }}</p>
         @if (albumLine(track); as album) {
           <p class="album">{{ album }}</p>
@@ -152,8 +155,13 @@ interface UpNextRow {
           <span class="status-bad"
             ><or-icon name="alert" [size]="18" />{{ err.message }}</span
           >
-          @if (player.playbackError()) {
+          @if (playbackActions()) {
             <or-button size="sm" (click)="retryPlayback()">Try again</or-button>
+            @if (canFix(track)) {
+              <or-button size="sm" (click)="openSourceFix(track)"
+                >Fix source</or-button
+              >
+            }
           }
         } @else if (reconnecting()) {
           <span class="status-text"
@@ -226,6 +234,10 @@ interface UpNextRow {
           (click)="toggleSaved(track)"
         />
       </div>
+      }
+
+      @if (castSeekHint()) {
+        <p class="note">Seeking restarts this track on the speaker.</p>
       }
 
       @if (track.credit) {
@@ -429,9 +441,10 @@ interface UpNextRow {
     }
     .status {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: var(--spacing-sm);
-      min-height: 24px;
+      gap: var(--spacing-xs) var(--spacing-sm);
+      min-block-size: var(--spacing-touch);
       margin: var(--spacing-xxs) 0;
     }
     .status-text,
@@ -571,6 +584,7 @@ export class NowPlayingPage {
   protected readonly picker = inject(DevicePickerService);
   private readonly library = inject(LibraryStore);
   private readonly offline = inject(OfflineStore);
+  private readonly sourceFix = inject(SourceFixService);
   protected readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
@@ -617,9 +631,23 @@ export class NowPlayingPage {
     () => this.session.mirroring() && this.session.targetStale(),
   );
 
+  /** A transcode-only cast stream restarts instead of seeking; say so. */
+  protected readonly castSeekHint = computed(
+    () =>
+      this.session.target()?.kind === 'cast' &&
+      this.session.castSeekRestarts(),
+  );
+
   protected readonly reconnecting = computed(
     () => this.session.connection() === 'retrying',
   );
+
+  /** A terminal local playback failure for the current record. */
+  protected readonly playbackActions = computed(() => {
+    const error = this.player.playbackError();
+    const track = this.player.current();
+    return !!error && !!track && error.trackId === track.id;
+  });
 
   /**
    * A `local:` entry this client cannot rehydrate. Only while this client is
@@ -707,6 +735,15 @@ export class NowPlayingPage {
     } catch {
       this.toast.show('Could not start playback on this device.');
     }
+  }
+
+  /** Whether this record has a source link that can be replaced. */
+  protected canFix(track: Track): boolean {
+    return !!track.source?.url;
+  }
+
+  protected openSourceFix(track: Track): void {
+    this.sourceFix.open(track);
   }
 
   /** Retry a local playback failure; the engine reloads the record. */

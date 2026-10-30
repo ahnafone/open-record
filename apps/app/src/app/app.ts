@@ -23,7 +23,13 @@ import {
 } from '@angular/router';
 import { filter, map, take } from 'rxjs';
 import { Capacitor } from '@capacitor/core';
-import { AuthStore, LibraryStore, PlayerStore, PlaylistsStore } from '@open-record/state';
+import {
+  AuthStore,
+  LibraryStore,
+  PlayerStore,
+  PlaylistsStore,
+  SourceFixService,
+} from '@open-record/state';
 // The picker is a single shell-level instance (not a routed screen), so it is
 // intentionally eager even though the Now Playing page itself is lazy.
 // eslint-disable-next-line @nx/enforce-module-boundaries
@@ -34,6 +40,7 @@ import { OrDrawer } from './shell/drawer';
 import { OrMiniPlayer } from './shell/mini-player';
 import { OrPlayerBar } from './shell/player-bar';
 import { OrSidebar } from './shell/sidebar';
+import { OrSourceFixDialog } from './shell/source-fix-dialog';
 import { OrTabBar } from './shell/tab-bar';
 import { OrTopBar } from './shell/top-bar';
 
@@ -70,6 +77,7 @@ const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'account', 'imp
     OrPlayerBar,
     OrDrawer,
     OrDevicePicker,
+    OrSourceFixDialog,
   ],
   selector: 'or-root',
   host: {
@@ -91,6 +99,7 @@ export class App {
   private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
+  private readonly sourceFix = inject(SourceFixService);
 
   /** Last surfaced local playback failure, so one error toasts once. */
   private lastPlaybackError = '';
@@ -172,7 +181,16 @@ export class App {
       const key = `${error.trackId}|${error.code}|${error.message}`;
       if (key === this.lastPlaybackError) return;
       this.lastPlaybackError = key;
-      untracked(() => this.toast.show(error.message, 4000));
+      const track = this.player.current();
+      const canFix =
+        !!track && track.id === error.trackId && !!track.source?.url;
+      untracked(() =>
+        this.toast.show(
+          error.message +
+            (canFix ? ' Open Now Playing to change the source.' : ''),
+          4000,
+        ),
+      );
     });
 
     this.router.events
@@ -187,6 +205,12 @@ export class App {
       this.screen();
       this.isDesktop();
       untracked(() => this.drawerOpen.set(false));
+    });
+
+    // A source fix belongs to the screen it was opened from.
+    effect(() => {
+      this.screen();
+      untracked(() => this.sourceFix.close());
     });
 
     // Android hardware / gesture Back (native only).

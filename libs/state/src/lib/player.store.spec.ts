@@ -14,6 +14,7 @@ import { PlayCountsStore } from './play-counts.store';
 import { PlaylistsStore } from './playlists.store';
 import { PlayerStore, QUEUE_SAVE_INTERVAL_MS } from './player.store';
 import { SessionStore } from './session.store';
+import { toSessionTrack } from './session-track';
 
 const queue: Track[] = [
   { id: 'fake:a', providerId: 'fake', title: 'A', artist: 'X' },
@@ -631,5 +632,104 @@ describe('PlayerStore', () => {
     ]);
     // Library rows intentionally highlight every copy of the current track.
     expect(player.isCurrent(queue[0].id)).toBe(true);
+  });
+
+  it('replaceTrack restarts a replaced local current record when asked', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+    const next: Track = { ...queue[0], id: 'fake:new', source: { site: 'test', url: '/new.mp3' } };
+    engine.queue.set(queue);
+    engine.currentIndex.set(0);
+    engine.status.set('paused');
+
+    expect(await player.replaceTrack(queue[0].id, next, { playCurrent: true })).toBe(true);
+
+    expect(engine.setQueue).toHaveBeenCalledWith([next, queue[1]], {
+      startIndex: 0,
+      autoplay: true,
+    });
+    expect(session.command).not.toHaveBeenCalled();
+  });
+
+  it('replaceTrack leaves a replaced non-current local record paused and returns false', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+    const next: Track = { ...queue[0], id: 'fake:new' };
+    engine.queue.set(queue);
+    engine.currentIndex.set(1);
+    engine.status.set('paused');
+
+    expect(await player.replaceTrack(queue[0].id, next, { playCurrent: true })).toBe(false);
+
+    expect(engine.setQueue).toHaveBeenCalledWith([next, queue[1]], {
+      startIndex: 1,
+      autoplay: false,
+    });
+  });
+
+  it('replaceTrack replaces session entries by id, then starts the current entry on the target', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    session.ownsPlayback.set(true);
+    session.isTarget.set(true);
+    session.remoteEntries.set([
+      { entryId: 'e1', track: queue[0] },
+      { entryId: 'e2', track: queue[1] },
+    ]);
+    session.remoteCursor.set(0);
+    session.currentEntryId.set('e1');
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+    const next: Track = { ...queue[0], id: 'fake:new', source: { site: 'test', url: '/new.mp3' } };
+
+    expect(await player.replaceTrack(queue[0].id, next, { playCurrent: true })).toBe(true);
+
+    expect(session.command.mock.calls.map(([command]) => command)).toEqual([
+      { type: 'replace', entryId: 'e1', track: toSessionTrack(next, 'e1') },
+      { type: 'playEntry', entryId: 'e1' },
+    ]);
+    expect(session.replaceAt).not.toHaveBeenCalled();
+  });
+
+  it('replaceTrack rejects and does not start playback when a session replace fails', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    session.ownsPlayback.set(true);
+    session.isTarget.set(true);
+    session.remoteEntries.set([{ entryId: 'e1', track: queue[0] }]);
+    session.remoteCursor.set(0);
+    session.currentEntryId.set('e1');
+    session.command.mockResolvedValueOnce({ ok: false, error: 'entry-not-found' });
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+
+    await expect(
+      player.replaceTrack(queue[0].id, { ...queue[0], id: 'fake:new' }, { playCurrent: true }),
+    ).rejects.toThrow('Could not update the playback queue. Try again.');
+    expect(session.command).toHaveBeenCalledTimes(1);
+    expect(session.command).not.toHaveBeenCalledWith({ type: 'playEntry', entryId: 'e1' });
+  });
+
+  it('replaceTrack does not start playback while mirroring another target', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    session.ownsPlayback.set(true);
+    session.mirroring.set(true);
+    session.remoteEntries.set([{ entryId: 'e1', track: queue[0] }]);
+    session.remoteCursor.set(0);
+    session.currentEntryId.set('e1');
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+
+    expect(
+      await player.replaceTrack(queue[0].id, { ...queue[0], id: 'fake:new' }, { playCurrent: true }),
+    ).toBe(false);
+    expect(session.command.mock.calls.map(([command]) => command)).toEqual([
+      { type: 'replace', entryId: 'e1', track: toSessionTrack({ ...queue[0], id: 'fake:new' }, 'e1') },
+    ]);
   });
 });

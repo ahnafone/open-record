@@ -663,26 +663,65 @@ export class PlayerStore {
    * Swap every queue entry of `oldId` for `next` (its source link changed),
    * keeping order, the current index and "Play next" marks. Playback carries
    * on when the current track is untouched; a replaced current track is
-   * reloaded paused at the start.
+   * reloaded paused at the start unless `playCurrent` restarts it from zero.
+   *
+   * With a shared session the queue lives on the server: every captured entry
+   * is replaced by its id, then a target asks the server to start the new
+   * current entry. Returns whether the current entry was replaced and, when
+   * requested, started.
    */
-  async replaceTrack(oldId: string, next: Track): Promise<void> {
-    if (oldId === next.id) return;
+  async replaceTrack(
+    oldId: string,
+    next: Track,
+    opts: { playCurrent?: boolean } = {},
+  ): Promise<boolean> {
+    if (oldId === next.id) return false;
+    const playCurrent = opts.playCurrent === true;
     if (this.session.ownsPlayback()) {
       const entries = this.session.remoteEntries();
-      const matches: number[] = [];
-      for (let index = 0; index < entries.length; index++) {
-        if (entries[index]?.track.id === oldId) matches.push(index);
-      }
+      const cursor = this.session.remoteCursor();
+      const currentEntryId =
+        this.session.currentEntryId() ??
+        (cursor >= 0 ? entries[cursor]?.entryId : undefined);
+      const currentReplaced =
+        !!currentEntryId &&
+        entries.some(
+          (entry) =>
+            entry.entryId === currentEntryId && entry.track.id === oldId,
+        );
+      const matches = entries.filter((entry) => entry.track.id === oldId);
       if (matches.length) {
-        for (const index of matches) {
-          await this.session.replaceAt(index, next);
+        let failed = false;
+        for (const entry of matches) {
+          const result = await this.session.command({
+            type: 'replace',
+            entryId: entry.entryId,
+            track: toSessionTrack(next, entry.entryId),
+          });
+          if (!result.ok) failed = true;
         }
-        return;
+        if (failed) {
+          if (playCurrent) {
+            throw new Error('Could not update the playback queue. Try again.');
+          }
+          return false;
+        }
+        if (!currentReplaced) return false;
+        if (!playCurrent) return true;
+        // Only the output device can start a session entry; a controller
+        // (mirroring) must leave transport to the target. The server starts
+        // the new entry at position zero.
+        if (!this.session.isTarget() || !currentEntryId) return false;
+        const played = await this.session.command({
+          type: 'playEntry',
+          entryId: currentEntryId,
+        });
+        return played.ok;
       }
     }
     // No session entry to replace (or local playback): rebuild locally.
     const queue = this.engine.queue();
-    if (!queue.some((t) => t.id === oldId)) return;
+    if (!queue.some((t) => t.id === oldId)) return false;
     const current = this.engine.current();
     const replacedCurrent = current?.id === oldId;
     const position = this.engine.position();
@@ -692,10 +731,14 @@ export class PlayerStore {
       .map((i) => (queue[i].id === oldId ? next.id : queue[i].id));
     await this.engine.setQueue(
       queue.map((t) => (t.id === oldId ? next : t)),
-      { startIndex: Math.max(0, this.engine.currentIndex()), autoplay: !replacedCurrent && wasPlaying },
+      {
+        startIndex: Math.max(0, this.engine.currentIndex()),
+        autoplay: replacedCurrent ? playCurrent : wasPlaying,
+      },
     );
     this.restorePlayNext(playNextIds);
     if (!replacedCurrent && position > 0) await this.engine.seek(position);
+    return replacedCurrent;
   }
 
   /**

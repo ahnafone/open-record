@@ -49,7 +49,7 @@ function formatTime(totalSec: number): string {
   template: `
     <div class="track">
       @if (player.current(); as track) {
-        <button class="art" type="button" aria-label="Show now playing" [attr.title]="player.playbackError()?.message ?? null" (click)="togglePanel.emit()">
+        <button class="art" type="button" [attr.aria-label]="openLabel()" [attr.title]="player.playbackError()?.message ?? null" (click)="togglePanel.emit()">
           <or-sleeve size="mini" [src]="art()" [lazy]="false" />
           @if (player.isLoading()) {
             <span class="overlay" aria-hidden="true"><or-spinner /></span>
@@ -409,6 +409,14 @@ export class OrPlayerBar {
     () => this.player.duration() > 0 && !this.player.isLoading(),
   );
   protected readonly shown = computed(() => this.scrub() ?? this.player.position());
+  /** Show Now Playing, naming the playback failure when there is one. */
+  protected readonly openLabel = computed(() => {
+    const error = this.player.playbackError();
+    return error
+      ? `Show Now Playing, playback failed: ${error.message}`
+      : 'Show Now Playing';
+  });
+
   protected readonly saved = computed(() => {
     const id = this.player.current()?.id;
     return id ? this.library.isSaved(id) : false;

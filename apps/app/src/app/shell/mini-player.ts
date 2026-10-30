@@ -35,7 +35,7 @@ import {
       <button
         class="art"
         type="button"
-        aria-label="Open now playing"
+        [attr.aria-label]="openLabel()"
         [attr.title]="player.playbackError()?.message ?? null"
         (click)="open.emit()"
       >
@@ -51,7 +51,7 @@ import {
       <button
         class="info"
         type="button"
-        aria-label="Open now playing"
+        [attr.aria-label]="openLabel()"
         (click)="open.emit()"
       >
         <span class="title">{{ track.title }}</span>
@@ -237,6 +237,14 @@ export class OrMiniPlayer {
       return 'phone';
     }
     return Capacitor.isNativePlatform() ? 'phone' : 'desktop';
+  });
+
+  /** Open Now Playing, naming the playback failure when there is one. */
+  protected readonly openLabel = computed(() => {
+    const error = this.player.playbackError();
+    return error
+      ? `Open Now Playing, playback failed: ${error.message}`
+      : 'Open Now Playing';
   });
 
   /** Sleeve art: provider URL, else the imported track's stored cover. */

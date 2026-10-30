@@ -85,6 +85,7 @@ let nextId = 0;
       max-inline-size: 336px;
       max-block-size: 82%;
       overflow: auto;
+      overflow-x: hidden;
       overscroll-behavior: contain;
       background: var(--color-surface);
       color: var(--color-text);
@@ -106,6 +107,11 @@ let nextId = 0;
       font-size: var(--type-title-font-size);
       font-weight: var(--type-title-font-weight);
       line-height: var(--type-title-line-height);
+    }
+    .title,
+    .body,
+    .actions {
+      min-inline-size: 0;
     }
     .body:empty,
     .actions:empty {

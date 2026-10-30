@@ -47,6 +47,18 @@ export function youtubeVideoUrl(raw: string): string | null {
   return `${base}/watch?v=${id}`;
 }
 
+/**
+ * Canonical video id for an allowed YouTube / YouTube Music link, or `null`.
+ * Lets a `music.youtube.com` and a `www.youtube.com` link to the same video
+ * compare equal even though their URLs differ.
+ */
+export function youtubeVideoId(raw: string): string | null {
+  const url = youtubeVideoUrl(raw);
+  return url ? new URL(url).searchParams.get('v') : null;
+}
+
+const SAME_RECORDING = 'That’s the same recording. Pick another version or paste a different link.';
+
 /** Friendly reason a replacement link was rejected. */
 export function linkCheckError(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
@@ -220,16 +232,7 @@ export class FailedDownloadsStore {
     const old = this.library.track(oldId);
     if (!old) throw new Error('This song is no longer in your library.');
     if (!candidate.source?.url || !youtubeVideoUrl(candidate.source.url)) throw new Error(NOT_A_YOUTUBE_LINK);
-    const next: Track = {
-      ...old,
-      id: candidate.id,
-      providerId: candidate.providerId,
-      source: candidate.source,
-    };
-    delete next.sourceFile;
-    if (candidate.durationSec) next.durationSec = candidate.durationSec;
-    else delete next.durationSec;
-    if (!old.artUrl && candidate.artUrl) next.artUrl = candidate.artUrl;
+    const next = this.swappedSource(old, candidate);
     if (next.id === oldId) {
       // Same video: nothing to migrate, just try again.
       await this.retry(oldId);
@@ -242,6 +245,65 @@ export class FailedDownloadsStore {
     await this.sessions.replaceTrackId(oldId, next.id);
     await this.importer.replaceMatchId(oldId, next);
     await this.offline.ensureSaved(next);
+    return next;
+  }
+
+  /**
+   * Replace the source of the record that failed to play, then start it.
+   * The queue swap happens before the library/playlist migration so a queue
+   * rejection leaves the library untouched. A failed queue play still keeps
+   * the source change for the rest of the queue.
+   */
+  async replaceForPlayback(
+    oldId: string,
+    candidate: Track,
+  ): Promise<{ track: Track; current: boolean }> {
+    await Promise.all([this.library.ready(), this.playlists.ready()]);
+    const old =
+      this.library.track(oldId) ??
+      (this.player.current()?.id === oldId ? this.player.current() : null);
+    if (!old) throw new Error('That record is no longer available.');
+    if (!candidate.source?.url || !youtubeVideoUrl(candidate.source.url)) throw new Error(NOT_A_YOUTUBE_LINK);
+    const oldVideo = old.source?.url ? youtubeVideoId(old.source.url) : null;
+    const candidateVideo = youtubeVideoId(candidate.source.url);
+    if (oldVideo && candidateVideo && oldVideo === candidateVideo) throw new Error(SAME_RECORDING);
+    if (this.player.current()?.id !== oldId) throw new Error('That record is no longer playing.');
+
+    const wasStored = !!this.library.storedRecord(oldId);
+    const next = this.swappedSource(old, candidate);
+    const current = await this.player.replaceTrack(oldId, next, { playCurrent: true });
+    // The queue now points at the new id: stop any save still working on the
+    // old one before its record is migrated away.
+    this.offline.forget([oldId]);
+    await this.library.replaceTrackId(oldId, next);
+    await this.playlists.replaceTrackEverywhere(oldId, next.id);
+    await this.sessions.replaceTrackId(oldId, next.id);
+    await this.importer.replaceMatchId(oldId, next);
+    if (wasStored) {
+      // The source change and playback already happened: a download
+      // scheduling failure must not turn that into a failed fix.
+      try {
+        await this.offline.ensureSaved(next);
+      } catch {
+        // The save can be retried from Failed downloads.
+      }
+    }
+    return { track: next, current };
+  }
+
+  /** Keep the old track's metadata and swap in the candidate's source/id. */
+  private swappedSource(old: Track, candidate: Track): Track {
+    const next: Track = {
+      ...old,
+      id: candidate.id,
+      providerId: candidate.providerId,
+      source: candidate.source,
+    };
+    delete next.sourceFile;
+    delete next.sizeBytes;
+    if (candidate.durationSec) next.durationSec = candidate.durationSec;
+    else delete next.durationSec;
+    if (!old.artUrl && candidate.artUrl) next.artUrl = candidate.artUrl;
     return next;
   }
 
