@@ -27,9 +27,23 @@ export interface PlayerError {
   transient?: boolean;
 }
 
+/** Classified failed attempt; decides whether a retry is worth trying. */
+interface AttemptFailure {
+  code: PlayerError['code'];
+  message: string;
+  transient?: boolean;
+  retryable: boolean;
+  /** Server's Retry-After hint in seconds, when it sent a usable one. */
+  retryAfterSec?: number;
+}
+
 export interface PlayerEngineOptions {
-  /** Move on to the next track when one fails. Default true. */
-  skipOnError?: boolean;
+  /**
+   * Backoff before each retry of a failed play, in ms. One attempt is made
+   * plus one per entry, so the default [600, 1800] means three attempts.
+   * A failed play never moves the queue; it retries the same track.
+   */
+  retryDelaysMs?: readonly number[];
   /** Random source for shuffle, injectable for tests. Default Math.random. */
   random?: () => number;
   /**
@@ -45,14 +59,19 @@ export interface PlayerEngineOptions {
   resolveNeighbour?: (track: Track) => Promise<PlayableSource | undefined>;
   /**
    * Classifies a resolve failure as temporary (server busy / rate limited).
-   * Return the message to show to stay on the track instead of skipping (a
-   * skip would just hit the same limit on every track); `undefined` otherwise.
+   * Return the friendly message to show if every retry fails; `undefined`
+   * otherwise (the error's own message is used).
    */
   transientError?: (err: unknown) => string | undefined;
 }
 
-/** Minimum gap between automatic skips after consecutive failures. */
-export const MIN_AUTO_SKIP_MS = 1000;
+/** Default backoff between load retries: 3 attempts, then a friendly error. */
+export const LOAD_RETRY_DELAYS_MS: readonly number[] = Object.freeze([
+  600, 1800,
+]);
+
+/** Cap the server's Retry-After hint so a failed play stays responsive. */
+const MAX_RETRY_AFTER_MS = 3000;
 
 /** A track as it will play, with where it sits in the queue. */
 export interface UpcomingEntry {
@@ -107,7 +126,8 @@ export class PlayerEngine {
   private readonly _shuffle = signal(false);
   private readonly _repeat = signal<RepeatMode>('off');
   private readonly _error = signal<PlayerError | null>(null);
-  private readonly _skipOnError = signal(true);
+  /** True while backing off before retrying a failed play. */
+  private readonly _retrying = signal(false);
   private readonly _volume = signal(1);
   private readonly _muted = signal(false);
   /** The last play counted as complete; `seq` increments once per play. */
@@ -126,7 +146,8 @@ export class PlayerEngine {
   readonly shuffle = this._shuffle.asReadonly();
   readonly repeat = this._repeat.asReadonly();
   readonly error = this._error.asReadonly();
-  readonly skipOnError = this._skipOnError.asReadonly();
+  /** Backing off before retrying the current track; status stays 'loading'. */
+  readonly retrying = this._retrying.asReadonly();
   /** Output volume 0..1, independent of mute. */
   readonly volume = this._volume.asReadonly();
   readonly muted = this._muted.asReadonly();
@@ -173,14 +194,21 @@ export class PlayerEngine {
   private readonly random: () => number;
   private readonly artResolver?: ArtResolver;
   private readonly neighbourResolver?: (track: Track) => Promise<PlayableSource | undefined>;
+  private readonly retryDelaysMs: readonly number[];
   /** Bumped on every load; stale async work compares against it. */
   private loadToken = 0;
-  /** Consecutive failures, so skip-on-error cannot loop forever. */
-  private failures = 0;
+  /** Attempts made in the current user-initiated load (retries included). */
+  private attempts = 0;
+  /** Pending backoff timer for a retry, cleared by pause/navigation/clear. */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Whether the user wants sound once the current load finishes. */
   private playIntent = false;
   /** Load token that already reported a failure (avoid double handling). */
   private failedToken = -1;
+  /** Load token whose media has been loaded into the engine. */
+  private loadedToken = -1;
+  /** Load token for which playback actually started. */
+  private startedToken = -1;
   /** Load token that already reported a play. */
   private countedToken = -1;
   /** Last `onTime` position, to measure real listened time. */
@@ -190,8 +218,8 @@ export class PlayerEngine {
   /** `${loadToken}|${trackId}` of the last preload, so it runs once per track. */
   private preloadKey = '';
   private readonly transientError?: (err: unknown) => string | undefined;
-  /** When the last error-driven skip happened (rate limit for skip chains). */
-  private lastAutoSkip = Number.NEGATIVE_INFINITY;
+  /** Neighbour window the engine was last given; skips identical refreshes. */
+  private neighbourSignature = '';
 
   constructor(
     private readonly engine: AudioEngine,
@@ -202,11 +230,13 @@ export class PlayerEngine {
     this.artResolver = options.resolveArt;
     this.neighbourResolver = options.resolveNeighbour;
     this.transientError = options.transientError;
-    this._skipOnError.set(options.skipOnError ?? true);
+    this.retryDelaysMs = options.retryDelaysMs ?? LOAD_RETRY_DELAYS_MS;
     this.canSetVolume = typeof engine.setVolume === 'function';
     engine.setListener({
       onPlaying: () => {
-        this.failures = 0;
+        this.cancelRetry();
+        this.startedToken = this.loadToken;
+        this._error.set(null);
         this._status.set('playing');
       },
       onPaused: () => {
@@ -226,8 +256,9 @@ export class PlayerEngine {
       onDuration: (sec) => this._duration.set(sec),
       onEnded: () => void this.handleEnded(),
       onError: (err) =>
-        this.fail({ code: err.code, message: err.message }, this.loadToken),
-      onSkipped: (dir) => void this.handleSkipped(dir),
+        this.fail(engineFailure(err), this.loadToken),
+      onSkipped: (dir, trackId?: string) =>
+        void this.handleSkipped(dir, trackId),
     });
   }
 
@@ -356,6 +387,12 @@ export class PlayerEngine {
 
   async clear(): Promise<void> {
     this.nextLoadToken();
+    this.cancelRetry();
+    this.attempts = 0;
+    this.loadedToken = -1;
+    this.startedToken = -1;
+    this.playIntent = false;
+    this.neighbourSignature = '';
     this._queue.set([]);
     this._order.set([]);
     this._cursor.set(-1);
@@ -444,12 +481,18 @@ export class PlayerEngine {
 
   async play(): Promise<void> {
     if (this._cursor() < 0) return;
+    this.playIntent = true;
     const status = this._status();
     if (status === 'loading') {
-      this.playIntent = true;
       return;
     }
-    if (status === 'error' || status === 'idle') {
+    // A terminal failure (and a retry cancelled by pausing) needs a fresh
+    // reload of the same track; attempts start over.
+    if (
+      status === 'error' ||
+      status === 'idle' ||
+      (status === 'paused' && this.loadedToken !== this.loadToken)
+    ) {
       await this.loadCurrent(true);
       return;
     }
@@ -457,6 +500,9 @@ export class PlayerEngine {
       await this.engine.seek(0);
       this.resetListen();
     }
+    // A resume is a fresh failure surface: do not suppress an error because
+    // the previous attempt (which the user paused) was already handled.
+    this.failedToken = -1;
     await this.startEngine();
   }
 
@@ -464,6 +510,12 @@ export class PlayerEngine {
     const status = this._status();
     if (status === 'loading') {
       this.playIntent = false;
+      if (this._retrying()) {
+        // Cancel the pending backoff instead of letting it start a new
+        // attempt behind the user's back.
+        this.cancelRetry();
+        this._status.set('paused');
+      }
     } else if (status === 'playing') {
       await this.engine.pause();
       this._status.set('paused');
@@ -564,12 +616,9 @@ export class PlayerEngine {
     this.engine.setVolume?.(this._muted() ? 0 : this._volume());
   }
 
-  setSkipOnError(on: boolean): void {
-    this._skipOnError.set(on);
-  }
-
   async destroy(): Promise<void> {
     this.nextLoadToken();
+    this.cancelRetry();
     this.engine.setListener(null);
     await this.engine.destroy();
   }
@@ -698,9 +747,18 @@ export class PlayerEngine {
    * while the WebView is suspended. The 90% rule applies, with up to two ticks
    * of slack so a track that ends just before a tick still counts.
    */
-  private async handleSkipped(direction: SkipDirection): Promise<void> {
+  private async handleSkipped(
+    direction: SkipDirection,
+    trackId?: string,
+  ): Promise<void> {
     const target = this.peek(direction === 'next' ? 1 : -1);
     if (target === -1) return;
+    // Native engines report which media actually started. Drop a stale event
+    // when it is not the neighbour we expect (e.g. a previous queue state).
+    if (trackId !== undefined) {
+      const expected = this._queue()[this._order()[target]];
+      if (expected?.id !== trackId) return;
+    }
     if (direction === 'next') {
       const duration = this._duration() || this.current()?.durationSec || 0;
       const threshold = Math.max(
@@ -726,8 +784,20 @@ export class PlayerEngine {
     }
   }
 
+  /** User-initiated load: a new track (or a manual replay) starts over. */
   private async loadCurrent(autoplay: boolean): Promise<void> {
+    this.attempts = 0;
+    await this.attemptLoad(autoplay);
+  }
+
+  /**
+   * One load attempt. Retries call this again with a fresh token but keep the
+   * attempt count. A failed play never moves the queue to another track.
+   */
+  private async attemptLoad(autoplay: boolean): Promise<void> {
     const token = this.nextLoadToken();
+    this.cancelRetry();
+    this.attempts++;
     this.listenedSec = 0;
     this.lastTick = 0;
     const track = this.current();
@@ -737,21 +807,13 @@ export class PlayerEngine {
     this._error.set(null);
     this._position.set(0);
     this._duration.set(track.durationSec ?? 0);
+    this.neighbourSignature = '';
 
     let media: EngineMedia;
     try {
       media = await this.toMedia(track);
     } catch (err) {
-      const transient = this.transientError?.(err);
-      await this.fail(
-        transient
-          ? { code: 'resolve', message: transient, transient: true }
-          : {
-              code: 'resolve',
-              message: errorMessage(err, 'Could not find this record.'),
-            },
-        token,
-      );
+      this.fail(resolveFailure(err, this.transientError), token);
       return;
     }
     if (token !== this.loadToken) return;
@@ -763,46 +825,83 @@ export class PlayerEngine {
       if (token !== this.loadToken) return;
       await this.engine.load(media, neighbours);
       if (token !== this.loadToken) return;
+      this.loadedToken = token;
+      this.neighbourSignature = this.neighbourKey();
       if (this.playIntent) await this.startEngine();
       else this._status.set('paused');
     } catch (err) {
-      await this.fail(
-        { code: 'unknown', message: errorMessage(err, 'Playback failed.') },
-        token,
-      );
+      if (err instanceof PlaybackBlockedError) {
+        this.playIntent = false;
+        this._status.set('paused');
+        return;
+      }
+      this.fail(engineFailure(err), token);
     }
   }
 
-  private async fail(
-    err: Omit<PlayerError, 'trackId'>,
-    token: number,
-  ): Promise<void> {
+  /**
+   * Record a failed attempt. Never waits itself: when a retry is allowed it
+   * schedules the backoff, and the load flow re-attempts with a new token.
+   */
+  private fail(failure: AttemptFailure, token: number): void {
     if (token !== this.loadToken || token === this.failedToken) return;
     const track = this.current();
     if (!track) return;
     this.failedToken = token;
-    this._error.set({ trackId: track.id, ...err });
-    this._status.set('error');
-    this.failures++;
-    // Only skip when the user wants sound (a paused restore stays put) and
-    // the failure is not temporary (busy: every track would fail the same).
+    // A failure after playback started is a mid-track error: stop here.
+    const started =
+      this.startedToken === token || this._status() === 'playing';
     if (
-      !this._skipOnError() ||
-      !this.playIntent ||
-      err.transient ||
-      this.failures >= this._queue().length ||
-      this.peek(1) === -1
+      this.playIntent &&
+      !started &&
+      failure.retryable &&
+      this.attempts <= this.retryDelaysMs.length
     ) {
+      const hint = failure.retryAfterSec;
+      const delayMs =
+        hint !== undefined && hint > 0
+          ? Math.min(hint * 1000, MAX_RETRY_AFTER_MS)
+          : (this.retryDelaysMs[this.attempts - 1] ?? 0);
+      this.scheduleRetry(token, delayMs);
       return;
     }
-    // Never chain skips faster than MIN_AUTO_SKIP_MS.
-    const wait = this.lastAutoSkip + MIN_AUTO_SKIP_MS - Date.now();
-    if (wait > 0) {
-      await new Promise<void>((r) => setTimeout(r, wait));
-      if (token !== this.loadToken) return;
-    }
-    this.lastAutoSkip = Date.now();
-    await this.next();
+    this._error.set({
+      trackId: track.id,
+      code: failure.code,
+      message: failure.message,
+      ...(failure.transient ? { transient: true } : {}),
+    });
+    this._status.set('error');
+    this._retrying.set(false);
+  }
+
+  /** Wait out the backoff, then reload the same track if still wanted. */
+  private scheduleRetry(token: number, delayMs: number): void {
+    this.clearRetryTimer();
+    this._status.set('loading');
+    this._error.set(null);
+    this._retrying.set(true);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (token !== this.loadToken || !this.playIntent) {
+        this._retrying.set(false);
+        return;
+      }
+      this._retrying.set(false);
+      void this.attemptLoad(true);
+    }, Math.max(0, delayMs));
+  }
+
+  /** Drop a pending retry (pause, navigation, clear, destroy). */
+  private cancelRetry(): void {
+    this.clearRetryTimer();
+    if (this._retrying()) this._retrying.set(false);
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer === null) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
   }
 
   private async toMedia(track: Track): Promise<EngineMedia> {
@@ -884,10 +983,13 @@ export class PlayerEngine {
     })();
   }
 
-  /** Re-send the neighbour window after a mode change (native only). */
+  /** Re-send the neighbour window after a mode/order change (native only). */
   private refreshNeighbours(): void {
     const track = this.current();
     if (!this.engine.wantsNeighbours || !track) return;
+    const signature = this.neighbourKey();
+    if (signature === this.neighbourSignature) return;
+    this.neighbourSignature = signature;
     const token = this.loadToken;
     void (async () => {
       try {
@@ -897,10 +999,110 @@ export class PlayerEngine {
         ]);
         if (token === this.loadToken) await this.engine.load(media, neighbours);
       } catch {
-        // Window refresh is best effort; playback is unaffected.
+        // Window refresh is best effort; playback is unaffected. Let a later
+        // refresh try again for this window.
+        if (token === this.loadToken && this.neighbourSignature === signature) {
+          this.neighbourSignature = '';
+        }
       }
     })();
   }
+
+  /**
+   * Identity of the neighbour window + repeat mode. When it is unchanged the
+   * engine already has the right window, so refreshing is a no-op.
+   */
+  private neighbourKey(): string {
+    const cursor = this._cursor();
+    const at = (position: number): Track | undefined => {
+      if (cursor < 0 || position < 0) return undefined;
+      return this._queue()[this._order()[position]];
+    };
+    const mediaKey = (track: Track | undefined): string =>
+      track ? `${defaultMediaKey(track)}|${track.artUrl ?? ''}` : '';
+    const next =
+      this._repeat() === 'one' ? undefined : at(this.peek(1));
+    return [
+      mediaKey(at(this.peek(-1))),
+      mediaKey(at(cursor)),
+      mediaKey(next),
+      this._repeat(),
+    ].join('~');
+  }
+}
+
+/** Friendly copy for engine failures; raw engine detail stays out of the UI. */
+const ENGINE_ERROR_MESSAGES: Record<EngineError['code'], string> = {
+  network: 'Could not reach the music source. Check your connection and try again.',
+  decode: 'This record could not be played. Its audio file may be damaged.',
+  unsupported: 'This record uses an audio format this app cannot play.',
+  aborted: 'Playback stopped. Try again.',
+  unknown: 'This record could not be played. Try again.',
+};
+
+function engineFailure(err: unknown): AttemptFailure {
+  const code = engineErrorCode(err);
+  return {
+    code,
+    message: ENGINE_ERROR_MESSAGES[code],
+    retryable: code === 'network' || code === 'unknown',
+  };
+}
+
+function engineErrorCode(err: unknown): EngineError['code'] {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'network' ||
+    code === 'decode' ||
+    code === 'unsupported' ||
+    code === 'aborted'
+    ? code
+    : 'unknown';
+}
+
+function resolveFailure(
+  err: unknown,
+  transientError?: (err: unknown) => string | undefined,
+): AttemptFailure {
+  const transient = transientError?.(err);
+  return {
+    code: 'resolve',
+    message: transient ?? errorMessage(err, 'Could not find this record.'),
+    transient: transient !== undefined,
+    retryable: isRetryableResolveError(err),
+    retryAfterSec: retryAfterSecOf(err),
+  };
+}
+
+/**
+ * A resolve failure worth retrying: the source may come back (network,
+ * timeout, busy server, 5xx, malformed reply). Auth/config/abort and other
+ * 4xx failures are permanent for this track.
+ */
+function isRetryableResolveError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : '';
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 'ETIMEDOUT' || code === 'ECONNRESET') return true;
+  // Any HTTP-shaped failure: 5xx is worth another try, 4xx is not.
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status === 'number' && Number.isFinite(status)) {
+    return status >= 500;
+  }
+  switch (name) {
+    case 'NetworkError':
+    case 'TimeoutError':
+    case 'ProtocolError':
+    case 'busy':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function retryAfterSecOf(err: unknown): number | undefined {
+  const sec = Number(
+    (err as { retryAfterSec?: unknown } | null)?.retryAfterSec,
+  );
+  return Number.isFinite(sec) && sec > 0 ? sec : undefined;
 }
 
 /** Identity of the media behind a track, for reload decisions. */

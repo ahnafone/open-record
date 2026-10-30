@@ -175,6 +175,20 @@ export class PlayerStore {
         }
       : null;
   });
+  /**
+   * A local playback failure the user can retry. Excludes the fallback notice
+   * ("Playing on this device only") and a remote/session error, so only a real
+   * engine error offers "Try again". Transient failures are surfaced through
+   * `retrying()` instead, once the engine gives up.
+   */
+  readonly playbackError = computed<PlayerError | null>(() => {
+    if (this.session.mirroring()) return null;
+    return this.engine.error();
+  });
+  /** The engine is retrying a transient failure (never while mirroring). */
+  readonly retrying = computed(() =>
+    this.session.mirroring() ? false : this.engine.retrying(),
+  );
   readonly hasNext = computed(() =>
     this.session.mirroring()
       ? this.session.remoteCursor() < this.session.remoteTracks().length - 1

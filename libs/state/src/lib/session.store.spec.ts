@@ -411,6 +411,122 @@ describe('SessionStore', () => {
     expect(store.mirroring()).toBe(false);
   });
 
+  it('applies the state order even when a newer session order has arrived', async () => {
+    const { store, port, engine } = await setup();
+    const base = engine.applyOrder.getMockImplementation();
+    if (!base) throw new Error('fake engine has no applyOrder');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Hold the first apply in flight so a newer session state can land first.
+    engine.applyOrder.mockImplementationOnce(async (order, cursor, opts) => {
+      await gate;
+      return base(order, cursor, opts);
+    });
+
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          revision: 1,
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+
+    port.push({
+      type: 'state',
+      session: device(store, {
+        revision: 2,
+        order: [wire('e1', 'catalog:b'), wire('e2', 'catalog:c')],
+        cursor: 1,
+      }),
+    });
+    await settle();
+    expect(store.remoteTracks().map((track) => track.id)).toEqual([
+      'catalog:b',
+      'catalog:c',
+    ]);
+
+    release();
+    await settle();
+
+    // The in-flight apply used its own state's order, not the newest session.
+    const first = engine.applyOrder.mock.calls.at(0);
+    if (!first) throw new Error('applyOrder was not called');
+    expect(first[0].map((track) => track.id)).toEqual(['catalog:a']);
+    expect(first[1]).toBe(0);
+    // The queued newer state then applied its own order.
+    const last = engine.applyOrder.mock.calls.at(-1);
+    if (!last) throw new Error('applyOrder was not called twice');
+    expect(last[0].map((track) => track.id)).toEqual([
+      'catalog:b',
+      'catalog:c',
+    ]);
+    expect(last[1]).toBe(1);
+  });
+
+  it('re-applies the server state once when the engine lands on a different entry', async () => {
+    const { store, port, engine } = await setup();
+    const base = engine.applyOrder.getMockImplementation();
+    if (!base) throw new Error('fake engine has no applyOrder');
+    // Simulate a stale load winning: the engine always ends up on another entry.
+    engine.applyOrder.mockImplementation(async (order, cursor, opts) => {
+      const result = await base(order, cursor, opts);
+      engine.currentIndex.set(cursor === 0 ? 1 : 0);
+      return result;
+    });
+
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          revision: 3,
+          order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+          cursor: 0,
+          playing: false,
+        }),
+      ),
+    );
+    await settle();
+
+    // One server-authoritative retry, then the artifact is left alone.
+    expect(engine.applyOrder).toHaveBeenCalledTimes(2);
+    expect(
+      port.reports().filter((report) => report.reason === 'native-skip'),
+    ).toHaveLength(0);
+  });
+
+  it('reports paused when playback fails terminally, but not during retries', async () => {
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: false,
+        }),
+      ),
+    );
+    await settle();
+    port.sent.length = 0;
+
+    // A retry is `loading`, not a terminal failure: no report.
+    engine.status.set('loading');
+    await settle();
+    expect(port.reports()).toHaveLength(0);
+
+    engine.status.set('error');
+    await settle();
+    expect(port.reports().find((report) => report.reason === 'playing')).toMatchObject(
+      { entryId: 'e0', playing: false },
+    );
+  });
+
   it('mirrors a remote target without touching the engine or reporting', async () => {
     const { store, port, engine } = await setup();
     port.push(

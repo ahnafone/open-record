@@ -96,31 +96,9 @@ export class SessionStore {
 
   readonly remoteEntries = computed<readonly SessionEntry[]>(() => {
     const order = this.session()?.order ?? [];
-    const known = this.library.trackMap();
-    const seen = new Set<string>();
-    const entries: SessionEntry[] = [];
-    for (const wire of order) {
-      seen.add(wire.entryId);
-      const signature = sessionTrackSignature(wire);
-      const local = wire.local ? known.get(wire.id) : undefined;
-      const cached = this.trackCache.get(wire.entryId);
-      if (
-        cached &&
-        cached.signature === signature &&
-        (local ? cached.source === local : cached.source === undefined)
-      ) {
-        entries.push({ entryId: wire.entryId, track: cached.track });
-        continue;
-      }
-      const track = local ?? fromSessionTrack(wire);
-      this.trackCache.set(wire.entryId, {
-        signature,
-        source: local,
-        track,
-      });
-      entries.push({ entryId: wire.entryId, track });
-    }
+    const entries = this.mapEntries(order);
     // Drop entries that disappeared so their art cache can be collected too.
+    const seen = new Set(order.map((wire) => wire.entryId));
     for (const key of [...this.trackCache.keys()]) {
       if (!seen.has(key)) this.trackCache.delete(key);
     }
@@ -207,6 +185,8 @@ export class SessionStore {
   private applyingRemote = false;
   private applyRunning = false;
   private applyPending: SessionState | null = null;
+  /** Revision whose engine drift was already reconciled (one retry per revision). */
+  private reconciledRevision = -1;
   private observedEntryId = '';
   private observedStatus: PlayerStatus = 'idle';
   private lastReportAt = Number.NEGATIVE_INFINITY;
@@ -276,6 +256,12 @@ export class SessionStore {
       this.observedEntryId = entryId;
       this.observedStatus = status;
       if (!entryId) return;
+      if (status === 'error' && previousStatus !== 'error') {
+        // Terminal playback failure: `playing` carries playing:false, so other
+        // controllers stop showing phantom playback. Retries stay `loading`.
+        this.report('playing');
+        return;
+      }
       if (entryId !== previousEntry) {
         this.report('native-skip');
         return;
@@ -575,6 +561,7 @@ export class SessionStore {
     this.devices.set([]);
     this.revision.set(-1);
     this.devicesRevision.set(-1);
+    this.reconciledRevision = -1;
     this.trackCache.clear();
     this.stopClock();
     this.stopKeepalive();
@@ -674,6 +661,38 @@ export class SessionStore {
 
   // ---- Target: apply the server's state -----------------------------------
 
+  /**
+   * Map session entries to local `Track`s through the shared track cache so
+   * mapping is stable and `local:` entries rehydrate from the library. Takes
+   * the order explicitly: an applied state must use its own order even when a
+   * newer session state has already arrived.
+   */
+  private mapEntries(order: readonly SessionTrack[]): readonly SessionEntry[] {
+    const known = this.library.trackMap();
+    const entries: SessionEntry[] = [];
+    for (const wire of order) {
+      const signature = sessionTrackSignature(wire);
+      const local = wire.local ? known.get(wire.id) : undefined;
+      const cached = this.trackCache.get(wire.entryId);
+      if (
+        cached &&
+        cached.signature === signature &&
+        (local ? cached.source === local : cached.source === undefined)
+      ) {
+        entries.push({ entryId: wire.entryId, track: cached.track });
+        continue;
+      }
+      const track = local ?? fromSessionTrack(wire);
+      this.trackCache.set(wire.entryId, {
+        signature,
+        source: local,
+        track,
+      });
+      entries.push({ entryId: wire.entryId, track });
+    }
+    return entries;
+  }
+
   private scheduleApply(state: SessionState): void {
     this.applyPending = state;
     this.applyingRemote = true;
@@ -704,7 +723,24 @@ export class SessionStore {
   }
 
   private async applyTarget(state: SessionState): Promise<void> {
-    const tracks = this.remoteTracks();
+    await this.applyState(state);
+    if (!this.isTarget()) return;
+
+    // The engine can land on a different entry than the server's cursor (e.g.
+    // a stale load finishing after `applyOrder`). The server is authoritative:
+    // re-apply this same state once per revision instead of reporting the
+    // artifact as a native skip. If it drifts again, leave it alone.
+    const expected = state.order[state.cursor]?.entryId ?? '';
+    const index = this.engine.currentIndex();
+    const actual = index >= 0 ? (state.order[index]?.entryId ?? '') : '';
+    if (actual === expected) return;
+    if (this.reconciledRevision === state.revision) return;
+    this.reconciledRevision = state.revision;
+    await this.applyState(state);
+  }
+
+  private async applyState(state: SessionState): Promise<void> {
+    const tracks = this.mapEntries(state.order).map((entry) => entry.track);
     const cursor = state.cursor;
     if (cursor < 0 || cursor >= tracks.length) {
       await this.engine.applyOrder([], -1, {

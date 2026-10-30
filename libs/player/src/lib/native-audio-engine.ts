@@ -53,6 +53,7 @@ interface PlaylistPlugin {
       startPaused?: boolean;
     };
   }): Promise<void>;
+  addItem(options: { item: NativeTrack; index?: number }): Promise<void>;
   clearAllItems(): Promise<void>;
   play(): Promise<void>;
   pause(): Promise<void>;
@@ -80,19 +81,46 @@ const Msg = {
 } as const;
 
 function mapError(code: number | undefined, message?: string): EngineError {
-  const text = message || 'Playback failed.';
   switch (code) {
     case 1:
-      return { code: 'aborted', message: text };
+      return { code: 'aborted', message: 'Playback was interrupted.' };
     case 2:
-      return { code: 'network', message: text };
+      return {
+        code: 'network',
+        message: 'Could not reach the audio source. Check your connection.',
+      };
     case 3:
-      return { code: 'decode', message: text };
+      return {
+        code: 'decode',
+        message: 'This file is damaged or cannot be played.',
+      };
     case 4:
-      return { code: 'unsupported', message: text };
+      return {
+        code: 'unsupported',
+        message: 'This audio format is not supported.',
+      };
     default:
-      return { code: 'unknown', message: text };
+      // Only unknown failures fall back to the plugin text; known Media3
+      // codes always get friendly copy instead of raw diagnostics.
+      return { code: 'unknown', message: message?.trim() || 'Playback failed.' };
   }
+}
+
+/** Identity of one native window; a pure refresh of the same window is a no-op. */
+function windowSignature(
+  media: EngineMedia,
+  previous: EngineMedia | undefined,
+  next: EngineMedia | undefined,
+): string {
+  return JSON.stringify([
+    media.id,
+    media.source.kind,
+    media.source.url,
+    media.source.mimeType ?? '',
+    media.artUrl ?? '',
+    previous?.id ?? '',
+    next?.id ?? '',
+  ]);
 }
 
 /**
@@ -139,6 +167,12 @@ export function nativeArtUrlFor(url: string, platform: string): string {
  * The native playlist is kept to a window of [previous, current, next] so the
  * OS shows next/previous and can advance while the WebView is suspended.
  * PlayerEngine stays the source of truth for the queue.
+ *
+ * The window is always built as `[current, next]` first and `previous` is
+ * inserted at index 0 afterwards. The plugin's `setAllItems` selects index 0
+ * before seeking to the requested id, which would otherwise emit a spurious
+ * TRACK_CHANGED to `previous` on Android. Loads are serialized so a stale
+ * window can never land after a newer one.
  */
 export class NativeAudioEngine implements AudioEngine {
   readonly ownsSystemControls = true;
@@ -149,8 +183,20 @@ export class NativeAudioEngine implements AudioEngine {
   private ready: Promise<void> | null = null;
   private handle: PluginListenerHandle | null = null;
   private currentId: string | null = null;
+  /** Id of the item the native player has actually been told to load. */
+  private loadedId: string | null = null;
   private neighbours: EngineNeighbours = {};
   private endedFor: string | null = null;
+  /** Last transport state reported by the OS (or requested via play/pause). */
+  private playing = false;
+  /** Id whose error was already reported; suppresses the plugin auto-skip. */
+  private failedFor: string | null = null;
+  /** Number of loads whose plugin calls are in flight. */
+  private loading = 0;
+  /** Serializes native playlist mutations; only the latest load applies. */
+  private chain: Promise<void> = Promise.resolve();
+  private loadSeq = 0;
+  private windowSignature: string | null = null;
 
   constructor(
     plugin: PlaylistPlugin = registerPlugin<PlaylistPlugin>(
@@ -201,50 +247,100 @@ export class NativeAudioEngine implements AudioEngine {
     media: EngineMedia,
     neighbours: EngineNeighbours = {},
   ): Promise<void> {
+    const seq = ++this.loadSeq;
     await this.init();
-    // Drop neighbours that collide with the current id (one-track queues).
-    const previous =
+    // Drop neighbours that collide with the current id (one-track queues) or
+    // with each other (a two-track loop reports the same item as both sides).
+    const previousCandidate =
       neighbours.previous && neighbours.previous.id !== media.id
         ? neighbours.previous
         : undefined;
     const next =
       neighbours.next &&
       neighbours.next.id !== media.id &&
-      neighbours.next.id !== previous?.id
+      neighbours.next.id !== previousCandidate?.id
         ? neighbours.next
         : undefined;
-    const sameItem = this.currentId === media.id;
+    const previous =
+      previousCandidate && previousCandidate.id !== next?.id
+        ? previousCandidate
+        : undefined;
+
+    const wasFailed = this.failedFor === media.id;
+    // A failed current must be reloaded from scratch, never retained in place.
+    const sameItem = this.loadedId === media.id && !wasFailed;
+    const signature = windowSignature(media, previous, next);
+    const unchanged = sameItem && this.windowSignature === signature;
+
     this.neighbours = { previous, next };
     this.currentId = media.id;
     if (!sameItem) this.endedFor = null;
 
-    const items = [previous, media, next]
-      .filter((m): m is EngineMedia => !!m)
-      .map((m) => this.toNative(m));
-    await this.plugin.setPlaylistItems({
-      items,
-      options: sameItem
-        ? // The native side already moved here: only refresh the window.
-          { retainPosition: true, playFromId: media.id }
-        : {
-            retainPosition: true,
-            playFromId: media.id,
-            playFromPosition: 0,
-            startPaused: true,
-          },
+    const task = this.chain.then(async () => {
+      // A newer load was requested while this one waited its turn.
+      if (seq !== this.loadSeq) return;
+      if (unchanged) return;
+
+      // Keep the failed marker until this load actually starts, so the
+      // plugin's queued error auto-skip cannot be read as a user skip while
+      // the previous cleanup is still running.
+      this.failedFor = null;
+      this.loading++;
+      try {
+        // Deterministic order: current is index 0, so the plugin's initial
+        // selection cannot emit a TRACK_CHANGED to the previous neighbour.
+        const items = [media, next]
+          .filter((m): m is EngineMedia => !!m)
+          .map((m) => this.toNative(m));
+        const startPaused = sameItem ? !this.playing : true;
+        await this.plugin.setPlaylistItems({
+          items,
+          options: sameItem
+            ? // Same track: refresh the window, keep position and transport.
+              { retainPosition: true, playFromId: media.id, startPaused }
+            : // New media or retry: always start paused at the very beginning.
+              {
+                retainPosition: true,
+                playFromId: media.id,
+                playFromPosition: 0,
+                startPaused: true,
+              },
+        });
+        if (previous) {
+          // Documented as non-interrupting; current stays selected.
+          await this.plugin.addItem({ item: this.toNative(previous), index: 0 });
+        }
+        this.windowSignature = signature;
+        this.loadedId = media.id;
+      } finally {
+        this.loading--;
+      }
     });
+    // Keep the chain usable on failure while still surfacing load errors.
+    this.chain = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    await task;
   }
 
   async play(): Promise<void> {
     await this.init();
-    // Android 13+: ask once so the playback notification is visible.
-    // Resolves even when denied, so playback is never blocked.
-    await this.requestNotificationPermission();
-    await this.plugin.play();
+    this.playing = true;
+    try {
+      // Android 13+: ask once so the playback notification is visible.
+      // Resolves even when denied, so playback is never blocked.
+      await this.requestNotificationPermission();
+      await this.plugin.play();
+    } catch (error) {
+      this.playing = false;
+      throw error;
+    }
   }
 
   async pause(): Promise<void> {
     await this.init();
+    this.playing = false;
     await this.plugin.pause();
   }
 
@@ -255,19 +351,44 @@ export class NativeAudioEngine implements AudioEngine {
 
   async stop(): Promise<void> {
     if (!this.ready) return;
-    await this.plugin.clearAllItems();
-    this.currentId = null;
-    this.neighbours = {};
+    // Invalidate loads that were queued before the stop.
+    this.loadSeq++;
+    this.playing = false;
+    this.failedFor = null;
+    const task = this.chain.then(async () => {
+      await this.plugin.clearAllItems();
+    });
+    this.chain = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      await task;
+    } finally {
+      this.currentId = null;
+      this.loadedId = null;
+      this.neighbours = {};
+      this.endedFor = null;
+      this.windowSignature = null;
+    }
   }
 
   async destroy(): Promise<void> {
     if (!this.ready) return;
-    await this.handle?.remove();
-    await this.plugin.release();
+    this.loadSeq++;
+    this.playing = false;
+    this.failedFor = null;
+    this.currentId = null;
+    this.loadedId = null;
+    this.neighbours = {};
+    this.endedFor = null;
+    this.windowSignature = null;
+    await this.handle?.remove().catch(() => undefined);
+    await this.plugin.release().catch(() => undefined);
     this.ready = null;
     this.handle = null;
     this.listener = null;
-    this.currentId = null;
+    this.chain = Promise.resolve();
   }
 
   private onStatus(status: NativeStatus): void {
@@ -278,21 +399,35 @@ export class NativeAudioEngine implements AudioEngine {
       case Msg.TRACK_CHANGED: {
         const id = status.value.currentItem?.trackId;
         if (!id || id === this.currentId) return;
+        // Stale transition while a load is being applied, or the plugin's
+        // skipFailedItem advancing after an error we already reported.
+        if (this.loading > 0 || this.failedFor) return;
         if (id === this.neighbours.next?.id) {
           this.currentId = id;
-          l.onSkipped('next');
+          // The native player has already moved: a follow-up load of this id
+          // must refresh the window in place rather than restart at 0.
+          this.loadedId = id;
+          l.onSkipped('next', id);
         } else if (id === this.neighbours.previous?.id) {
           this.currentId = id;
-          l.onSkipped('previous');
+          this.loadedId = id;
+          l.onSkipped('previous', id);
         }
         return;
       }
       case Msg.PLAYING:
-        if (isCurrent) l.onPlaying();
+        if (isCurrent) {
+          this.playing = true;
+          this.failedFor = null;
+          l.onPlaying();
+        }
         return;
       case Msg.PAUSE:
       case Msg.STOPPED:
-        if (isCurrent) l.onPaused();
+        if (isCurrent) {
+          this.playing = false;
+          l.onPaused();
+        }
         return;
       case Msg.POSITION:
       case Msg.SEEK:
@@ -312,6 +447,7 @@ export class NativeAudioEngine implements AudioEngine {
         if (
           this.currentId &&
           !this.neighbours.next &&
+          !this.failedFor &&
           this.endedFor !== this.currentId &&
           (isCurrent || status.msgType === Msg.PLAYLIST_COMPLETED)
         ) {
@@ -319,11 +455,38 @@ export class NativeAudioEngine implements AudioEngine {
           l.onEnded();
         }
         return;
-      case Msg.ERROR:
-        if (isCurrent || status.trackId === 'NONE') {
-          l.onError(mapError(status.value.code, status.value.message));
-        }
+      case Msg.ERROR: {
+        if (!isCurrent && status.trackId !== 'NONE') return;
+        const failedId = this.currentId ?? status.trackId;
+        // One report per failed item; the plugin may repeat the error.
+        if (this.failedFor === failedId) return;
+        this.failedFor = failedId;
+        this.playing = false;
+        this.windowSignature = null;
+        // The cleanup below empties the native playlist.
+        this.loadedId = null;
+        l.onError(mapError(status.value.code, status.value.message));
+        // The plugin auto-skips failed items. Drop the whole playlist so the
+        // notification cannot stay parked on the next song; the owner reloads
+        // whichever track it actually wants next.
+        const cleanup = this.chain.then(async () => {
+          try {
+            await this.plugin.pause();
+          } catch {
+            // Best effort; clearing below is what matters.
+          }
+          try {
+            await this.plugin.clearAllItems();
+          } catch {
+            // Nothing else we can do natively.
+          }
+        });
+        this.chain = cleanup.then(
+          () => undefined,
+          () => undefined,
+        );
         return;
+      }
     }
   }
 }

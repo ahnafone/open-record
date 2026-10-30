@@ -36,6 +36,7 @@ import {
         class="art"
         type="button"
         aria-label="Open now playing"
+        [attr.title]="player.playbackError()?.message ?? null"
         (click)="open.emit()"
       >
         <or-sleeve size="mini" [src]="art()" [lazy]="false" />
@@ -68,7 +69,13 @@ import {
         </button>
       }
       <or-icon-button
-        [label]="player.isPlaying() ? 'Pause' : 'Play'"
+        [label]="
+          player.playbackError()
+            ? 'Try again'
+            : player.isPlaying()
+              ? 'Pause'
+              : 'Play'
+        "
         [icon]="player.isPlaying() ? 'pause' : 'play'"
         (click)="player.togglePlay()"
       />

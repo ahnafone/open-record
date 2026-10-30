@@ -142,12 +142,19 @@ interface UpNextRow {
       }
 
       <div class="status" aria-live="polite">
-        @if (player.isLoading()) {
+        @if (player.isLoading() && player.retrying()) {
+          <span class="status-text"
+            ><or-spinner [size]="18" />Reconnecting…</span
+          >
+        } @else if (player.isLoading()) {
           <span class="status-text"><or-spinner [size]="18" />Loading record…</span>
         } @else if (player.error(); as err) {
           <span class="status-bad"
             ><or-icon name="alert" [size]="18" />{{ err.message }}</span
           >
+          @if (player.playbackError()) {
+            <or-button size="sm" (click)="retryPlayback()">Try again</or-button>
+          }
         } @else if (reconnecting()) {
           <span class="status-text"
             ><or-spinner [size]="18" />Reconnecting to the server…</span
@@ -699,6 +706,15 @@ export class NowPlayingPage {
       await this.player.play();
     } catch {
       this.toast.show('Could not start playback on this device.');
+    }
+  }
+
+  /** Retry a local playback failure; the engine reloads the record. */
+  protected async retryPlayback(): Promise<void> {
+    try {
+      await this.player.play();
+    } catch {
+      this.toast.show('Could not start playback. Try again.');
     }
   }
 

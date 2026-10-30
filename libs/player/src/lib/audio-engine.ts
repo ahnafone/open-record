@@ -46,8 +46,11 @@ export interface AudioEngineListener {
    * The native layer already switched to a neighbour (lock-screen skip or
    * natural advance). The owner should move its queue to match without
    * re-applying "restart if > 3s" rules.
+   *
+   * `trackId` is the native target id when the engine can report it, so the
+   * owner can verify the reported skip still matches its queue.
    */
-  onSkipped(direction: SkipDirection): void;
+  onSkipped(direction: SkipDirection, trackId?: string): void;
 }
 
 /**

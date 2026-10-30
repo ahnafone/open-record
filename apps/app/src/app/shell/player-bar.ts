@@ -49,7 +49,7 @@ function formatTime(totalSec: number): string {
   template: `
     <div class="track">
       @if (player.current(); as track) {
-        <button class="art" type="button" aria-label="Show now playing" (click)="togglePanel.emit()">
+        <button class="art" type="button" aria-label="Show now playing" [attr.title]="player.playbackError()?.message ?? null" (click)="togglePanel.emit()">
           <or-sleeve size="mini" [src]="art()" [lazy]="false" />
           @if (player.isLoading()) {
             <span class="overlay" aria-hidden="true"><or-spinner /></span>
@@ -86,7 +86,13 @@ function formatTime(totalSec: number): string {
           variant="transport-main"
           [icon]="player.isPlaying() ? 'pause' : 'play'"
           [iconSize]="22"
-          [label]="player.isPlaying() ? 'Pause' : 'Play'"
+          [label]="
+            player.playbackError()
+              ? 'Try again'
+              : player.isPlaying()
+                ? 'Pause'
+                : 'Play'
+          "
           [disabled]="!player.current()"
           (click)="player.togglePlay()"
         />

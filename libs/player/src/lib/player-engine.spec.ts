@@ -2,10 +2,13 @@ import type { PlayableSource, Track } from '@open-record/models';
 import type {
   AudioEngine,
   AudioEngineListener,
+  EngineErrorCode,
   EngineMedia,
   EngineNeighbours,
+  SkipDirection,
 } from './audio-engine';
-import { PlayerEngine } from './player-engine';
+import { LOAD_RETRY_DELAYS_MS, PlayerEngine } from './player-engine';
+import type { PlayerEngineOptions } from './player-engine';
 
 class FakeEngine implements AudioEngine {
   readonly ownsSystemControls = false;
@@ -16,6 +19,10 @@ class FakeEngine implements AudioEngine {
   neighbours: (EngineNeighbours | undefined)[] = [];
   seeks: number[] = [];
   failOn = new Set<string>();
+  /** Engine error code reported by `play` for ids in `failOn`. */
+  failCode: EngineErrorCode = 'decode';
+  /** Ids whose `load` rejects (a load failure rather than a media error). */
+  failLoadOn = new Set<string>();
 
   constructor(wantsNeighbours = false) {
     this.wantsNeighbours = wantsNeighbours;
@@ -27,11 +34,12 @@ class FakeEngine implements AudioEngine {
   async load(media: EngineMedia, neighbours?: EngineNeighbours): Promise<void> {
     this.loaded.push(media.id);
     this.neighbours.push(neighbours);
+    if (this.failLoadOn.has(media.id)) throw new Error('load failed');
   }
   async play(): Promise<void> {
     const id = this.loaded.at(-1) ?? '';
     if (this.failOn.has(id)) {
-      this.listener?.onError({ code: 'decode', message: 'bad file' });
+      this.listener?.onError({ code: this.failCode, message: 'bad file' });
     } else {
       this.listener?.onPlaying();
     }
@@ -71,6 +79,9 @@ const sourced = (id: string, url: string): Track => ({
   source: { site: 'test', url },
 });
 
+/** Three long tracks, for skip/completion tests. */
+const timedTracks = (): Track[] => ['a', 'b', 'c'].map((id) => timed(id, 200));
+
 /** Feed 1 Hz time ticks from `from` to `to` inclusive. */
 function listen(fake: FakeEngine, from: number, to: number): void {
   for (let sec = from; sec <= to; sec++) fake.listener?.onTime(sec);
@@ -81,8 +92,11 @@ const resolve = async (t: Track): Promise<PlayableSource> => ({
   kind: 'bundled',
 });
 
-/** Let async error-driven skips settle. */
+/** Let async work (no pending timers) settle. */
 const flush = () => new Promise<void>((r) => setTimeout(r));
+
+/** Run async retry timers and everything they start. */
+const wait = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 
 /** Deterministic random source. */
 function seeded(seed = 42): () => number {
@@ -93,13 +107,38 @@ function seeded(seed = 42): () => number {
   };
 }
 
+/** An error shaped like the remote provider's retryable network failure. */
+function networkError(message = 'offline'): Error {
+  const err = new Error(message);
+  err.name = 'NetworkError';
+  return err;
+}
+
+/** Report a native skip; the second arg is optional in the engine contract. */
+function nativeSkip(
+  fake: FakeEngine,
+  direction: SkipDirection,
+  trackId?: string,
+): void {
+  const onSkipped = fake.listener?.onSkipped as
+    | ((d: SkipDirection, id?: string) => void)
+    | undefined;
+  onSkipped?.(direction, trackId);
+}
+
 function setup(
-  opts: { skipOnError?: boolean; wantsNeighbours?: boolean } = {},
+  opts: {
+    wantsNeighbours?: boolean;
+    retryDelaysMs?: readonly number[];
+    resolve?: (track: Track) => Promise<PlayableSource>;
+    transientError?: PlayerEngineOptions['transientError'];
+  } = {},
 ) {
   const fake = new FakeEngine(opts.wantsNeighbours ?? false);
-  const player = new PlayerEngine(fake, resolve, {
+  const player = new PlayerEngine(fake, opts.resolve ?? resolve, {
     random: seeded(),
-    skipOnError: opts.skipOnError,
+    retryDelaysMs: opts.retryDelaysMs,
+    transientError: opts.transientError,
   });
   const ids = () => player.current()?.id;
   return { fake, player, ids };
@@ -197,77 +236,389 @@ describe('PlayerEngine', () => {
     expect(player.upcomingEntries().some((e) => e.playNext)).toBe(false);
   });
 
-  it('skips failing tracks and exposes the error', async () => {
-    const { player, ids, fake } = setup();
-    fake.failOn.add('b');
-    await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
-    await flush();
-    expect(ids()).toBe('c');
-    expect(player.status()).toBe('playing');
-    expect(player.error()).toBeNull();
+  describe('failed loads never move the queue', () => {
+    it('retries a resolve failure on the same track, then errors', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolves = 0;
+        const { player, ids, fake } = setup({
+          resolve: async () => {
+            resolves++;
+            throw networkError();
+          },
+        });
 
-    const strict = setup({ skipOnError: false });
-    strict.fake.failOn.add('a');
-    await strict.player.setQueue(tracks.slice(0, 2));
-    await flush();
-    expect(strict.ids()).toBe('a');
-    expect(strict.player.status()).toBe('error');
-    expect(strict.player.error()).toMatchObject({
-      trackId: 'a',
-      code: 'decode',
+        await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+        expect(resolves).toBe(1);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('loading');
+        expect(player.retrying()).toBe(true);
+        expect(player.error()).toBeNull();
+        expect(fake.loaded).toEqual([]);
+
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        expect(resolves).toBe(2);
+        await wait(LOAD_RETRY_DELAYS_MS[1]);
+        expect(resolves).toBe(3);
+
+        // Terminal: still the same track and cursor, no next() happened.
+        expect(ids()).toBe('a');
+        expect(player.currentIndex()).toBe(0);
+        expect(player.upcoming().map((t) => t.id)).toEqual(['b', 'c']);
+        expect(fake.loaded).toEqual([]);
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+        expect(player.error()).toMatchObject({
+          trackId: 'a',
+          code: 'resolve',
+          message: 'offline',
+        });
+
+        // No further attempts after the budget is spent.
+        await wait(10_000);
+        expect(resolves).toBe(3);
+        expect(ids()).toBe('a');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries engine load/play failures and plays a successful retry', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup();
+        fake.failOn.add('a');
+        fake.failCode = 'network';
+
+        await player.setQueue(tracks.slice(0, 2));
+        expect(fake.loaded).toEqual(['a']);
+        expect(player.status()).toBe('loading');
+        expect(player.retrying()).toBe(true);
+
+        // Second attempt succeeds after the first backoff.
+        fake.failOn.delete('a');
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        expect(fake.loaded).toEqual(['a', 'a']);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('playing');
+        expect(player.retrying()).toBe(false);
+        expect(player.error()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('gives up on an engine error after the retry budget, on the same track', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup();
+        fake.failOn.add('a');
+        fake.failCode = 'network';
+
+        await player.setQueue(tracks.slice(0, 2));
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        await wait(LOAD_RETRY_DELAYS_MS[1]);
+
+        expect(fake.loaded).toEqual(['a', 'a', 'a']);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+        expect(player.error()).toMatchObject({ trackId: 'a', code: 'network' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries a thrown engine load failure as an unknown engine error', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup();
+        fake.failLoadOn.add('a');
+
+        await player.setQueue(tracks.slice(0, 2));
+        expect(fake.loaded).toEqual(['a']);
+        expect(player.status()).toBe('loading');
+
+        fake.failLoadOn.delete('a');
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        expect(fake.loaded).toEqual(['a', 'a']);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('playing');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry non-retryable engine errors (decode)', async () => {
+      const { player, ids, fake } = setup();
+      fake.failOn.add('a'); // decode
+
+      await player.setQueue(tracks.slice(0, 2));
+      expect(fake.loaded).toEqual(['a']);
+      expect(ids()).toBe('a');
+      expect(player.status()).toBe('error');
+      expect(player.retrying()).toBe(false);
+      expect(player.error()).toMatchObject({ trackId: 'a', code: 'decode' });
+      // Raw engine detail is not leaked into the user-facing copy.
+      expect(player.error()?.message).not.toContain('bad file');
+    });
+
+    it('does not retry when autoplay is false', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolves = 0;
+        const { player, ids } = setup({
+          resolve: async () => {
+            resolves++;
+            throw networkError();
+          },
+        });
+
+        await player.setQueue(tracks.slice(0, 3), { autoplay: false });
+        expect(resolves).toBe(1);
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+        expect(ids()).toBe('a');
+
+        await wait(10_000);
+        expect(resolves).toBe(1);
+        expect(ids()).toBe('a');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry a mid-track error after playback started', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, fake } = setup();
+        await player.setQueue(tracks.slice(0, 2));
+        expect(player.status()).toBe('playing');
+
+        fake.listener?.onError({ code: 'network', message: 'dropped' });
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+        expect(player.current()?.id).toBe('a');
+
+        await wait(10_000);
+        expect(fake.loaded).toEqual(['a']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honours a positive Retry-After hint capped at 3s', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolves = 0;
+        const busy = Object.assign(networkError('busy'), {
+          name: 'busy',
+          retryAfterSec: 30,
+        });
+        const { player } = setup({
+          resolve: async () => {
+            resolves++;
+            throw busy;
+          },
+        });
+
+        await player.setQueue(tracks.slice(0, 2));
+        expect(resolves).toBe(1);
+
+        await wait(2999);
+        expect(resolves).toBe(1);
+        await wait(1);
+        expect(resolves).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the transient mapping for a busy terminal error', async () => {
+      vi.useFakeTimers();
+      try {
+        const busy = Object.assign(new Error('busy'), { name: 'busy' });
+        const { player } = setup({
+          resolve: async () => {
+            throw busy;
+          },
+          transientError: (err) =>
+            err === busy ? 'Server is busy, try again in 5s.' : undefined,
+        });
+
+        await player.setQueue(tracks.slice(0, 3));
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        await wait(LOAD_RETRY_DELAYS_MS[1]);
+
+        expect(player.current()?.id).toBe('a');
+        expect(player.error()).toMatchObject({
+          trackId: 'a',
+          message: 'Server is busy, try again in 5s.',
+          transient: true,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry abort/auth/config/4xx resolve failures', async () => {
+      const cases: [string, unknown][] = [
+        ['AuthError', Object.assign(new Error('auth'), { name: 'AuthError' })],
+        [
+          'RemoteConfigError',
+          Object.assign(new Error('config'), { name: 'RemoteConfigError' }),
+        ],
+        [
+          'HttpError',
+          Object.assign(new Error('missing'), {
+            name: 'HttpError',
+            status: 404,
+          }),
+        ],
+        ['AbortedError', Object.assign(new Error('aborted'), { name: 'AbortedError' })],
+      ];
+      for (const [name, failure] of cases) {
+        vi.useFakeTimers();
+        try {
+          let resolves = 0;
+          const { player } = setup({
+            resolve: async () => {
+              resolves++;
+              throw failure;
+            },
+          });
+          await player.setQueue([track(name)]);
+          expect(resolves).toBe(1);
+          expect(player.status()).toBe('error');
+          expect(player.retrying()).toBe(false);
+          await wait(10_000);
+          expect(resolves).toBe(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
+
+    it('pausing during backoff cancels the retry and stays on the track', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolves = 0;
+        const { player, ids } = setup({
+          resolve: async () => {
+            resolves++;
+            throw networkError();
+          },
+        });
+
+        await player.setQueue(tracks.slice(0, 3));
+        expect(player.retrying()).toBe(true);
+        expect(player.status()).toBe('loading');
+
+        await player.pause();
+        expect(player.retrying()).toBe(false);
+        expect(player.status()).toBe('paused');
+        expect(ids()).toBe('a');
+
+        await wait(10_000);
+        expect(resolves).toBe(1);
+        expect(ids()).toBe('a');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('next during backoff cancels the stale retry for the old track', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup();
+        fake.failOn.add('a');
+        fake.failCode = 'network';
+
+        await player.setQueue(tracks.slice(0, 3));
+        expect(player.retrying()).toBe(true);
+        expect(ids()).toBe('a');
+
+        expect(await player.next()).toBe(true);
+        expect(ids()).toBe('b');
+        expect(player.status()).toBe('playing');
+
+        // Neither the cancelled backoff nor a stale attempt may override b.
+        await wait(10_000);
+        expect(ids()).toBe('b');
+        expect(fake.loaded).toEqual(['a', 'b']);
+        expect(player.status()).toBe('playing');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('manual play after a terminal error retries the same track', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolves = 0;
+        const { player, ids } = setup({
+          resolve: async (t) => {
+            resolves++;
+            if (resolves <= 3) throw networkError();
+            return { url: `/${t.id}.mp3`, kind: 'bundled' };
+          },
+        });
+
+        await player.setQueue(tracks.slice(0, 2));
+        await wait(LOAD_RETRY_DELAYS_MS[0]);
+        await wait(LOAD_RETRY_DELAYS_MS[1]);
+        expect(player.status()).toBe('error');
+        expect(ids()).toBe('a');
+
+        await player.play();
+        expect(resolves).toBe(4);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('playing');
+        expect(player.error()).toBeNull();
+        expect(player.retrying()).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
-  it('stops skipping when every track fails', async () => {
-    const { player, fake } = setup();
-    ['a', 'b', 'c'].forEach((id) => fake.failOn.add(id));
-    player.setRepeat('all');
-    vi.useFakeTimers();
-    try {
-      await player.setQueue(tracks.slice(0, 3));
-      // Chained skips are spaced out: the second waits ~1s.
-      await vi.advanceTimersByTimeAsync(10);
-      expect(fake.loaded.length).toBe(2);
-      await vi.advanceTimersByTimeAsync(1000);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(player.status()).toBe('error');
-    expect(fake.loaded.length).toBe(3);
-  });
+  describe('onSkipped track id', () => {
+    it('ignores a skip whose trackId is not the expected neighbour', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(timedTracks(), { startIndex: 0 });
+      await flush();
 
-  it('does not skip on a busy server or while loading paused (startup restore)', async () => {
-    const fake = new FakeEngine();
-    let resolves = 0;
-    const busy = Object.assign(new Error('busy'), { name: 'busy' });
-    const player = new PlayerEngine(
-      fake,
-      async () => {
-        resolves++;
-        throw busy;
-      },
-      {
-        transientError: (err) =>
-          err === busy ? 'Server is busy, try again in 5s.' : undefined,
-      },
-    );
-    await player.setQueue(tracks.slice(0, 3));
-    await flush();
-    expect(resolves).toBe(1);
-    expect(player.current()?.id).toBe('a');
-    expect(player.error()).toMatchObject({
-      message: 'Server is busy, try again in 5s.',
-      transient: true,
+      nativeSkip(fake, 'next', 'c');
+      await flush();
+      expect(player.current()?.id).toBe('a');
+      expect(fake.loaded).toEqual(['a']);
+
+      nativeSkip(fake, 'next', 'b');
+      await flush();
+      expect(player.current()?.id).toBe('b');
     });
 
-    // Restoring a saved queue paused must not walk (and autoplay) the queue.
-    const offline = new PlayerEngine(new FakeEngine(), async () => {
-      throw new Error('offline');
+    it('still accepts a skip without a trackId', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(timedTracks(), { startIndex: 1 });
+
+      nativeSkip(fake, 'next');
+      await flush();
+      expect(player.current()?.id).toBe('c');
     });
-    await offline.setQueue(tracks.slice(0, 3), { autoplay: false });
-    await flush();
-    expect(offline.current()?.id).toBe('a');
-    expect(offline.status()).toBe('error');
+
+    it('verifies the expected neighbour for a previous skip', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(timedTracks(), { startIndex: 1 });
+
+      nativeSkip(fake, 'previous', 'c');
+      await flush();
+      expect(player.current()?.id).toBe('b');
+
+      nativeSkip(fake, 'previous', 'a');
+      await flush();
+      expect(player.current()?.id).toBe('a');
+    });
   });
 
   describe('applyOrder', () => {
@@ -333,21 +684,42 @@ describe('PlayerEngine', () => {
       expect(fake.seeks.at(-1)).toBe(5);
     });
 
-    it('refreshes the neighbour window after an in-place order change', async () => {
+    it('refreshes the neighbour window when an in-place order change alters it', async () => {
       const { player, fake } = setup({ wantsNeighbours: true });
-      await player.setQueue([track('a'), track('b')], { startIndex: 0 });
+      await player.setQueue(
+        [track('a'), track('b'), track('c')],
+        { startIndex: 0 },
+      );
       const loads = fake.loaded.length;
 
       const result = await player.applyOrder(
-        [track('a'), track('b'), track('c')],
+        [track('a'), track('c'), track('b')],
         0,
       );
       await flush();
 
       expect(result).toEqual({ reloaded: false, moved: false });
       expect(fake.loaded.length).toBe(loads + 1);
-      expect(fake.neighbours.at(-1)?.next?.id).toBe('b');
+      expect(fake.neighbours.at(-1)?.next?.id).toBe('c');
       expect(fake.neighbours.at(-1)?.previous).toBeUndefined();
+    });
+
+    it('skips a neighbour refresh when the window and repeat mode are unchanged', async () => {
+      const { player, fake } = setup({ wantsNeighbours: true });
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      const loads = fake.loaded.length;
+
+      // Same previous/current/next and repeat: nothing to re-send.
+      player.setRepeat('off');
+      player.setShuffle(false);
+      await player.applyOrder(tracks.slice(0, 3), 1);
+      await flush();
+      expect(fake.loaded.length).toBe(loads);
+
+      // Repeat is part of the window signature, so a real change refreshes.
+      player.setRepeat('all');
+      await flush();
+      expect(fake.loaded.length).toBe(loads + 1);
     });
 
     it('clears pending play-next entries when a session order is applied', async () => {
@@ -510,7 +882,7 @@ describe('PlayerEngine', () => {
 
       // A neighbour is queued, so the native layer advances on its own and
       // reports a skip instead of an end (also when the WebView was suspended).
-      fake.listener?.onSkipped('next');
+      nativeSkip(fake, 'next', 'b');
       await flush();
 
       expect(player.lastPlay()?.track.id).toBe('a');
@@ -534,7 +906,7 @@ describe('PlayerEngine', () => {
       await player.setQueue([timed('a', 5), timed('b', 5)]);
       listen(fake, 1, 2);
 
-      fake.listener?.onSkipped('next');
+      nativeSkip(fake, 'next', 'b');
       await flush();
 
       expect(player.current()?.id).toBe('b');
@@ -546,7 +918,7 @@ describe('PlayerEngine', () => {
       await player.setQueue([timed('a', 200), timed('b', 200)]);
       listen(fake, 1, 100);
 
-      fake.listener?.onSkipped('next');
+      nativeSkip(fake, 'next', 'b');
       await flush();
 
       expect(player.current()?.id).toBe('b');
@@ -554,7 +926,7 @@ describe('PlayerEngine', () => {
     });
 
     it('never counts a failed load', async () => {
-      const { player, fake } = setup({ skipOnError: false });
+      const { player, fake } = setup();
       fake.failOn.add('a');
       await player.setQueue([timed('a', 100)]);
       await flush();

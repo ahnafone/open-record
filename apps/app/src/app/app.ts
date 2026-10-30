@@ -28,7 +28,7 @@ import { AuthStore, LibraryStore, PlayerStore, PlaylistsStore } from '@open-reco
 // intentionally eager even though the Now Playing page itself is lazy.
 // eslint-disable-next-line @nx/enforce-module-boundaries
 import { OrDevicePicker } from '@open-record/features/now-playing';
-import { OrToastHost, OrViewport } from '@open-record/ui';
+import { OrToast, OrToastHost, OrViewport } from '@open-record/ui';
 import type { ScreenData } from './app.routes';
 import { OrDrawer } from './shell/drawer';
 import { OrMiniPlayer } from './shell/mini-player';
@@ -90,6 +90,10 @@ export class App {
 
   private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthStore);
+  private readonly toast = inject(OrToast);
+
+  /** Last surfaced local playback failure, so one error toasts once. */
+  private lastPlaybackError = '';
 
   /** The "Sign in to continue" modal, loaded with the account chunk on first use. */
   protected readonly signInPrompt = signal<Type<unknown> | null>(null);
@@ -155,6 +159,20 @@ export class App {
     // A password reset link signs the user in; take them to the new-password form.
     effect(() => {
       if (this.auth.recovering()) void this.router.navigateByUrl('/account');
+    });
+
+    // Surface a terminal local playback failure once (the overlays stay). A
+    // retry or a fallback/remote notice is not an error toast.
+    effect(() => {
+      const error = this.player.playbackError();
+      if (!error) {
+        this.lastPlaybackError = '';
+        return;
+      }
+      const key = `${error.trackId}|${error.code}|${error.message}`;
+      if (key === this.lastPlaybackError) return;
+      this.lastPlaybackError = key;
+      untracked(() => this.toast.show(error.message, 4000));
     });
 
     this.router.events
