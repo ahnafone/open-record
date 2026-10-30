@@ -69,6 +69,14 @@ export function loadOrCreateCastSecret(dataDir: string): Buffer {
   return secret;
 }
 
+/** How the relay actually served an entry's bytes (set by the first request). */
+export interface RelayStreamInfo {
+  /** True when the bytes are ffmpeg-produced ADTS AAC rather than the source. */
+  transcoded: boolean;
+  /** Seconds into the source the transcode started at; 0 for passthrough. */
+  offsetSec: number;
+}
+
 export interface RelayEntry {
   /** The id the HMAC signs. */
   id: string;
@@ -82,6 +90,8 @@ export interface RelayEntry {
     headers?: Record<string, string>;
     expiresAt?: number;
   };
+  /** Set once the relay route picked a streaming mode for this entry. */
+  stream?: RelayStreamInfo;
   expiresAt: number;
   createdAt: number;
 }
@@ -179,6 +189,21 @@ export class MediaRelay {
   setResolved(id: string, resolved: RelayEntry['resolved']): void {
     const entry = this.entries.get(id);
     if (entry) entry.resolved = resolved;
+  }
+
+  /**
+   * Records how the entry is being served so `CastService` can map the
+   * receiver's clock back onto the real track position (a no-op when unknown).
+   */
+  setStream(id: string, info: RelayStreamInfo): void {
+    const entry = this.entries.get(id);
+    if (entry) entry.stream = { ...info };
+  }
+
+  /** Streaming mode for a live entry, or undefined until its first request. */
+  streamInfo(id: string): RelayStreamInfo | undefined {
+    const stream = this.entries.get(id)?.stream;
+    return stream ? { ...stream } : undefined;
   }
 
   /** Upload ids referenced by live entries, so the upload cache keeps them. */

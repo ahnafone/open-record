@@ -10,8 +10,11 @@ import {
   type SessionSnapshot,
   type SessionTarget,
   type SessionUnchanged,
+  type Track,
 } from '@open-record/models';
+import type { LocalFileStore } from '@open-record/providers/local';
 import {
+  CastFilePort,
   CastUploadPort,
   SessionPort,
   type SessionConnectionState,
@@ -1099,6 +1102,54 @@ export class NativeSession extends BaseSession {
       document.removeEventListener('visibilitychange', this.onVisibility);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cast files (web only)
+// ---------------------------------------------------------------------------
+
+export interface ServerCastFilesOptions {
+  /** Test seam; defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * `CastFilePort` over the browser's own file store: resolve the stored path to
+ * a web-view URL (an IndexedDB object URL on the web) and read it as a Blob.
+ * A missing `sourceFile` or unreadable file resolves `undefined` so the store
+ * maps it to `cast-upload-unavailable`; it never throws for those cases.
+ */
+export class ServerCastFiles extends CastFilePort {
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(
+    private readonly fileStore: LocalFileStore,
+    options: ServerCastFilesOptions = {},
+  ) {
+    super();
+    this.fetchImpl =
+      options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+  }
+
+  async bytes(track: Track): Promise<Blob | undefined> {
+    const sourceFile = track.sourceFile;
+    if (!sourceFile) return undefined;
+    try {
+      const url = await this.fileStore.url(sourceFile);
+      const response = await this.fetchImpl(url);
+      if (!response.ok) return undefined;
+      return await response.blob();
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+export function createCastFiles(
+  fileStore: LocalFileStore,
+  opts?: ServerCastFilesOptions,
+): CastFilePort {
+  return new ServerCastFiles(fileStore, opts);
 }
 
 // ---------------------------------------------------------------------------

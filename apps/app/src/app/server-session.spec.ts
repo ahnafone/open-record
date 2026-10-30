@@ -1,9 +1,11 @@
-import type { SessionDevice, SessionServerMessage } from '@open-record/models';
+import type { SessionDevice, SessionServerMessage, Track } from '@open-record/models';
+import type { LocalFileStore } from '@open-record/providers/local';
 import {
   NativeSession,
   SESSION_ACK_TIMEOUT_MS,
   SessionHttp,
   WebSession,
+  createCastFiles,
   createCastUploads,
   createSessionPort,
   sessionWebSocketUrl,
@@ -398,5 +400,59 @@ describe('cast uploads', () => {
     await expect(
       uploads.upload(new Blob(['x']), 'cover.mp3'),
     ).rejects.toThrow('only available in the browser');
+  });
+});
+
+describe('cast files', () => {
+  const track: Track = {
+    id: 'local:a',
+    providerId: 'local',
+    title: 'Local A',
+    artist: 'Artist',
+    sourceFile: 'imported/a.mp3',
+  };
+
+  it('reads the stored file as a blob', async () => {
+    const fileStore = {
+      url: vi.fn(async () => 'blob:one'),
+    } as unknown as LocalFileStore;
+    const blob = new Blob(['audio']);
+    const fetchImpl = vi.fn(
+      async () => ({ ok: true, blob: async () => blob }) as Response,
+    ) as unknown as typeof fetch;
+
+    const files = createCastFiles(fileStore, { fetchImpl });
+
+    await expect(files.bytes(track)).resolves.toBe(blob);
+    expect(fileStore.url).toHaveBeenCalledWith('imported/a.mp3');
+    expect(fetchImpl).toHaveBeenCalledWith('blob:one');
+  });
+
+  it('resolves undefined without a sourceFile', async () => {
+    const fileStore = {
+      url: vi.fn(async () => 'blob:one'),
+    } as unknown as LocalFileStore;
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+
+    const files = createCastFiles(fileStore, { fetchImpl });
+
+    await expect(
+      files.bytes({ ...track, sourceFile: undefined }),
+    ).resolves.toBeUndefined();
+    expect(fileStore.url).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('resolves undefined on a non-ok response', async () => {
+    const fileStore = {
+      url: vi.fn(async () => 'blob:missing'),
+    } as unknown as LocalFileStore;
+    const fetchImpl = vi.fn(
+      async () => ({ ok: false }) as Response,
+    ) as unknown as typeof fetch;
+
+    const files = createCastFiles(fileStore, { fetchImpl });
+
+    await expect(files.bytes(track)).resolves.toBeUndefined();
   });
 });

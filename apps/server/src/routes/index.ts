@@ -5,8 +5,11 @@ import type { CastService } from '../services/cast';
 import type { MediaRelay } from '../services/media-relay';
 import type { SessionService } from '../services/session';
 import type { StreamResponse } from '../services/ytdlp';
+import type { FfmpegProbe, TranscodeFactory } from '../services/transcode';
+import type { UploadCache } from '../services/upload-cache';
 import type { ValidatedUrl } from '../services/url-guard';
 import { castRoutes } from './cast';
+import { castUploadRoutes } from './cast-uploads';
 import { appConfigRoutes, healthRoutes, pingRoutes } from './health';
 import { metaRoutes } from './meta';
 import { playlistRoutes } from './playlist';
@@ -24,11 +27,16 @@ export interface RouteOptions {
   // Phase 5 services; `relay` is null when casting is disabled.
   relay?: MediaRelay | null;
   cast?: CastService | null;
-  uploads?: unknown;
+  /** Upload cache for PC imports; null when casting or uploads are disabled. */
+  uploads?: UploadCache | null;
   /** Injected by `buildApp`; the relay falls back to the real resolver in tests. */
   resolveStream?: (url: string) => Promise<StreamResponse>;
   /** HTTPS/HTTP fetch validation; tests pin it to a local fixture. */
   validateRelayUrl?: (url: string) => Promise<ValidatedUrl>;
+  /** Transcode fallback seam; defaults to the real ffmpeg wrapper. */
+  transcode?: TranscodeFactory;
+  /** ffmpeg presence probe seam; defaults to the cached real probe. */
+  hasFfmpeg?: FfmpegProbe;
 }
 
 /**
@@ -47,4 +55,5 @@ export const routes: FastifyPluginAsync<RouteOptions>[] = [
   playlistRoutes,
   sessionRoutes,
   castRoutes,
+  castUploadRoutes,
 ];

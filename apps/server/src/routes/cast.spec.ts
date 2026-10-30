@@ -3,12 +3,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import { loadConfig, type ServerConfig } from '../config';
 import { MediaRelay } from '../services/media-relay';
 import type { MediaPlan } from '../services/media-plan';
+import { createTranscoder, ffmpegAvailable } from '../services/transcode';
+import { UploadCache } from '../services/upload-cache';
 import { UrlRejectedError, type ValidatedUrl } from '../services/url-guard';
 import type { StreamResponse } from '../services/ytdlp';
 import { castRoutes } from './cast';
@@ -35,6 +37,7 @@ function upstreamResponse(url: string): StreamResponse {
 describe('cast relay route', () => {
   let config: ServerConfig;
   let webDir: string;
+  let uploadsDir: string;
   let relay: MediaRelay;
   let upstream: Server;
   let upstreamBase: string;
@@ -47,6 +50,7 @@ describe('cast relay route', () => {
 
   beforeAll(async () => {
     webDir = await mkdtemp(join(tmpdir(), 'open-record-cast-route-'));
+    uploadsDir = await mkdtemp(join(tmpdir(), 'open-record-cast-uploads-route-'));
     await mkdir(join(webDir, 'catalog', 'audio'), { recursive: true });
     await writeFile(join(webDir, 'catalog', 'audio', 'song.mp3'), CATALOG_BODY);
     await writeFile(join(webDir, 'secret.mp3'), 'do not serve me');
@@ -134,14 +138,18 @@ describe('cast relay route', () => {
       upstream.closeAllConnections();
     });
     await rm(webDir, { recursive: true, force: true });
+    await rm(uploadsDir, { recursive: true, force: true });
   });
 
   async function makeApp(
     overrides: {
       relay?: MediaRelay | null;
+      uploads?: UploadCache;
       resolve?: (url: string) => Promise<StreamResponse>;
       validate?: (url: string) => Promise<ValidatedUrl>;
       logger?: FastifyServerOptions['logger'];
+      transcode?: typeof createTranscoder;
+      hasFfmpeg?: typeof ffmpegAvailable;
     } = {},
   ): Promise<FastifyInstance> {
     const app = Fastify({ logger: overrides.logger ?? false });
@@ -149,8 +157,11 @@ describe('cast relay route', () => {
     await app.register(castRoutes, {
       config,
       relay: overrides.relay === undefined ? relay : overrides.relay,
+      uploads: overrides.uploads,
       resolveStream: overrides.resolve ?? resolver,
       validateRelayUrl: overrides.validate ?? validator,
+      transcode: overrides.transcode,
+      hasFfmpeg: overrides.hasFfmpeg,
     });
     await app.ready();
     return app;
@@ -189,6 +200,146 @@ describe('cast relay route', () => {
 
       // The per-entry resolved URL is reused; the page is not resolved twice.
       expect(resolveCalls).toBe(1);
+      expect(relay.verify(token)?.stream).toEqual({ transcoded: false, offsetSec: 0 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('answers 503 ffmpeg-missing for a source it cannot pass through', async () => {
+    const app = await makeApp({
+      resolve: async () => ({ url: `${upstreamBase}/audio`, mimeType: 'audio/webm', track }),
+      hasFfmpeg: async () => false,
+    });
+    try {
+      const result = await app.inject({
+        method: 'GET',
+        url: `/cast/relay/${mint({ kind: 'remote', pageUrl: 'https://page.example/webm' })}`,
+      });
+      expect(result.statusCode).toBe(503);
+      expect(result.json()).toEqual({ error: 'ffmpeg-missing' });
+      expect(upstreamHits).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('transcodes non-Cast-friendly audio to ADTS and honours ?offset', async () => {
+    const transcodeCalls: { ffmpegPath: string; offsetSec: number }[] = [];
+    const transcode = ((opts: { ffmpegPath: string; offsetSec: number }) => {
+      transcodeCalls.push(opts);
+      const stdin = new PassThrough();
+      const stream = new PassThrough();
+      stdin.pipe(stream);
+      return { stdin, stream, done: Promise.resolve(), kill: vi.fn() };
+    }) as unknown as typeof createTranscoder;
+
+    let mimeType = 'audio/webm';
+    const app = await makeApp({
+      resolve: async () => ({ url: `${upstreamBase}/audio`, mimeType, track }),
+      hasFfmpeg: async () => true,
+      transcode,
+    });
+    try {
+      const token = mint({ kind: 'remote', pageUrl: 'https://page.example/webm' });
+      const result = await app.inject({ method: 'GET', url: `/cast/relay/${token}` });
+      expect(result.statusCode).toBe(200);
+      expect(result.headers['content-type']).toBe('audio/aac');
+      // Explicitly not seekable: the receiver must not try byte ranges.
+      expect(result.headers['accept-ranges']).toBe('none');
+      expect(result.headers['cache-control']).toBe('no-store');
+      expect(result.headers['x-content-type-options']).toBe('nosniff');
+      expect(result.headers['content-disposition']).toBe('inline');
+      expect(result.rawPayload.equals(AUDIO_BODY)).toBe(true);
+      expect(transcodeCalls).toEqual([{ ffmpegPath: config.ffmpegPath, offsetSec: 0 }]);
+      expect(relay.verify(token)?.stream).toEqual({ transcoded: true, offsetSec: 0 });
+
+      // `?offset` forces the transcode path even for a Cast-friendly mime: only
+      // ffmpeg's input seek can honour a source offset.
+      mimeType = 'audio/mp4';
+      const restarted = await app.inject({
+        method: 'GET',
+        url: `/cast/relay/${mint({ kind: 'remote', pageUrl: 'https://page.example/mp4' })}?offset=42`,
+      });
+      expect(restarted.statusCode).toBe(200);
+      expect(restarted.headers['content-type']).toBe('audio/aac');
+      expect(transcodeCalls.at(-1)).toEqual({ ffmpegPath: config.ffmpegPath, offsetSec: 42 });
+
+      // A Range request must not hand ffmpeg a 206 slice of the source.
+      mimeType = 'audio/webm';
+      upstreamHits = 0;
+      const ranged = await app.inject({
+        method: 'GET',
+        url: `/cast/relay/${mint({ kind: 'remote', pageUrl: 'https://page.example/webm-range' })}`,
+        headers: { range: 'bytes=10-19' },
+      });
+      expect(ranged.statusCode).toBe(200);
+      expect(ranged.rawPayload.equals(AUDIO_BODY)).toBe(true);
+      expect(upstreamHits).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('supersedes the previous ffmpeg for a relay entry instead of stacking encoders', async () => {
+    interface FakeTranscoder {
+      stdin: PassThrough;
+      stream: PassThrough;
+      done: Promise<void>;
+      kill: ReturnType<typeof vi.fn>;
+    }
+    const transcoders: FakeTranscoder[] = [];
+    const transcodeCalls: { ffmpegPath: string; offsetSec: number }[] = [];
+    const transcode = ((opts: { ffmpegPath: string; offsetSec: number }) => {
+      transcodeCalls.push(opts);
+      const stdin = new PassThrough();
+      const stream = new PassThrough();
+      stdin.pipe(stream);
+      const transcoder: FakeTranscoder = {
+        stdin,
+        stream,
+        done: new Promise<void>(() => undefined),
+        // Ends the output so a superseded request's reply can complete.
+        kill: vi.fn(() => {
+          stdin.end();
+          stream.end();
+        }),
+      };
+      transcoders.push(transcoder);
+      return transcoder;
+    }) as unknown as typeof createTranscoder;
+
+    const app = await makeApp({
+      resolve: async () => ({ url: `${upstreamBase}/audio`, mimeType: 'audio/webm', track }),
+      hasFfmpeg: async () => true,
+      transcode,
+    });
+    try {
+      const url = `/cast/relay/${mint({ kind: 'remote', pageUrl: 'https://page.example/supersede' })}`;
+
+      const first = app.inject({ method: 'GET', url });
+      await vi.waitFor(() => expect(transcoders).toHaveLength(1));
+
+      // A receiver retry (same signed URL) while the first encoder still runs.
+      const second = app.inject({ method: 'GET', url });
+      await vi.waitFor(() => expect(transcoders).toHaveLength(2));
+      expect(transcoders[0].kill).toHaveBeenCalled();
+
+      const [firstResponse, secondResponse] = await Promise.all([first, second]);
+      expect(firstResponse.statusCode).toBe(200);
+      expect(secondResponse.statusCode).toBe(200);
+
+      // Both streams have torn down and unregistered: the second's kill now
+      // comes from its own cleanup, and a third GET starts a fresh encoder
+      // without a stale request's teardown firing.
+      await vi.waitFor(() => expect(transcoders[1].kill).toHaveBeenCalled());
+      const secondKills = transcoders[1].kill.mock.calls.length;
+      const third = await app.inject({ method: 'GET', url });
+      expect(third.statusCode).toBe(200);
+      expect(transcoders).toHaveLength(3);
+      expect(transcodeCalls).toHaveLength(3);
+      expect(transcoders[1].kill.mock.calls.length).toBe(secondKills);
+      expect(transcoders[2].kill).toHaveBeenCalled();
     } finally {
       await app.close();
     }
@@ -347,15 +498,49 @@ describe('cast relay route', () => {
     }
   });
 
-  it('answers 503 for an upload plan until Phase 6', async () => {
+  it('answers 503 for an upload plan when no upload cache is configured', async () => {
     const app = await makeApp();
     try {
       const result = await app.inject({
         method: 'GET',
-        url: `/cast/relay/${mint({ kind: 'upload', uploadId: 'upload-1' })}`,
+        url: `/cast/relay/${mint({ kind: 'upload', uploadId: `${'a'.repeat(64)}.mp3` })}`,
       });
       expect(result.statusCode).toBe(503);
       expect(result.json()).toEqual({ error: 'cast-disabled' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves an upload plan through the relay when an upload cache is configured', async () => {
+    const cache = new UploadCache({
+      dataDir: uploadsDir,
+      capBytes: 1024 * 1024,
+      maxUploadBytes: 1024 * 1024,
+      liveUploads: () => relay.liveUploads(),
+    });
+    const stored = await cache.store('user-1', Readable.from([AUDIO_BODY]), 'mp3');
+    const app = await makeApp({ uploads: cache });
+    try {
+      const token = mint({ kind: 'upload', uploadId: stored.uploadId });
+
+      const full = await app.inject({ method: 'GET', url: `/cast/relay/${token}` });
+      expect(full.statusCode).toBe(200);
+      expect(full.headers['content-type']).toBe('audio/mpeg');
+      expect(full.headers['content-length']).toBe(String(AUDIO_BODY.length));
+      expect(full.headers['accept-ranges']).toBe('bytes');
+      expect(full.headers['cache-control']).toBe('no-store');
+      expect(full.headers['x-content-type-options']).toBe('nosniff');
+      expect(full.rawPayload.equals(AUDIO_BODY)).toBe(true);
+
+      const ranged = await app.inject({
+        method: 'GET',
+        url: `/cast/relay/${token}`,
+        headers: { range: 'bytes=0-1' },
+      });
+      expect(ranged.statusCode).toBe(206);
+      expect(ranged.headers['content-range']).toBe(`bytes 0-1/${AUDIO_BODY.length}`);
+      expect(ranged.rawPayload.equals(AUDIO_BODY.subarray(0, 2))).toBe(true);
     } finally {
       await app.close();
     }

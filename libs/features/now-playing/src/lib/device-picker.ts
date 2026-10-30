@@ -85,6 +85,9 @@ export class DevicePickerService {
       (dismissed)="picker.close()"
     >
       @if (session.available()) {
+        @if (uploadText(); as progress) {
+          <p class="upload" aria-live="polite">{{ progress }}</p>
+        }
         @if (rows().length) {
           <div
             class="rows"
@@ -308,11 +311,17 @@ export class DevicePickerService {
       font-size: var(--type-body-sm-font-size);
     }
     .empty,
+    .upload,
     .hint {
       margin: 0;
       color: var(--color-muted);
       font-size: var(--type-body-sm-font-size);
       line-height: var(--type-body-sm-line-height);
+    }
+    .upload {
+      padding: 0 var(--spacing-sm) var(--spacing-xs);
+      font-size: var(--type-meta-font-size);
+      font-variant-numeric: tabular-nums;
     }
     .hint {
       font-size: var(--type-meta-font-size);
@@ -354,6 +363,14 @@ export class OrDevicePicker {
     return this.castTarget()?.castId ?? this.attemptedCastId();
   });
 
+  /** Upload progress while a cast transfer prepares this PC's local files. */
+  protected readonly uploadText = computed(() => {
+    if (!this.selecting()) return '';
+    const upload = this.session.castUpload();
+    if (!upload) return '';
+    return `Uploading ${Math.round(upload.fraction * 100)}%`;
+  });
+
   protected readonly errorText = computed(() => {
     const error = this.session.error();
     switch (error) {
@@ -367,6 +384,8 @@ export class OrDevicePicker {
         return 'Casting is turned off.';
       case 'cast-upload-unavailable':
         return 'Could not prepare local files for casting.';
+      case 'cast-local-pc-only':
+        return 'Open the web page on the server to cast this file.';
       case 'unknown-client':
         return 'That device is no longer available.';
       case 'no-session':

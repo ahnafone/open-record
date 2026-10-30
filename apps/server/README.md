@@ -43,8 +43,10 @@ the terminal and the QR code; anyone with it can use the server.
 - **yt-dlp**, installed with `pipx install yt-dlp`. It lands at
   `~/.local/bin/yt-dlp`, which shadows the older distro copy at
   `/usr/bin/yt-dlp`; keep `~/.local/bin` ahead of `/usr/bin` in `PATH`.
-- **ffmpeg 6+**, optional: needed by the planned casting work. The distro
-  package (`sudo apt install ffmpeg`, 6.1.1) satisfies it and resolves as
+- **ffmpeg 6+**, optional: transcodes sources Cast cannot play natively
+  (WebM/Ogg) while casting. Catalog and MP4/AAC tracks cast without it; the
+  other sources answer `503` instead. The distro package
+  (`sudo apt install ffmpeg`, 6.1.1) satisfies it and resolves as
   `/usr/bin/ffmpeg`.
 
 Then `npm install` once in the repository root.
@@ -145,6 +147,15 @@ is already set.
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
 | `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
+| `SESSION_ENABLED`   | `true`       | Share one playback session between signed-in devices and Cast speakers. Needs a Supabase account: the static token is refused (`403`) on `/session/*` and `/cast/uploads*`. |
+| `SESSION_IDLE_TIMEOUT_MIN` | `120` | Minutes without contact from any device before a session is dropped from memory. |
+| `SESSION_TARGET_STALE_MIN` | `30`  | Minutes the playing device may stay silent before the server pauses and clears the target. |
+| `CAST_ENABLED`      | `true`       | Discover Google Cast speakers over mDNS and relay audio to them. Inert unless sessions and `CAST_MEDIA_BASE_URL` are available. |
+| `CAST_MEDIA_BASE_URL` | (unset)    | URL the speaker uses to reach this server, e.g. `http://10.0.0.5:8787`. Casting stays off when unset. |
+| `CAST_RELAY_TTL_SEC` | `900`       | Lifetime of a relay token in seconds (60-86400), slid while the speaker keeps playing; the hard cap is 24 hours. |
+| `CAST_CACHE_MB`     | `2048`       | Per-account cap for uploaded PC imports; `0` disables uploads. Least-recently-used files are evicted, never the one the speaker is playing. |
+| `CAST_UPLOAD_MAX_MB` | `200`       | Largest accepted upload from the PC browser (1-4096). |
+| `FFMPEG_PATH`       | `ffmpeg`     | ffmpeg binary used to transcode sources Cast cannot play (WebM/Ogg). A missing binary only affects those sources, which answer `503`. |
 | `SUPABASE_JWT_SECRET` | (unset) | Optional. Also accept signed-in users' Supabase access tokens (HS256, shared-secret projects; at least 32 characters). Local stack: "JWT secret" from `supabase status`. |
 | `SUPABASE_URL`      | (unset)      | Optional. Verifies asymmetric (ES256/RS256) Supabase tokens via `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, and is served at `GET /app-config` when `SUPABASE_ANON_KEY` is set. Must be `http(s)`. |
 | `SUPABASE_ANON_KEY` | (unset)      | Optional, public. With `SUPABASE_URL`, served at `GET /app-config` so the web app can sign in. Setting it without `SUPABASE_URL` is a startup error. |
@@ -246,6 +257,44 @@ cookies), so the server bounds how many run at once:
 - `/meta/enrich` only calls fixed public API hosts (`itunes.apple.com`,
   `api.deezer.com`, `musicbrainz.org`), never follows redirects, caps response
   size, and accepts `https` artwork links only.
+
+### Casting
+
+Cast speakers on the same LAN are discovered over mDNS (UDP 5353) and appear in
+the app's **Play on** picker; the server connects to the speaker's Cast port
+(8009). It hands the speaker one signed URL per track,
+`GET /cast/relay/<token>`, valid for `CAST_RELAY_TTL_SEC` (15 minutes, slid
+while the speaker plays, never past 24 hours). The token names exactly one
+track, is unguessable without the per-install secret
+(`<OPEN_RECORD_DATA_DIR>/cast-secret`, mode 0600), and is never written to the
+log.
+
+The relay serves whatever the server knows about that track:
+
+- **Catalog** tracks stream from `<WEB_DIR>/catalog/audio/` with Range support.
+- **Remote** (yt-dlp) tracks are resolved by the server, then proxied with
+  Range support. Only the source headers yt-dlp returned (User-Agent, Referer,
+  Origin) are forwarded. The resolved CDN URL is re-validated against the
+  private-address guard and fetched over a pinned DNS lookup; redirects (at
+  most three) are re-validated per hop.
+- Sources Cast cannot play natively (WebM, Ogg), or a request carrying
+  `?offset=<sec>`, are transcoded to ADTS AAC by `ffmpeg` fed over stdin, so
+  ffmpeg never opens the network itself. Those responses are chunked, have no
+  byte ranges, and seeking restarts the track on the speaker. Without ffmpeg
+  they answer `503 ffmpeg-missing`.
+- **PC-browser imports** are uploaded once from the web page this server
+  serves (`POST /cast/uploads`, multipart, `CAST_UPLOAD_MAX_MB` per file) and
+  become `upload` plans. Files live in
+  `<OPEN_RECORD_DATA_DIR>/cast/<userId>/<sha256>.<ext>`, are deduplicated by
+  content, and are capped per account by `CAST_CACHE_MB` (LRU, never evicting
+  a live file). `GET /cast/uploads/usage` and `DELETE /cast/uploads` are
+  scoped to the caller; **Clear cast cache** in the app calls the latter. A
+  phone's own imports never leave the phone.
+
+Sessions and uploads need an account: `/session/*` and `/cast/uploads*` answer
+`403` to the static token. Sessions live in memory, so restarting the server
+ends one; a speaker that is already playing keeps its URL until the next
+command.
 
 ## Reaching it from your phone
 

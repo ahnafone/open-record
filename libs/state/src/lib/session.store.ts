@@ -45,6 +45,53 @@ const SEEK_TOLERANCE_SEC = 2;
 /** Window in which the same (entry, reason, playing) report is not sent twice. */
 const REPORT_DEDUPE_MS = 1000;
 
+/** Internal: a newer transfer aborted this upload batch; never shown as an error. */
+const CAST_UPLOAD_ABORTED = { ok: false, error: 'aborted' } as const;
+
+/** Uploaded ids keyed by session entry id, or the reason the batch was refused. */
+type CastUploadBatch =
+  | { ok: true; ids: Map<string, string> }
+  | { ok: false; error: string };
+
+/** Extensions the upload route accepts; it rejects any other multipart name. */
+const CAST_UPLOAD_EXTS = new Set([
+  'mp3',
+  'm4a',
+  'aac',
+  'ogg',
+  'opus',
+  'flac',
+  'wav',
+]);
+
+/** Fallback when the stored path has no allow-listed extension. */
+const CAST_MIME_EXTS: Readonly<Record<string, string>> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/flac': 'flac',
+  'audio/wav': 'wav',
+};
+
+/**
+ * Upload name extension: the stored file's own suffix first (`.audio.mp3`),
+ * then the blob's mime type, then `mp3`. The server derives the stored file
+ * type from the multipart filename, so it must be one of the allow-listed
+ * extensions or the upload is rejected (`400 bad-file`).
+ */
+function castUploadExtension(track: Track, blob: Blob): string {
+  const sourceFile = track.sourceFile ?? '';
+  const base = sourceFile.slice(sourceFile.lastIndexOf('/') + 1);
+  const dot = base.lastIndexOf('.');
+  if (dot >= 0) {
+    const ext = base.slice(dot + 1).toLowerCase();
+    if (CAST_UPLOAD_EXTS.has(ext)) return ext;
+  }
+  const mime = blob.type.split(';')[0]?.trim().toLowerCase() ?? '';
+  return CAST_MIME_EXTS[mime] ?? 'mp3';
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong.';
 }
@@ -85,6 +132,12 @@ export class SessionStore {
   readonly error = signal<string | null>(null);
   /** A web target's autoplay was refused; the UI offers a one-tap resume. */
   readonly needsGesture = signal(false);
+  /** Progress of the current cast upload batch; null when idle/finished/aborted. */
+  readonly castUpload = signal<{
+    done: number;
+    total: number;
+    fraction: number;
+  } | null>(null);
 
   readonly target = computed(() => this.session()?.target ?? null);
   readonly isTarget = computed(() =>
@@ -93,6 +146,10 @@ export class SessionStore {
   readonly mirroring = computed(() => !!this.target() && !this.isTarget());
   readonly ownsPlayback = computed(() => !!this.target());
   readonly targetStale = computed(() => this.session()?.targetStale === true);
+  /** The cast stream is transcoded, so seeking restarts it on the speaker. */
+  readonly castSeekRestarts = computed(
+    () => this.session()?.castSeekRestarts === true,
+  );
 
   readonly remoteEntries = computed<readonly SessionEntry[]>(() => {
     const order = this.session()?.order ?? [];
@@ -192,6 +249,10 @@ export class SessionStore {
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private lastReportKey = '';
   private lastReportKeyAt = 0;
+  /** `track.id` + `sourceFile` → server upload id, so a retry uploads once. */
+  private readonly castUploadIds = new Map<string, string>();
+  /** The upload batch a new transfer (or sign-out) aborts. */
+  private castUploadAbort: AbortController | null = null;
 
   constructor() {
     this.clientId.set(newClientId());
@@ -320,10 +381,16 @@ export class SessionStore {
   }
 
   async transferTo(target: SessionTarget): Promise<boolean> {
+    // A new transfer supersedes any upload batch for the queue being left.
+    this.abortCastUploads();
     if (target.kind === 'cast') {
       const prepared = await this.prepareCastUploads();
       if (!prepared.ok) {
-        this.error.set(prepared.error ?? 'cast-upload-unavailable');
+        // Aborted on purpose: a newer transfer owns playback now, so this one
+        // resolves as not-moved without a toast.
+        if (prepared.error !== CAST_UPLOAD_ABORTED.error) {
+          this.error.set(prepared.error ?? 'cast-upload-unavailable');
+        }
         return false;
       }
     }
@@ -356,6 +423,8 @@ export class SessionStore {
     cursor: number,
     opts: { shuffle: boolean; repeat: RepeatMode; autoplay: boolean },
   ): Promise<readonly string[] | null> {
+    // A queue change supersedes any upload batch for the queue being replaced.
+    this.abortCastUploads();
     if (!this.port || !this.available()) {
       this.error.set('Sessions are not available.');
       return null;
@@ -364,7 +433,26 @@ export class SessionStore {
     this.deviceId.set(this.settings.deviceId());
     this.error.set(null);
 
-    const entries = order.map((track) => toSessionTrack(track, newEntryId()));
+    let entries = order.map((track) => toSessionTrack(track, newEntryId()));
+
+    // A new queue started while a speaker owns playback is queued ON the
+    // speaker, so its `local:` imports must be uploaded before `setQueue`.
+    // A stale cast target does not count: this client takes playback over.
+    if (this.followsCastTarget()) {
+      const batch = await this.uploadLocalEntries(entries);
+      if (batch && !batch.ok) {
+        this.error.set(batch.error);
+        return null;
+      }
+      if (batch) {
+        entries = entries.map((entry) => {
+          const uploadId = batch.ids.get(entry.entryId);
+          return uploadId ? { ...entry, uploadId } : entry;
+        });
+      }
+      this.castUpload.set(null);
+    }
+
     const setQueue: SessionCommand = {
       type: 'setQueue',
       order: entries,
@@ -381,6 +469,16 @@ export class SessionStore {
     if (!result.ok) {
       this.error.set(result.error ?? 'Could not start playback.');
       return null;
+    }
+
+    // The server accepted the queue: remember the uploads now so the next cast
+    // transfer reuses them instead of reading and uploading the files again.
+    for (let i = 0; i < entries.length; i++) {
+      const uploadId = entries[i]?.uploadId;
+      const track = order[i];
+      if (uploadId && track) {
+        this.castUploadIds.set(this.castUploadKey(track), uploadId);
+      }
     }
 
     // The server keeps its repeat mode across setQueue, so set it explicitly
@@ -462,7 +560,25 @@ export class SessionStore {
     retainedBytes: number;
   }> {
     if (!this.uploads) return { freedBytes: 0, retainedBytes: 0 };
-    return this.uploads.clear();
+    const result = await this.uploads.clear();
+    // The server dropped those files: cached ids must not be reused.
+    this.castUploadIds.clear();
+    return result;
+  }
+
+  /** Server-side cast cache usage; null when this platform cannot upload. */
+  async castCacheUsage(): Promise<{
+    bytes: number;
+    count: number;
+    cap: number;
+  } | null> {
+    if (!this.uploads) return null;
+    try {
+      return await this.uploads.usage();
+    } catch {
+      // Unreachable/disabled server: the line is simply hidden.
+      return null;
+    }
   }
 
   // ---- Connection ---------------------------------------------------------
@@ -563,6 +679,7 @@ export class SessionStore {
     this.devicesRevision.set(-1);
     this.reconciledRevision = -1;
     this.trackCache.clear();
+    this.resetCastUploads();
     this.stopClock();
     this.stopKeepalive();
   }
@@ -579,6 +696,7 @@ export class SessionStore {
 
   private stop(): void {
     this.started = false;
+    this.resetCastUploads();
     this.disconnectOnly();
     this.unsubscribeChange?.();
     this.unsubscribeChange = undefined;
@@ -846,17 +964,55 @@ export class SessionStore {
   // ---- Cast ---------------------------------------------------------------
 
   /**
-   * Upload the queue's `local:` entries before a cast transfer, replacing
-   * each entry with `{ uploadId }`. All files are read and uploaded before the
-   * first `replace` is sent, so a missing file leaves the session untouched.
-   * Without both ports the transfer is refused (`cast-upload-unavailable`);
-   * the actual upload route lands in Phase 6.
+   * Transfer-time wrapper: upload the session's `local:` entries, then stamp
+   * each successful id onto its entry with a `replace`. All files are read
+   * before the first command, so a missing file leaves the session untouched.
    */
   private async prepareCastUploads(): Promise<CommandResult> {
     const state = this.session();
     if (!state) return { ok: false, error: 'no-session' };
-    const locals = state.order.filter((entry) => entry.local);
-    if (!locals.length) return { ok: true };
+    const batch = await this.uploadLocalEntries(state.order);
+    if (!batch) return { ok: true };
+    if (!batch.ok) return batch;
+
+    for (const entry of state.order) {
+      const uploadId = batch.ids.get(entry.entryId);
+      if (!uploadId) continue;
+      const replaced = await this.command({
+        type: 'replace',
+        entryId: entry.entryId,
+        track: { ...entry, uploadId, local: undefined },
+      });
+      if (!replaced.ok) return replaced;
+      // Only remember an id once its `replace` landed, so a failed replace
+      // re-uploads instead of pointing the server at a missing file.
+      const track = this.library.track(entry.id) ?? fromSessionTrack(entry);
+      this.castUploadIds.set(this.castUploadKey(track), uploadId);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Upload every `local:` entry in `entries`, skipping ids already cached.
+   * `null` when there is nothing local; on success the ids are keyed by
+   * `entryId` and every file has been read before the first upload starts.
+   *
+   * SECURITY: only the PC browser that can actually read the import may cast
+   * it. A phone's app-private files must never be uploaded, and an arbitrary
+   * page must not be able to ask this adapter to read local files. The origin
+   * equality check is the boundary: it proves the page was served by the
+   * download server that owns this session (`location.origin` is the page's
+   * true origin, not a URL we were handed), so the bytes are read in the same
+   * browser that imported them and POSTed only to that same origin.
+   */
+  private async uploadLocalEntries(
+    entries: readonly SessionTrack[],
+  ): Promise<CastUploadBatch | null> {
+    const locals = entries.filter((entry) => entry.local);
+    if (!locals.length) return null;
+    if (!this.canUploadLocalFiles()) {
+      return { ok: false, error: 'cast-local-pc-only' };
+    }
     const uploads = this.uploads;
     const files = this.files;
     if (!uploads || !files) {
@@ -864,30 +1020,124 @@ export class SessionStore {
     }
 
     try {
-      const blobs: { entry: SessionTrack; blob: Blob }[] = [];
+      const cached: { entry: SessionTrack; key: string; uploadId: string }[] =
+        [];
+      const pending: { entry: SessionTrack; key: string; track: Track }[] = [];
       for (const entry of locals) {
         const track = this.library.track(entry.id) ?? fromSessionTrack(entry);
+        const key = this.castUploadKey(track);
+        const uploadId = this.castUploadIds.get(key);
+        if (uploadId) cached.push({ entry, key, uploadId });
+        else pending.push({ entry, key, track });
+      }
+
+      // Read every uncached file first: a missing file must not upload half a
+      // queue, and must leave the session untouched. The multipart name needs
+      // an allow-listed extension (the server derives the stored type from it).
+      const blobs: {
+        entry: SessionTrack;
+        key: string;
+        blob: Blob;
+        name: string;
+      }[] = [];
+      for (const { entry, key, track } of pending) {
         const blob = await files.bytes(track);
         if (!blob) return { ok: false, error: 'cast-upload-unavailable' };
-        blobs.push({ entry, blob });
-      }
-      const uploaded: { entry: SessionTrack; uploadId: string }[] = [];
-      for (const { entry, blob } of blobs) {
-        const result = await uploads.upload(blob, `${entry.title}.audio`);
-        uploaded.push({ entry, uploadId: result.uploadId });
-      }
-      for (const { entry, uploadId } of uploaded) {
-        const replaced = await this.command({
-          type: 'replace',
-          entryId: entry.entryId,
-          track: { ...entry, uploadId, local: undefined },
+        blobs.push({
+          entry,
+          key,
+          blob,
+          name: `${entry.title}.${castUploadExtension(track, blob)}`,
         });
-        if (!replaced.ok) return replaced;
       }
-      return { ok: true };
+
+      const uploaded: { entry: SessionTrack; key: string; uploadId: string }[] =
+        [];
+      if (blobs.length) {
+        const total = blobs.length;
+        let done = 0;
+        const controller = new AbortController();
+        this.castUploadAbort = controller;
+        this.castUpload.set({ done: 0, total, fraction: 0 });
+        try {
+          for (const { entry, key, blob, name } of blobs) {
+            if (controller.signal.aborted) return CAST_UPLOAD_ABORTED;
+            const result = await uploads.upload(blob, name, {
+              signal: controller.signal,
+              onProgress: (fileFraction) => {
+                if (controller.signal.aborted) return;
+                const clamped = Math.min(1, Math.max(0, fileFraction));
+                this.castUpload.set({
+                  done,
+                  total,
+                  fraction: (done + clamped) / total,
+                });
+              },
+            });
+            if (controller.signal.aborted) return CAST_UPLOAD_ABORTED;
+            uploaded.push({ entry, key, uploadId: result.uploadId });
+            done++;
+            this.castUpload.set(
+              done >= total ? null : { done, total, fraction: done / total },
+            );
+          }
+        } catch (error) {
+          // A superseded batch resolves as not-moved; anything else is real.
+          if (controller.signal.aborted) return CAST_UPLOAD_ABORTED;
+          throw error;
+        } finally {
+          if (this.castUploadAbort === controller) {
+            this.castUploadAbort = null;
+            this.castUpload.set(null);
+          }
+        }
+      }
+
+      const ids = new Map<string, string>();
+      for (const { entry, uploadId } of [...cached, ...uploaded]) {
+        ids.set(entry.entryId, uploadId);
+      }
+      return { ok: true, ids };
     } catch (error) {
       return { ok: false, error: errorText(error) };
     }
+  }
+
+  /** The new queue will be queued on a responsive speaker (never this client). */
+  private followsCastTarget(): boolean {
+    return this.target()?.kind === 'cast' && !this.targetStale();
+  }
+
+  /**
+   * Only a same-origin web page served by the download server may upload a
+   * local import. Parse defensively: a missing/unparseable base URL refuses.
+   */
+  private canUploadLocalFiles(): boolean {
+    if (detectPlatform() !== 'web' || !this.files) return false;
+    try {
+      const page = globalThis.location?.origin;
+      const base = this.settings.downloadServerUrl().trim();
+      if (!page || !base) return false;
+      return new URL(page).origin === new URL(base).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  private castUploadKey(track: Track): string {
+    return `${track.id}\u0000${track.sourceFile ?? ''}`;
+  }
+
+  private abortCastUploads(): void {
+    const controller = this.castUploadAbort;
+    this.castUploadAbort = null;
+    this.castUpload.set(null);
+    controller?.abort();
+  }
+
+  private resetCastUploads(): void {
+    this.abortCastUploads();
+    this.castUploadIds.clear();
   }
 
   // ---- Clocks -------------------------------------------------------------

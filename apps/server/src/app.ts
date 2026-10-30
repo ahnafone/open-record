@@ -21,6 +21,7 @@ import { CastService } from './services/cast';
 import { CastDiscovery } from './services/cast-discovery';
 import { loadOrCreateCastSecret, MediaRelay } from './services/media-relay';
 import { SessionService } from './services/session';
+import { UploadCache } from './services/upload-cache';
 import { configureResolveLimits, resolveStream, type StreamResponse } from './services/ytdlp';
 import { validateUrl, type ValidatedUrl } from './services/url-guard';
 
@@ -28,6 +29,8 @@ import { validateUrl, type ValidatedUrl } from './services/url-guard';
 export interface CastServices {
   relay: MediaRelay;
   cast?: CastService | null;
+  /** Upload cache for PC-imported audio; absent means `/cast/uploads*` is disabled. */
+  uploads?: UploadCache;
   resolveStream?: (url: string) => Promise<StreamResponse>;
   validateRelayUrl?: (url: string) => Promise<ValidatedUrl>;
 }
@@ -123,9 +126,17 @@ export async function buildApp(
       });
       const discovery = new CastDiscovery();
       const cast = new CastService({ relay, discovery, config });
+      // One cache per app: per-user cap (`CAST_CACHE_MB`) and the relay's live
+      // upload ids decide what may be evicted or cleared.
+      const uploads = new UploadCache({
+        dataDir: config.dataDir,
+        capBytes: config.castCacheMb * 1024 * 1024,
+        maxUploadBytes: config.castUploadMaxMb * 1024 * 1024,
+        liveUploads: () => relay.liveUploads(),
+      });
       discovery.start();
       attachCast(cast);
-      castServices = { relay, cast };
+      castServices = { relay, cast, uploads };
       ownedCast = { discovery, cast, relay };
     } else if (config.castEnabled && !castServices) {
       app.log.info('cast disabled: sessions or CAST_MEDIA_BASE_URL is unavailable');
@@ -147,6 +158,8 @@ export async function buildApp(
     sessions: sessions ?? undefined,
     relay: castServices?.relay ?? null,
     cast: castServices?.cast ?? null,
+    // RouteOptions.uploads stays `unknown` for now; the upload plugin narrows it.
+    uploads: castServices?.uploads,
     resolveStream:
       castServices?.resolveStream ?? ((url: string) => resolveStream(url, 'highest')),
     validateRelayUrl: castServices?.validateRelayUrl ?? validateUrl,

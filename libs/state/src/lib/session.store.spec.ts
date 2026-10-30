@@ -1,3 +1,4 @@
+// @vitest-environment-options { "url": "https://server.test/" }
 import { computed, signal } from '@angular/core';
 import type { Provider } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
@@ -259,6 +260,7 @@ interface SetupOptions {
   port?: FakePort | null;
   uploads?: CastUploadPort;
   files?: CastFilePort;
+  serverUrl?: string;
 }
 
 async function setup(options: SetupOptions = {}) {
@@ -267,7 +269,7 @@ async function setup(options: SetupOptions = {}) {
   const tracks = signal<ReadonlyMap<string, Track>>(new Map());
   const status = signal<AuthStatus>('signedIn');
   const deviceName = signal('Pixel 8');
-  const serverUrl = signal('https://server.test');
+  const serverUrl = signal(options.serverUrl ?? 'https://server.test');
   const sessionEnabled = signal(true);
   const settings = {
     ready: vi.fn(async () => undefined),
@@ -1084,8 +1086,83 @@ describe('SessionStore', () => {
     });
   });
 
-  it('refuses a cast transfer of local entries without upload ports', async () => {
-    const { store, port } = await setup();
+  it('refuses a phone local entry before any network call (no file port)', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const { store, port } = await setup({ uploads });
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          order: [wire('e0', 'local:a', { providerId: 'local', local: true })],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    const ok = await store.transferTo({ kind: 'cast', castId: 'cast-1' });
+
+    expect(ok).toBe(false);
+    expect(store.error()).toBe('cast-local-pc-only');
+    expect(uploads.upload).not.toHaveBeenCalled();
+    expect(port.commands).toHaveLength(0);
+  });
+
+  it('refuses a local cast upload from a page on another origin', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port } = await setup({
+      uploads,
+      files,
+      serverUrl: 'https://other.test',
+    });
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          order: [wire('e0', 'local:a', { providerId: 'local', local: true })],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    const ok = await store.transferTo({ kind: 'cast', castId: 'cast-1' });
+
+    expect(ok).toBe(false);
+    expect(store.error()).toBe('cast-local-pc-only');
+    expect(files.bytes).not.toHaveBeenCalled();
+    expect(uploads.upload).not.toHaveBeenCalled();
+    expect(port.commands).toHaveLength(0);
+  });
+
+  it('refuses a cast transfer of local entries when the upload adapter is missing', async () => {
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port } = await setup({ files });
     port.push(
       welcome(
         store,
@@ -1107,7 +1184,7 @@ describe('SessionStore', () => {
     expect(store.session()?.order[0]?.uploadId).toBeUndefined();
   });
 
-  it('uploads local entries before a cast transfer and clears the cast cache', async () => {
+  it('uploads a local entry once and reuses the upload id on a retry', async () => {
     const uploads: CastUploadPort = {
       upload: vi.fn(async () => ({
         uploadId: 'upload-1',
@@ -1141,11 +1218,147 @@ describe('SessionStore', () => {
     );
     await settle();
 
+    await expect(
+      store.transferTo({ kind: 'cast', castId: 'cast-1' }),
+    ).resolves.toBe(true);
+    await expect(
+      store.transferTo({ kind: 'cast', castId: 'cast-1' }),
+    ).resolves.toBe(true);
+
+    // Read and upload once; the second transfer only re-sends the replace.
+    expect(files.bytes).toHaveBeenCalledTimes(1);
+    expect(uploads.upload).toHaveBeenCalledTimes(1);
+    const replaces = port.commands.filter(
+      (entry) => entry.command.type === 'replace',
+    );
+    expect(replaces).toHaveLength(2);
+    expect(replaces[0]?.command).toEqual({
+      type: 'replace',
+      entryId: 'e0',
+      track: expect.objectContaining({ uploadId: 'upload-1' }),
+    });
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+  });
+
+  it('aborts the previous upload batch when a new transfer starts', async () => {
+    let firstSignal: AbortSignal | undefined;
+    let uploadCalls = 0;
+    const upload = vi.fn(
+      async (
+        _file: Blob,
+        _name: string,
+        opts?: {
+          signal?: AbortSignal;
+          onProgress?: (fraction: number) => void;
+        },
+      ) => {
+        uploadCalls++;
+        if (uploadCalls === 1) {
+          firstSignal = opts?.signal;
+          opts?.onProgress?.(0.5);
+          await new Promise<void>((_resolve, reject) => {
+            opts?.signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('aborted', 'AbortError')),
+              { once: true },
+            );
+          });
+        }
+        return {
+          uploadId: `upload-${uploadCalls}`,
+          sizeBytes: 10,
+          expiresAt: 0,
+        };
+      },
+    );
+    const uploads: CastUploadPort = {
+      upload,
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port } = await setup({ uploads, files });
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          order: [wire('e0', 'local:a', { providerId: 'local', local: true })],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+
+    const first = store.transferTo({ kind: 'cast', castId: 'cast-1' });
+    await settle();
+    expect(firstSignal).toBeDefined();
+    expect(store.castUpload()).toEqual({
+      done: 0,
+      total: 1,
+      fraction: 0.5,
+    });
+
+    const second = store.transferTo({ kind: 'cast', castId: 'cast-1' });
+    await expect(first).resolves.toBe(false);
+    expect(firstSignal?.aborted).toBe(true);
+    // A cancelled batch never surfaces an error toast.
+    expect(store.error()).toBeNull();
+
+    await expect(second).resolves.toBe(true);
+    expect(uploadCalls).toBe(2);
+    expect(store.castUpload()).toBeNull();
+  });
+
+  it('uploads local entries before a cast transfer and clears the cast cache', async () => {
+    const upload = vi.fn(async (_file: Blob, _name: string) => ({
+      uploadId: 'upload-1',
+      sizeBytes: 10,
+      expiresAt: Date.now() + 1000,
+    }));
+    const uploads: CastUploadPort = {
+      upload,
+      usage: vi.fn(async () => ({ bytes: 10, count: 1, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 10, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port, tracks } = await setup({ uploads, files });
+    const full: Track = {
+      id: 'local:a',
+      providerId: 'local',
+      title: 'Local A',
+      artist: 'Artist',
+      sourceFile: 'imported/a.mp3',
+    };
+    tracks.set(new Map([['local:a', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          order: [wire('e0', 'local:a', { providerId: 'local', local: true })],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+
     const ok = await store.transferTo({ kind: 'cast', castId: 'cast-1' });
 
     expect(ok).toBe(true);
     expect(files.bytes).toHaveBeenCalledWith(full);
     expect(uploads.upload).toHaveBeenCalledTimes(1);
+    // The stored path's real extension reaches the multipart filename: the
+    // server derives the cast file type from it.
+    expect(upload.mock.calls[0]?.[0]).toBeInstanceOf(Blob);
+    expect(upload.mock.calls[0]?.[1].endsWith('.mp3')).toBe(true);
     expect(port.commands.at(-2)?.command).toEqual({
       type: 'replace',
       entryId: 'e0',
@@ -1160,6 +1373,296 @@ describe('SessionStore', () => {
       freedBytes: 10,
       retainedBytes: 0,
     });
+  });
+
+  it('falls back to the blob mime type when the track has no sourceFile', async () => {
+    const upload = vi.fn(async (_file: Blob, _name: string) => ({
+      uploadId: 'upload-1',
+      sizeBytes: 10,
+      expiresAt: 0,
+    }));
+    const uploads: CastUploadPort = {
+      upload,
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const blob = new Blob(['audio'], { type: 'audio/flac' });
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => blob),
+    };
+    const { store, port, tracks } = await setup({ uploads, files });
+    const full: Track = {
+      id: 'local:b',
+      providerId: 'local',
+      title: 'Local B',
+      artist: 'Artist',
+    };
+    tracks.set(new Map([['local:b', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          order: [wire('e1', 'local:b', { providerId: 'local', local: true })],
+          cursor: 0,
+        }),
+      ),
+    );
+    await settle();
+
+    await expect(
+      store.transferTo({ kind: 'cast', castId: 'cast-1' }),
+    ).resolves.toBe(true);
+
+    expect(upload.mock.calls[0]?.[0]).toBe(blob);
+    expect(upload.mock.calls[0]?.[1].endsWith('.flac')).toBe(true);
+  });
+
+  it('uploads a new queue local import before queueing it on a cast target', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port, tracks } = await setup({ uploads, files });
+    const full: Track = {
+      id: 'local:a',
+      providerId: 'local',
+      title: 'Local A',
+      artist: 'Artist',
+      sourceFile: 'imported/a.mp3',
+    };
+    tracks.set(new Map([['local:a', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'cast', castId: 'cast-1' },
+          order: [],
+          cursor: -1,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    const ids = await store.startSession([full], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+
+    expect(ids).not.toBeNull();
+    expect(files.bytes).toHaveBeenCalledWith(full);
+    expect(uploads.upload).toHaveBeenCalledTimes(1);
+    const setQueue = port.commands.find(
+      (entry) => entry.command.type === 'setQueue',
+    )?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order[0]).toMatchObject({
+      id: 'local:a',
+      local: true,
+      uploadId: 'upload-1',
+    });
+    // The queue follows the speaker; this client does not take playback over.
+    expect(
+      port.commands.some((entry) => entry.command.type === 'transfer'),
+    ).toBe(false);
+  });
+
+  it('reuses a queued upload when the same cast is transferred to later', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port, tracks } = await setup({ uploads, files });
+    const full: Track = {
+      id: 'local:a',
+      providerId: 'local',
+      title: 'Local A',
+      artist: 'Artist',
+      sourceFile: 'imported/a.mp3',
+    };
+    tracks.set(new Map([['local:a', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'cast', castId: 'cast-1' },
+          order: [],
+          cursor: -1,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+
+    await store.startSession([full], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+    expect(uploads.upload).toHaveBeenCalledTimes(1);
+    expect(files.bytes).toHaveBeenCalledTimes(1);
+
+    // The server now holds the queued entry (as it would after setQueue).
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'cast', castId: 'cast-1' },
+          order: [
+            wire('e0', 'local:a', { providerId: 'local', local: true }),
+          ],
+          cursor: 0,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    await expect(
+      store.transferTo({ kind: 'cast', castId: 'cast-1' }),
+    ).resolves.toBe(true);
+
+    // The accepted setQueue upload is reused: no second read or upload.
+    expect(files.bytes).toHaveBeenCalledTimes(1);
+    expect(uploads.upload).toHaveBeenCalledTimes(1);
+    const replaced = port.commands.find(
+      (entry) => entry.command.type === 'replace',
+    )?.command;
+    if (replaced?.type !== 'replace') throw new Error('expected replace');
+    expect(replaced.track).toMatchObject({ uploadId: 'upload-1' });
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+  });
+
+  it('refuses to queue a phone local import on a cast before any command', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port, tracks } = await setup({
+      uploads,
+      files,
+      serverUrl: 'https://other.test',
+    });
+    const full: Track = {
+      id: 'local:a',
+      providerId: 'local',
+      title: 'Local A',
+      artist: 'Artist',
+      sourceFile: 'imported/a.mp3',
+    };
+    tracks.set(new Map([['local:a', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'cast', castId: 'cast-1' },
+          order: [],
+          cursor: -1,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    const ids = await store.startSession([full], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+
+    expect(ids).toBeNull();
+    expect(store.error()).toBe('cast-local-pc-only');
+    expect(uploads.upload).not.toHaveBeenCalled();
+    expect(port.commands).toHaveLength(0);
+  });
+
+  it('skips uploads when the cast target is stale and still queues', async () => {
+    const uploads: CastUploadPort = {
+      upload: vi.fn(async () => ({
+        uploadId: 'upload-1',
+        sizeBytes: 10,
+        expiresAt: 0,
+      })),
+      usage: vi.fn(async () => ({ bytes: 0, count: 0, cap: 100 })),
+      clear: vi.fn(async () => ({ freedBytes: 0, retainedBytes: 0 })),
+    };
+    const files: CastFilePort = {
+      bytes: vi.fn(async () => new Blob(['audio'])),
+    };
+    const { store, port, tracks } = await setup({ uploads, files });
+    const full: Track = {
+      id: 'local:a',
+      providerId: 'local',
+      title: 'Local A',
+      artist: 'Artist',
+      sourceFile: 'imported/a.mp3',
+    };
+    tracks.set(new Map([['local:a', full]]));
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'cast', castId: 'cast-1' },
+          targetStale: true,
+          order: [],
+          cursor: -1,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    port.commands.length = 0;
+
+    const ids = await store.startSession([full], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+
+    expect(ids).not.toBeNull();
+    expect(files.bytes).not.toHaveBeenCalled();
+    expect(uploads.upload).not.toHaveBeenCalled();
+    const setQueue = port.commands.find(
+      (entry) => entry.command.type === 'setQueue',
+    )?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order[0]?.uploadId).toBeUndefined();
+    // The speaker is stale, so this client takes playback over.
+    expect(
+      port.commands.some((entry) => entry.command.type === 'transfer'),
+    ).toBe(true);
   });
 
   it('stays inert without a SessionPort (local-only mode)', async () => {

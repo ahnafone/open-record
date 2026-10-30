@@ -69,6 +69,12 @@ export interface SessionState {
   /** Cast volume 0..1, when the target is a cast device. */
   castVolume?: number;
   /**
+   * The current cast stream is transcoded (no byte ranges), so a seek restarts
+   * the track on the speaker rather than jumping inside it. Clients may show a
+   * one-line hint; the server sets it from the relay's stream mode.
+   */
+  castSeekRestarts?: boolean;
+  /**
    * The target has sent no report/poll/WS contact for >90 s. Playback keeps
    * its last `playing`/anchor; controllers show "Not responding" and offer a
    * transfer. Cleared by any target contact. Bumps `revision` when it flips.

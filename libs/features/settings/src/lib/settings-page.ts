@@ -261,6 +261,16 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
         >
           {{ clearingCast() ? 'Clearing cast cache…' : 'Clear cast cache' }}
         </or-button>
+        @if (castUsage(); as usage) {
+          <dl class="usage cast" aria-live="polite">
+            <div class="usage-row">
+              <dt>Cast cache</dt>
+              <dd>
+                {{ formatBytes(usage.bytes) }} of {{ formatBytes(usage.cap) }}
+              </dd>
+            </div>
+          </dl>
+        }
       }
     </div>
 
@@ -665,6 +675,13 @@ export class SettingsPage {
     this.settings.deviceName(),
   );
   protected readonly clearingCast = signal(false);
+  /** Server-side cast cache usage; null hides the line (no adapter/offline). */
+  protected readonly castUsage = signal<{
+    bytes: number;
+    count: number;
+    cap: number;
+  } | null>(null);
+  private castUsageRun = 0;
 
   /** A stream server is paired (saved and applied, or at least a URL saved). */
   protected readonly serverPaired = computed(
@@ -758,6 +775,8 @@ export class SettingsPage {
       this.imported();
       untracked(() => void this.refreshUsage());
     });
+    // Cast cache usage is server-side; null on native/offline hides the line.
+    void this.refreshCastUsage();
   }
 
   protected onServerInput(event: Event): void {
@@ -883,7 +902,14 @@ export class SettingsPage {
       this.toast.show('Could not clear the cast cache. Try again.');
     } finally {
       this.clearingCast.set(false);
+      void this.refreshCastUsage();
     }
+  }
+
+  private async refreshCastUsage(): Promise<void> {
+    const run = ++this.castUsageRun;
+    const usage = await this.session.castCacheUsage();
+    if (run === this.castUsageRun) this.castUsage.set(usage);
   }
 
   protected setLocation(event: Event): void {

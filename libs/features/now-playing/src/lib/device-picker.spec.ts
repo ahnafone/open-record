@@ -79,6 +79,11 @@ function makeSession() {
     target: computed(() => state()?.target ?? null),
     targetStale: computed(() => state()?.targetStale === true),
     error: signal<string | null>(null),
+    castUpload: signal<{
+      done: number;
+      total: number;
+      fraction: number;
+    } | null>(null),
     transferTo: vi.fn(async () => true),
     takeOver: vi.fn(async () => true),
     command: vi.fn(async () => ({ ok: true })),
@@ -140,6 +145,16 @@ describe('OrDevicePicker', () => {
     // An offline cast row keeps its reason and is disabled.
     expect(rows[3].disabled).toBe(true);
     expect(rows[3].textContent).toContain('Nest Mini · Offline');
+  });
+
+  it('shows the PC hint for a phone local import', async () => {
+    await setup();
+    session.error.set('cast-local-pc-only');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'Open the web page on the server to cast this file.',
+    );
   });
 
   it('roves focus with arrows/Home/End and transfers on select', async () => {

@@ -915,6 +915,26 @@ export class SessionService {
     this.broadcast(room, { type: 'state', session: room.session });
   }
 
+  /**
+   * Marks the targeted cast stream as transcoded (a seek restarts the track on
+   * the speaker) or clears the hint. Ignored unless this cast is the target, so
+   * a release racing a transfer cannot write into the next session.
+   */
+  setCastSeekRestarts(userId: string, castId: string, value: boolean): void {
+    const room = this.rooms.get(userId);
+    if (!room) return;
+    const target = room.session.target;
+    if (target?.kind !== 'cast' || target.castId !== castId) return;
+    const now = this.nowFn();
+    if (value) room.session.castSeekRestarts = true;
+    else delete room.session.castSeekRestarts;
+    room.session.updatedBy = null;
+    room.session.positionSec = anchoredPosition(room.session, now);
+    room.session.revision += 1;
+    room.session.updatedAt = now;
+    this.broadcast(room, { type: 'state', session: room.session });
+  }
+
   /** Another user took over a cast device: pause this room and clear the target. */
   castLost(userId: string, castId: string): void {
     const room = this.rooms.get(userId);
@@ -928,6 +948,7 @@ export class SessionService {
     state.target = null;
     delete state.targetStale;
     delete state.castOwner;
+    delete state.castSeekRestarts;
     state.updatedBy = null;
     state.revision += 1;
     state.updatedAt = now;

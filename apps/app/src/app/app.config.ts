@@ -22,6 +22,7 @@ import {
   AuthPort,
   AuthStore,
   BackgroundWorkPort,
+  CastFilePort,
   CastUploadPort,
   DeviceStoragePort,
   ImportFilePort,
@@ -47,6 +48,7 @@ import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
 import {
+  createCastFiles,
   createCastUploads,
   createSessionPort,
   type ServerSessionOptions,
@@ -134,7 +136,7 @@ function sessionOptions(): ServerSessionOptions & {
   };
 }
 
-/** Cast uploads are a browser feature (a phone cannot cast a local import). */
+/** Cast uploads and local-file reads are a browser-only feature. */
 const castUploadProviders: Provider[] = Capacitor.isNativePlatform()
   ? []
   : [
@@ -145,6 +147,10 @@ const castUploadProviders: Provider[] = Capacitor.isNativePlatform()
             ...sessionOptions(),
             clientId: () => settings?.deviceId() || 'cast-upload',
           }),
+      },
+      {
+        provide: CastFilePort,
+        useFactory: () => createCastFiles(fileStore),
       },
     ];
 

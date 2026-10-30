@@ -974,6 +974,7 @@ describe('cast target operations', () => {
     });
     now += 10_000;
     const before = stateOf().revision;
+    service.setCastSeekRestarts('u', 'cast-1', true);
 
     service.castLost('u', 'cast-1');
     const state = stateOf();
@@ -981,8 +982,43 @@ describe('cast target operations', () => {
     expect(state.target).toBeNull();
     expect(state.targetStale).toBeUndefined();
     expect(state.castOwner).toBeUndefined();
-    expect(state.revision).toBe(before + 1);
+    expect(state.castSeekRestarts).toBeUndefined();
+    expect(state.revision).toBe(before + 2);
     expect(state.positionSec).toBeCloseTo(10);
+  });
+
+  it('sets and clears the transcoded seek hint only for the targeted cast', async () => {
+    castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    // No cast target yet: ignored without a revision bump.
+    const before = stateOf().revision;
+    service.setCastSeekRestarts('u', 'cast-1', true);
+    expect(stateOf().castSeekRestarts).toBeUndefined();
+    expect(stateOf().revision).toBe(before);
+
+    await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    now += 5_000;
+    const targeted = stateOf().revision;
+
+    service.setCastSeekRestarts('u', 'cast-1', true);
+    expect(stateOf().castSeekRestarts).toBe(true);
+    expect(stateOf().revision).toBe(targeted + 1);
+    expect(stateOf().positionSec).toBeCloseTo(5);
+
+    // Another speaker is not the target: ignored.
+    service.setCastSeekRestarts('u', 'cast-2', false);
+    expect(stateOf().castSeekRestarts).toBe(true);
+
+    service.setCastSeekRestarts('u', 'cast-1', false);
+    expect(stateOf().castSeekRestarts).toBeUndefined();
+
+    // A missing room is a no-op, not a crash.
+    expect(() => service.setCastSeekRestarts('nobody', 'cast-1', true)).not.toThrow();
   });
 
   it('forwards transport and volume commands to the cast target', async () => {

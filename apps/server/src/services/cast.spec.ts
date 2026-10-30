@@ -158,6 +158,7 @@ interface CallLog {
   reports: { userId: string; castId: string; report: SessionReportMessage }[];
   ended: { userId: string; castId: string }[];
   lost: { userId: string; castId: string }[];
+  seekRestarts: { userId: string; castId: string; value: boolean }[];
 }
 
 interface Harness {
@@ -166,6 +167,7 @@ interface Harness {
   transport: FakeTransport;
   sessions: {
     setUnavailable(userId: string, entryIds: readonly string[]): void;
+    setCastSeekRestarts(userId: string, castId: string, value: boolean): void;
     report(userId: string, castId: string, report: SessionReportMessage): void;
     castEnded(userId: string, castId: string): Promise<void>;
     castLost(userId: string, castId: string): void;
@@ -218,7 +220,7 @@ function createHarness(opts: HarnessOptions = {}): Harness {
 
   const discovery = new FakeDiscovery();
   const transports: FakeTransport[] = [];
-  const calls: CallLog = { unavailable: [], reports: [], ended: [], lost: [] };
+  const calls: CallLog = { unavailable: [], reports: [], ended: [], lost: [], seekRestarts: [] };
   let state = makeState({
     order: opts.queue ?? [],
     cursor: opts.cursor ?? ((opts.queue?.length ?? 0) > 0 ? 0 : -1),
@@ -249,6 +251,15 @@ function createHarness(opts: HarnessOptions = {}): Harness {
     setUnavailable(userId: string, entryIds: readonly string[]): void {
       calls.unavailable.push({ userId, entryIds: [...entryIds] });
       state = { ...state, unavailable: entryIds.length > 0 ? [...entryIds] : undefined };
+    },
+    setCastSeekRestarts(userId: string, castId: string, value: boolean): void {
+      calls.seekRestarts.push({ userId, castId, value });
+      if (value) state = { ...state, castSeekRestarts: true };
+      else {
+        const next = { ...state };
+        delete next.castSeekRestarts;
+        state = next;
+      }
     },
     report(userId: string, castId: string, report: SessionReportMessage): void {
       calls.reports.push({ userId, castId, report });
@@ -309,6 +320,18 @@ function remoteTrack(entryId: string, overrides: Partial<SessionTrack> = {}): Se
   };
 }
 
+/** A device-local import: `planFor` returns `unavailable/local-on-device`. */
+function localTrack(entryId: string): SessionTrack {
+  return {
+    entryId,
+    id: `local:${entryId}`,
+    providerId: 'local',
+    title: `Track ${entryId}`,
+    artist: 'Artist',
+    local: true,
+  };
+}
+
 function requester(deviceId = 'dev-1', name = 'Phone 1'): SessionDevice {
   return {
     id: `client-${deviceId}`,
@@ -347,6 +370,16 @@ async function castTo(h: Harness, castId = 'cast-1'): Promise<void> {
   await h.service.setTarget('u1', requester(), null, { castId, state: h.state() });
 }
 
+/** Marks the relay entry behind the last load as transcoded, like the route does. */
+function markTranscoded(h: Harness, offsetSec = 0): void {
+  const url = h.transport.loads.at(-1)?.url;
+  if (!url) throw new Error('nothing loaded');
+  const token = url.slice(url.indexOf('/cast/relay/') + '/cast/relay/'.length);
+  const entry = h.relay.verify(token);
+  if (!entry) throw new Error('relay token did not verify');
+  h.relay.setStream(entry.id, { transcoded: true, offsetSec });
+}
+
 // ---------------------------------------------------------------------------
 // setTarget
 // ---------------------------------------------------------------------------
@@ -354,7 +387,7 @@ async function castTo(h: Harness, castId = 'cast-1'): Promise<void> {
 describe('cast setTarget', () => {
   it('plans the queue, loads the current entry through the relay and marks unplayable rows', async () => {
     const h = createHarness({
-      queue: [remoteTrack('a'), remoteTrack('b'), remoteTrack('c', { uploadId: 'upload-1' })],
+      queue: [remoteTrack('a'), remoteTrack('b'), localTrack('c')],
       cursor: 0,
       playing: true,
     });
@@ -378,6 +411,30 @@ describe('cast setTarget', () => {
     // during a transfer (SessionService has not committed the clone yet).
     expect(h.state().unavailable).toEqual(['c']);
     expect(h.calls.unavailable).toEqual([]);
+  });
+
+  it('loads an upload entry with the content type from its extension', async () => {
+    const uploadId = `${'a'.repeat(64)}.flac`;
+    const h = createHarness({
+      queue: [remoteTrack('a', { uploadId })],
+      cursor: 0,
+      playing: true,
+    });
+
+    await castTo(h);
+
+    const loaded = h.transport.loads[0];
+    expect(loaded?.contentType).toBe('audio/flac');
+    expect(loaded?.url.startsWith(`${BASE_URL}/cast/relay/`)).toBe(true);
+
+    const token = loaded?.url.slice(`${BASE_URL}/cast/relay/`.length) ?? '';
+    expect(h.relay.verify(token)).toMatchObject({
+      userId: 'u1',
+      plan: { kind: 'upload', uploadId },
+    });
+    // A reachable plan, not a queue-wide rejection: the relay answers 410 later
+    // if the file is actually gone.
+    expect(h.state().unavailable).toBeUndefined();
   });
 
   it('applies the carried cast volume and stores the receiver-reported volume', async () => {
@@ -540,6 +597,71 @@ describe('cast control', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Transcode offsets
+// ---------------------------------------------------------------------------
+
+describe('cast transcode offsets', () => {
+  it('seeks a transcoded stream by restarting the entry at the offset', async () => {
+    const h = createHarness({ queue: [remoteTrack('a')], cursor: 0, playing: true });
+    await castTo(h);
+    const transport = h.transport;
+    markTranscoded(h);
+
+    // The relay reports the mode on the next status event.
+    transport.emitStatus({ playing: true, positionSec: 1, volume: 1 });
+    expect(h.state().castSeekRestarts).toBe(true);
+
+    await h.service.control('u1', 'cast-1', { type: 'seek', positionSec: 42 });
+
+    expect(transport.calls.filter((call) => call.startsWith('seek:'))).toEqual([]);
+    expect(transport.loads).toHaveLength(2);
+    expect(transport.loads[1]?.url).toContain('?offset=42');
+    expect(transport.loads[1]?.startSec).toBe(0);
+    expect(transport.loads[1]?.autoplay).toBe(true);
+    // Reported immediately after the restart, not from the old receiver clock.
+    expect(h.calls.reports.at(-1)?.report).toMatchObject({ reason: 'playing', positionSec: 42 });
+
+    // Receiver positions are relative to the restarted stream; the offset maps
+    // them back onto the real track.
+    now += 3_000;
+    transport.emitStatus({ playing: true, positionSec: 3, volume: 1 });
+    expect(h.calls.reports.at(-1)?.report.positionSec).toBeCloseTo(45);
+  });
+
+  it('still calls transport.seek for a passthrough stream', async () => {
+    const h = createHarness({ queue: [remoteTrack('a')], cursor: 0, playing: true });
+    await castTo(h);
+
+    await h.service.control('u1', 'cast-1', { type: 'seek', positionSec: 42 });
+
+    expect(h.transport.calls).toContain('seek:42');
+    expect(h.transport.loads).toHaveLength(1);
+    expect(h.state().castSeekRestarts).toBeUndefined();
+  });
+
+  it('clears the seek-restart hint on a fresh load and on release', async () => {
+    const h = createHarness({ queue: [remoteTrack('a'), remoteTrack('b')], cursor: 0, playing: true });
+    await castTo(h);
+    markTranscoded(h);
+    h.transport.emitStatus({ playing: true, positionSec: 1, volume: 1 });
+    expect(h.state().castSeekRestarts).toBe(true);
+
+    // next: a fresh load starts without a transcode until the relay says so.
+    h.setState({ ...h.state(), cursor: 1, positionSec: 0 });
+    await h.service.control('u1', 'cast-1', { type: 'next' });
+    expect(h.state().castSeekRestarts).toBeUndefined();
+
+    markTranscoded(h);
+    h.transport.emitStatus({ playing: true, positionSec: 1, volume: 1 });
+    expect(h.state().castSeekRestarts).toBe(true);
+
+    await h.service.setTarget('u1', requester(), 'cast-1', null);
+    expect(h.state().castSeekRestarts).toBeUndefined();
+    expect(h.calls.seekRestarts.map((entry) => entry.value)).toEqual([true, false, true, false]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Status and idle
 // ---------------------------------------------------------------------------
 
@@ -630,7 +752,7 @@ describe('cast status and idle', () => {
     // The next entry becomes unplayable between setTarget and the auto-advance.
     h.setState({
       ...h.state(),
-      order: [h.state().order[0] as SessionTrack, remoteTrack('b', { uploadId: 'upload-gone' })],
+      order: [h.state().order[0] as SessionTrack, localTrack('b')],
     });
     transport.emitStatus({ playing: false, positionSec: 120, volume: 1, idle: true });
     await settle();

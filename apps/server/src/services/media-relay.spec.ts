@@ -188,6 +188,22 @@ describe('MediaRelay lifetime', () => {
     expect(instance.verify(tokenOf(made.url))?.resolved).toEqual(resolved);
     instance.setResolved('missing', resolved); // unknown id is a no-op
   });
+
+  it('records how an entry is being streamed', () => {
+    const instance = relay();
+    const made = create(instance);
+
+    expect(instance.streamInfo(made.id)).toBeUndefined();
+    instance.setStream(made.id, { transcoded: true, offsetSec: 42 });
+    expect(instance.streamInfo(made.id)).toEqual({ transcoded: true, offsetSec: 42 });
+    expect(instance.verify(tokenOf(made.url))?.stream).toEqual({
+      transcoded: true,
+      offsetSec: 42,
+    });
+
+    instance.setStream('missing', { transcoded: true, offsetSec: 0 }); // unknown id is a no-op
+    expect(instance.streamInfo('missing')).toBeUndefined();
+  });
 });
 
 describe('MediaRelay liveUploads', () => {

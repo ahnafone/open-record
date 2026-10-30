@@ -18,6 +18,7 @@ import { createCastTransport } from './cast-transport';
 import { planFor, type MediaPlan } from './media-plan';
 import type { MediaRelay } from './media-relay';
 import { CastBusyError, type SessionService } from './session';
+import { UPLOAD_MIME_BY_EXT, type UploadExtension } from './upload-cache';
 
 /** A dropped speaker stays listed as offline for this long before its target clears. */
 export const CAST_LOST_GRACE_MS = 20_000;
@@ -49,6 +50,10 @@ interface CastConnection {
   loadKey: string | null;
   /** Relay entry backing the loaded URL, renewed on every load. */
   relayId: string | null;
+  /** The relay is transcoding this load (no byte ranges: a seek restarts it). */
+  transcoded: boolean;
+  /** Seconds into the source the current transcoded stream started at. */
+  offsetSec: number;
   /** Monotonic load counter: one FINISHED event may advance exactly one load. */
   loadSeq: number;
   idleHandledFor: number;
@@ -79,12 +84,20 @@ function entryKey(entry: SessionTrack): string {
   ]);
 }
 
-/** `upload` is unavailable until Phase 6 wires the relay upload route. */
+/**
+ * A plan is playable when the relay can serve it. An upload that has since been
+ * evicted or cleared still plans fine: the relay answers 410 when the speaker
+ * fetches it, which is a load-time/stream failure, not a queue-wide rejection.
+ */
 function isPlayable(plan: MediaPlan): boolean {
-  return plan.kind === 'catalog' || plan.kind === 'remote';
+  return plan.kind === 'catalog' || plan.kind === 'remote' || plan.kind === 'upload';
 }
 
 function contentTypeFor(plan: MediaPlan): string {
+  if (plan.kind === 'upload') {
+    const ext = plan.uploadId.slice(plan.uploadId.lastIndexOf('.') + 1).toLowerCase();
+    return UPLOAD_MIME_BY_EXT[ext as UploadExtension] ?? DEFAULT_CONTENT_TYPE;
+  }
   if (plan.kind !== 'catalog') return DEFAULT_CONTENT_TYPE;
   switch (plan.file.slice(plan.file.lastIndexOf('.') + 1).toLowerCase()) {
     case 'mp3':
@@ -112,12 +125,15 @@ function reportFor(
   reason: SessionReportMessage['reason'],
   entryId: string,
   status: CastStatus,
+  offsetSec = 0,
 ): SessionReportMessage {
   return {
     type: 'report',
     reason,
     entryId,
-    positionSec: Math.max(0, status.positionSec),
+    // A transcoded stream starts at `offsetSec` inside the source but at 0 on
+    // the receiver, so the receiver clock has to be shifted back.
+    positionSec: Math.max(0, status.positionSec + offsetSec),
     playing: status.playing,
     ...(status.durationSec !== undefined ? { durationSec: status.durationSec } : {}),
   };
@@ -247,6 +263,7 @@ export class CastService {
         }
         conn.entryId = null;
         conn.loadKey = null;
+        this.beginFreshLoad(conn);
         return;
       }
       if (conn.entryId === entry.entryId && conn.loadKey === entryKey(entry)) {
@@ -336,9 +353,11 @@ export class CastService {
     const { conn, created } = await this.ensureConnection(castId, userId, requester);
     try {
       if (!entry || !plan) {
+        this.beginFreshLoad(conn);
         await conn.transport.stop();
         return;
       }
+      this.beginFreshLoad(conn);
       await this.applyVolume(conn, state);
       await this.startEntry(conn, entry, plan, Math.max(0, state.positionSec), state.playing);
       // The receiver is the authority once media is loaded.
@@ -387,6 +406,8 @@ export class CastService {
       entryId: null,
       loadKey: null,
       relayId: null,
+      transcoded: false,
+      offsetSec: 0,
       loadSeq: 0,
       idleHandledFor: 0,
       lastPlaying: false,
@@ -421,6 +442,7 @@ export class CastService {
 
   /** Stops/closes a connection and releases this user's lock on the speaker. */
   private async release(conn: CastConnection, opts: { stop: boolean }): Promise<void> {
+    this.beginFreshLoad(conn);
     if (conn.pollTimer) {
       clearInterval(conn.pollTimer);
       conn.pollTimer = null;
@@ -464,11 +486,16 @@ export class CastService {
     plan: MediaPlan,
     startSec: number,
     autoplay: boolean,
+    offsetSec = 0,
   ): Promise<void> {
     const relay = this.relay.create({ userId: conn.userId, trackId: entry.id, plan });
     conn.relayId = relay.id;
     conn.entryId = entry.entryId;
     conn.loadKey = entryKey(entry);
+    // Only a restart of an already-transcoded stream carries an offset. The
+    // relay honours it by seeking the SOURCE; the receiver still starts at 0.
+    conn.offsetSec = offsetSec;
+    if (offsetSec > 0) conn.transcoded = true;
     conn.loadSeq += 1;
     // Start from `false` so the first PLAYING broadcast is reported: without
     // it the server anchor stays at 0 until the receiver drifts, and
@@ -477,7 +504,7 @@ export class CastService {
     conn.lastTickAt = this.now();
     await conn.transport.load(
       {
-        url: relay.url,
+        url: offsetSec > 0 ? `${relay.url}?offset=${encodeURIComponent(String(offsetSec))}` : relay.url,
         contentType: contentTypeFor(plan),
         title: entry.title,
         artist: entry.artist,
@@ -501,8 +528,16 @@ export class CastService {
       await this.failEntry(conn, state, entry.entryId, new Error('unavailable'));
       throw new Error('unavailable');
     }
+    // Same media = resume/seek restart of the loaded entry: the transcode state
+    // carries over. New media (next, previous, replace, transfer) starts clean
+    // and the relay reports its real mode once the speaker fetches the URL.
+    const sameMedia = conn.entryId === entry.entryId && conn.loadKey === entryKey(entry);
+    if (!sameMedia) this.beginFreshLoad(conn);
+    // An offset means the relay seeks the SOURCE; the receiver must then start
+    // at 0 of that already-offset stream, or the position would double-count.
+    const offsetSec = conn.transcoded && startSec > 0 ? startSec : 0;
     try {
-      await this.startEntry(conn, entry, plan, startSec, autoplay);
+      await this.startEntry(conn, entry, plan, offsetSec > 0 ? 0 : startSec, autoplay, offsetSec);
     } catch (error) {
       await this.failEntry(conn, state, entry.entryId, error);
       throw error;
@@ -568,9 +603,41 @@ export class CastService {
       case 'stop':
         await conn.transport.pause();
         return;
-      case 'seek':
+      case 'seek': {
+        // The relay entry is authoritative about the stream mode; the poll may
+        // not have run since the speaker first fetched this URL.
+        this.syncStreamInfo(conn);
+        if (conn.transcoded) {
+          // An ADTS stream has no byte ranges to seek: restart the same entry
+          // at the new position and let the relay's input seek skip the source.
+          if (!entry) {
+            await conn.transport.stop();
+            return;
+          }
+          conn.offsetSec = command.positionSec;
+          await this.reload(conn, state, entry, command.positionSec, state.playing);
+          // The session already committed the position with the command; this
+          // report re-anchors it to the (restarted) receiver right away.
+          this.sessions?.report(
+            conn.userId,
+            conn.castId,
+            reportFor(
+              'playing',
+              entry.entryId,
+              {
+                playing: state.playing,
+                positionSec: 0,
+                ...(entry.durationSec !== undefined ? { durationSec: entry.durationSec } : {}),
+                volume: state.castVolume ?? 1,
+              },
+              command.positionSec,
+            ),
+          );
+          return;
+        }
         await conn.transport.seek(command.positionSec);
         return;
+      }
       case 'next':
       case 'previous':
         if (!entry) {
@@ -619,6 +686,8 @@ export class CastService {
     if (!sessions) return;
     const state = sessions.snapshot(conn.userId);
     if (!state || state.target?.kind !== 'cast' || state.target.castId !== conn.castId) return;
+    // Adopt the relay's mode before mapping the receiver clock onto a position.
+    this.syncStreamInfo(conn);
     const entryId =
       conn.entryId ?? (state.cursor >= 0 ? state.order[state.cursor]?.entryId : undefined);
     if (!entryId) return;
@@ -626,7 +695,11 @@ export class CastService {
     if (status.playing !== conn.lastPlaying) {
       conn.lastPlaying = status.playing;
       conn.lastTickAt = this.now();
-      sessions.report(conn.userId, conn.castId, reportFor('playing', entryId, status));
+      sessions.report(
+        conn.userId,
+        conn.castId,
+        reportFor('playing', entryId, status, conn.offsetSec),
+      );
       return;
     }
 
@@ -637,7 +710,11 @@ export class CastService {
     const now = this.now();
     if (now - conn.lastTickAt < CAST_TICK_REPORT_MS) return;
     conn.lastTickAt = now;
-    sessions.report(conn.userId, conn.castId, reportFor('tick', entryId, status));
+    sessions.report(
+      conn.userId,
+      conn.castId,
+      reportFor('tick', entryId, status, conn.offsetSec),
+    );
   }
 
   private handleIdle(conn: CastConnection): void {
@@ -691,6 +768,7 @@ export class CastService {
     conn.offStatus = null;
     conn.offDisconnect?.();
     conn.offDisconnect = null;
+    this.beginFreshLoad(conn);
     try {
       this.sessions?.castLost(conn.userId, conn.castId);
     } catch {
@@ -702,6 +780,45 @@ export class CastService {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
+
+  /**
+   * A new load starts with no transcode state; the relay route reports the real
+   * mode once the speaker fetches the freshly minted URL (`syncStreamInfo`).
+   */
+  private beginFreshLoad(conn: CastConnection): void {
+    conn.transcoded = false;
+    conn.offsetSec = 0;
+    this.setSeekRestarts(conn, false);
+  }
+
+  /**
+   * Adopts the relay's streaming mode. `streamInfo` only exists after the
+   * speaker requested the CURRENT relay entry, so it cannot describe a previous
+   * load; a pending reload has no info yet and therefore cannot be clobbered.
+   */
+  private syncStreamInfo(conn: CastConnection): void {
+    const info = conn.relayId ? this.relay.streamInfo(conn.relayId) : undefined;
+    if (!info) return;
+    if (info.transcoded) {
+      conn.transcoded = true;
+      conn.offsetSec = info.offsetSec;
+      this.setSeekRestarts(conn, true);
+      return;
+    }
+    conn.transcoded = false;
+    conn.offsetSec = 0;
+    this.setSeekRestarts(conn, false);
+  }
+
+  /** Publishes the "seek restarts this track" hint, only when it changes. */
+  private setSeekRestarts(conn: CastConnection, value: boolean): void {
+    const sessions = this.sessions;
+    if (!sessions) return;
+    const state = sessions.snapshot(conn.userId);
+    if (!state || state.target?.kind !== 'cast' || state.target.castId !== conn.castId) return;
+    if ((state.castSeekRestarts === true) === value) return;
+    sessions.setCastSeekRestarts(conn.userId, conn.castId, value);
+  }
 
   private enqueue<T>(castId: string, task: () => Promise<T>): Promise<T> {
     const previous = this.chains.get(castId) ?? Promise.resolve();
