@@ -93,11 +93,10 @@ nsis:
   deleteAppDataOnUninstall: false
 
 mac:
+  # The CI matrix passes --arm64 or --x64; do not list both here or each job
+  # builds and uploads both DMGs with the wrong bundled media binaries.
   target:
     - target: dmg
-      arch:
-        - arm64
-        - x64
   category: public.app-category.music
   # Unsigned build: no Developer ID, no hardened runtime, no notarization.
   identity: null
