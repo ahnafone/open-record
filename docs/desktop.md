@@ -81,10 +81,10 @@ folder** opens it.
 | macOS   | `~/Library/Application Support/Open Record` |
 | Windows | `%APPDATA%\Open Record`                     |
 
-- `config.json` - Supabase URL and anon key, LAN toggle (0600; secrets are not shown again
-  after saving). `server/` holds the server state and `token`; `logs/server.log` holds
-  output and startup errors. The rest is Chromium storage (IndexedDB, localStorage, cached
-  files): library, imported audio, downloads and settings.
+- `config.json` - Supabase URL, anon key and the optional legacy JWT secret, plus the LAN toggle
+  (0600; secrets are not shown again after saving). `server/` holds the server state and `token`;
+  `logs/server.log` holds output and startup errors. The rest is Chromium storage (IndexedDB,
+  localStorage, cached files): library, imported audio, downloads and settings.
 
 ## Desktop setup page
 

@@ -53,6 +53,7 @@
         "build",
         "stage-server",
         "stage-app",
+        "fetch-binaries",
         { "projects": ["app"], "target": "build" }
       ],
       "options": {

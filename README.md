@@ -109,6 +109,8 @@ Electron application.
   data folder and fixed origin preserve your library.
 
 See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and troubleshooting.
+Build the app for the current OS with `npm run desktop:dist`; `npm run desktop:dev` runs the
+Electron shell against the local build.
 
 ## Deploy over HTTPS
 
