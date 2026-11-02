@@ -27,8 +27,19 @@ const src = resolve(root, 'dist/apps/server');
 const out = resolve(root, 'dist/apps/desktop/server');
 const committedLock = resolve(root, 'apps/desktop/server-package-lock.json');
 const updateLockfile = process.argv.includes('--update-lockfile');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const node = process.execPath;
+
+/**
+ * Node 24 refuses to spawn a `.cmd` directly on Windows (EINVAL), so run npm
+ * through cmd.exe there. On POSIX, exec npm directly.
+ */
+function runNpm(args, options) {
+  if (process.platform === 'win32') {
+    execFileSync(process.env['ComSpec'] || 'cmd.exe', ['/d', '/s', '/c', 'npm', ...args], options);
+  } else {
+    execFileSync('npm', args, options);
+  }
+}
 
 function fail(message) {
   console.error(`stage-server: ${message}`);
@@ -103,8 +114,7 @@ function regenerateLockfile(pkg) {
   try {
     writeFileSync(join(work, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
     console.log('stage-server: regenerating apps/desktop/server-package-lock.json with npm install --package-lock-only');
-    execFileSync(
-      npm,
+    runNpm(
       ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'],
       { cwd: work, stdio: 'inherit' },
     );
@@ -143,7 +153,7 @@ function stage() {
   copyFileSync(committedLock, join(out, 'package-lock.json'));
 
   console.log(`stage-server: installing exact runtime dependencies with npm ci -> ${out}`);
-  execFileSync(npm, ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], {
+  runNpm(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], {
     cwd: out,
     stdio: 'inherit',
     env: { ...process.env, npm_config_audit: 'false', npm_config_fund: 'false' },
