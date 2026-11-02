@@ -31,6 +31,12 @@ if (missing.length) {
   throw new Error(`Missing in root package.json dependencies: ${missing.join(', ')}`);
 }
 
+/** Version of `dep` installed in the workspace node_modules. */
+function installedVersion(dep) {
+  const pkg = resolve(root, 'node_modules', dep, 'package.json');
+  return JSON.parse(readFileSync(pkg, 'utf8')).version;
+}
+
 mkdirSync(outdir, { recursive: true });
 
 await build({
@@ -55,8 +61,10 @@ writeFileSync(
       type: 'module',
       main: 'main.mjs',
       engines: { node: '>=24' },
+      // Exact installed versions (not the root ranges) so a staged install
+      // (desktop app, container) gets what the workspace was tested with.
       dependencies: Object.fromEntries(
-        runtimeDeps.map((d) => [d, rootPkg.dependencies[d]]),
+        runtimeDeps.map((d) => [d, installedVersion(d)]),
       ),
     },
     null,

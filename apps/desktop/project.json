@@ -1,0 +1,49 @@
+{
+  "name": "desktop",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/desktop/src",
+  "projectType": "application",
+  "tags": ["type:desktop"],
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": ["{workspaceRoot}/dist/apps/desktop/main"],
+      "options": {
+        "command": "node apps/desktop/build.mjs"
+      }
+    },
+    "fetch-binaries": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node apps/desktop/scripts/fetch-binaries.mjs"
+      }
+    },
+    "stage-server": {
+      "executor": "nx:run-commands",
+      "dependsOn": [{ "projects": ["server"], "target": "build" }],
+      "options": {
+        "command": "node apps/desktop/scripts/stage-server.mjs"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        "build",
+        "stage-server",
+        { "projects": ["app"], "target": "build" }
+      ],
+      "options": {
+        "command": "electron dist/apps/desktop/main/main.cjs"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "{projectRoot}",
+        "command": "tsc -p tsconfig.app.json --noEmit"
+      }
+    }
+  }
+}
