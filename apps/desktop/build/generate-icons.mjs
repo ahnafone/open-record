@@ -36,7 +36,8 @@ const icoHeader = Buffer.alloc(6);
 icoHeader.writeUInt16LE(0, 0); // reserved
 icoHeader.writeUInt16LE(1, 2); // 1 = icon
 icoHeader.writeUInt16LE(icoImages.length, 4);
-const icoEntries = [];
+const icoDirectory = [];
+const icoImageData = [];
 let icoOffset = 6 + 16 * icoImages.length;
 for (let i = 0; i < icoImages.length; i += 1) {
   const size = icoSizes[i];
@@ -51,9 +52,14 @@ for (let i = 0; i < icoImages.length; i += 1) {
   entry.writeUInt32LE(image.length, 8);
   entry.writeUInt32LE(icoOffset, 12);
   icoOffset += image.length;
-  icoEntries.push(entry, image);
+  icoDirectory.push(entry);
+  icoImageData.push(image);
 }
-writeFileSync(resolve(here, 'icon.ico'), Buffer.concat([icoHeader, ...icoEntries]));
+// All directory entries must precede the image data; offsets assume that.
+writeFileSync(
+  resolve(here, 'icon.ico'),
+  Buffer.concat([icoHeader, ...icoDirectory, ...icoImageData]),
+);
 console.log('icons: icon.ico (16-256px)');
 
 // .icns: modern PNG-based elements, enough for Finder, Dock and DMG.
