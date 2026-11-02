@@ -13,6 +13,7 @@ describe('loadConfig', () => {
   it('uses the documented defaults', () => {
     const config = load();
     expect(config.dataDir).toBe(join(homedir(), '.config', 'open-record'));
+    expect(config.quietStartup).toBe(false);
     expect(config.rateLimitMax).toBe(600);
     expect(config.castEnabled).toBe(true);
     expect(config.castMediaBaseUrl).toBeNull();
@@ -38,6 +39,7 @@ describe('loadConfig', () => {
       SESSION_IDLE_TIMEOUT_MIN: '45',
       SESSION_TARGET_STALE_MIN: '10',
       FFMPEG_PATH: '/usr/local/bin/ffmpeg',
+      OPEN_RECORD_QUIET_STARTUP: 'true',
     });
     expect(config.dataDir).toBe('/srv/open-record');
     expect(config.rateLimitMax).toBe(900);
@@ -50,6 +52,7 @@ describe('loadConfig', () => {
     expect(config.sessionIdleTimeoutMin).toBe(45);
     expect(config.sessionTargetStaleMin).toBe(10);
     expect(config.ffmpegPath).toBe('/usr/local/bin/ffmpeg');
+    expect(config.quietStartup).toBe(true);
   });
 
   it('accepts the strict boolean spellings case-insensitively', () => {

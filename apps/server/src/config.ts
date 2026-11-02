@@ -8,6 +8,12 @@ export interface ServerConfig {
   host: string;
   /** Shared bearer token every request (except GET /health) must present. */
   token: string;
+  /**
+   * Skip the startup banner (URL, token, pairing link, QR). The desktop app
+   * owns the token and passes it in the environment; printing it again would
+   * leak it into child-process logs.
+   */
+  quietStartup: boolean;
   /** Data directory: token, cast secret and upload cache all live here. */
   dataDir: string;
   /** Allowed CORS origins; `true` reflects any origin (safe: no cookies, token auth). */
@@ -152,6 +158,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     port: int(env, 'PORT', 8787, 1, 65535),
     host: env['HOST']?.trim() || '0.0.0.0',
     token,
+    quietStartup: bool(env, 'OPEN_RECORD_QUIET_STARTUP', false),
     dataDir: defaultDataDir(env),
     corsOrigin: origins.length ? origins : true,
     // 600/min: 1 s polling and two tabs from one IP must not hit the old cap.

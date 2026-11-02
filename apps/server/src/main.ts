@@ -92,14 +92,17 @@ async function main(): Promise<void> {
   await app.listen({ port: config.port, host: config.host });
 
   // Console, not the logger: the token must not reach request or app logs.
-  console.log(
-    await formatBanner({
-      ...picked,
-      fromPublicUrl: !!publicUrl,
-      token,
-      cookies: cookiesStatus(),
-    }),
-  );
+  // The desktop owns the token, so it suppresses the banner entirely.
+  if (!config.quietStartup) {
+    console.log(
+      await formatBanner({
+        ...picked,
+        fromPublicUrl: !!publicUrl,
+        token,
+        cookies: cookiesStatus(),
+      }),
+    );
+  }
 }
 
 main().catch((err) => {
