@@ -91,7 +91,15 @@ Other targets: `npx nx run-many -t lint,typecheck,build,test --projects=server`.
 
 On a machine that should keep the server up, use the user unit in
 `deploy/open-record-server.service` instead of `server:up`; both bind port
-8787, so run one or the other. From the repository root:
+8787, so run one or the other.
+
+For the **public HTTPS** deployment (Caddy terminating 80/443 and proxying to
+`127.0.0.1:8787`), follow [`deploy/README.md`](../../deploy/README.md). Port
+8787 stays private: the router forwards only 80/443, and Caddy binds the LAN
+address because Tailscale already owns `127.0.0.1:80/443`. Never port-forward
+8787.
+
+From the repository root:
 
 ```sh
 mkdir -p ~/.config/systemd/user
@@ -125,9 +133,10 @@ upgrade, repoint it:
 ln -sf "$(command -v node)" ~/.local/bin/node
 ```
 
-The unit binds `HOST=0.0.0.0` by default, so firewall the port:
-`sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. This is an
-ordinary host process, so `ufw` rules apply to it.
+The unit sets `HOST=0.0.0.0` explicitly, so firewall the port:
+`sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. Keep that rule
+LAN-only; the public listener is Caddy on 80/443, not 8787. This is an ordinary
+host process, so `ufw` rules apply to it.
 
 ## Environment variables
 
@@ -143,7 +152,9 @@ is already set.
 | `OPEN_RECORD_DATA_DIR` | `~/.config/open-record` | Where the generated token is stored, with `server.pid` and `server.log` while started with `server:up`. Absolute path: `~` is not expanded. |
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
-| `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit leaves the default. |
+| `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit sets it explicitly. |
+| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list. Behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `LOG_LEVEL`         | `info`       | pino level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`). Relay URLs in request logs are redacted. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
 | `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
@@ -338,17 +349,26 @@ request, so it must be encrypted. Put the server behind an HTTPS tunnel:
 
 - **Tailscale** (private): install Tailscale on the server and phone, then
   `tailscale serve --bg 8787` gives you `https://<machine>.<tailnet>.ts.net`.
+  Tailscale Serve binds `127.0.0.1:80/443`; a Caddy on the same host must bind
+  the LAN address (as `deploy/Caddyfile` does), not the wildcard.
 - **Cloudflare Tunnel** (public URL):
   `cloudflared tunnel --url http://127.0.0.1:8787`, or a named tunnel with
   Cloudflare Access in front.
+- **Caddy** (public, same host): [`deploy/Caddyfile`](../../deploy/Caddyfile)
+  terminates HTTPS on the LAN address and proxies `127.0.0.1:8787`. Follow
+  [`deploy/README.md`](../../deploy/README.md) for DNS, router, `ufw`, systemd
+  and verification.
 
 The tunnel dials `127.0.0.1`, but `npm run server:up` binds the LAN address by
-default. Start it with `--host 127.0.0.1` for a tunnel (the systemd unit
-already binds `0.0.0.0`, so it needs no change).
+default. Start it with `--host 127.0.0.1` for a tunnel (the systemd unit sets
+`HOST=0.0.0.0`, so it needs no change).
 
-Set `TRUST_PROXY=true` and `PUBLIC_URL` to the HTTPS URL when running behind
-either, so the banner and QR code show it. Scan the QR code (or enter the URL)
-in the app under Settings, Stream server.
+Set `PUBLIC_URL` to the HTTPS URL behind either so the banner and QR code show
+it. Behind a same-host tunnel or Caddy, use `TRUST_PROXY=127.0.0.1` so only the
+loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only safe
+when 8787 is bound to loopback and nothing else can reach it; never use `true`
+while 8787 is reachable from the LAN, or clients can spoof their address. Scan
+the QR code (or enter the URL) in the app under Settings, Stream server.
 
 ## Updating yt-dlp
 

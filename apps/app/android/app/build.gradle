@@ -1,5 +1,47 @@
 apply plugin: 'com.android.application'
 
+// Release signing is configured through keystore.properties (gitignored), and
+// the keystore itself must live outside this repository. Local performance
+// builds can explicitly opt into debug signing with -PallowDebugSigning.
+// Release packaging never falls back to debug signing silently.
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+def hasKeystoreProperties = keystorePropertiesFile.isFile()
+if (hasKeystoreProperties) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+def allowDebugSigning = project.hasProperty('allowDebugSigning') &&
+        (project.property('allowDebugSigning').toString() == '' ||
+                project.property('allowDebugSigning').toString().toBoolean())
+
+def requiredKeystoreProperties = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword']
+def missingKeystoreProperties = requiredKeystoreProperties.findAll {
+    !keystoreProperties.getProperty(it)?.trim()
+}
+
+def releaseKeystoreFile = null
+def releaseSigningProblem = null
+if (!hasKeystoreProperties) {
+    releaseSigningProblem = "keystore.properties was not found at ${keystorePropertiesFile}."
+} else if (!missingKeystoreProperties.isEmpty()) {
+    releaseSigningProblem = "keystore.properties is missing required keys: ${missingKeystoreProperties.join(', ')}."
+} else {
+    def storeFilePath = keystoreProperties.getProperty('storeFile').trim()
+    releaseKeystoreFile = new File(storeFilePath)
+    if (!releaseKeystoreFile.isAbsolute()) {
+        releaseKeystoreFile = new File(rootProject.projectDir, storeFilePath)
+    }
+    releaseKeystoreFile = releaseKeystoreFile.canonicalFile
+    def repoRoot = rootProject.projectDir.canonicalFile
+    if (!releaseKeystoreFile.isFile()) {
+        releaseSigningProblem = "Keystore file was not found at ${releaseKeystoreFile}."
+    } else if (releaseKeystoreFile.path.startsWith(repoRoot.path + File.separator)) {
+        releaseSigningProblem = "Keystore must live outside the repository; found ${releaseKeystoreFile}."
+    }
+}
+def hasReleaseSigning = releaseSigningProblem == null
+
 android {
     namespace = "app.openrecord"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -8,7 +50,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "1.0"
+        versionName "1.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,14 +58,27 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile releaseKeystoreFile
+                storePassword keystoreProperties.getProperty('storePassword')
+                keyAlias keystoreProperties.getProperty('keyAlias')
+                keyPassword keystoreProperties.getProperty('keyPassword')
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            // Local performance testing without a keystore. Remove when a real
-            // release keystore is wired up.
-            signingConfig signingConfigs.debug
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else if (allowDebugSigning) {
+                // Explicit opt-in for local performance builds only.
+                signingConfig signingConfigs.debug
+            }
         }
     }
 }
@@ -55,4 +110,44 @@ try {
     }
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
+
+// Fail closed only when a release APK/AAB is actually being built. Config-only
+// invocations such as `./gradlew tasks` must keep working without a keystore.
+def appProject = project
+def isReleasePackagingTask = { String taskName ->
+    def lower = taskName.toLowerCase()
+    (lower.startsWith('assemble') || lower.startsWith('bundle') ||
+            lower.startsWith('package') || lower.startsWith('install')) &&
+            lower.contains('release')
+}
+
+gradle.taskGraph.whenReady { taskGraph ->
+    if (hasReleaseSigning || allowDebugSigning) {
+        return
+    }
+    def releaseTask = taskGraph.allTasks.find {
+        it.project == appProject && ['assembleRelease', 'bundleRelease', 'installRelease'].contains(it.name)
+    }
+    if (releaseTask == null) {
+        releaseTask = taskGraph.allTasks.find {
+            it.project == appProject && isReleasePackagingTask(it.name)
+        }
+    }
+    if (releaseTask != null) {
+        throw new GradleException("""Release signing is not configured, so '${releaseTask.name}' cannot run.
+Reason: ${releaseSigningProblem}
+
+Configure a real release keystore (it must live outside this repo):
+  1. Create the keystore (see apps/app/android/RELEASE_SIGNING.md).
+  2. Create apps/app/android/keystore.properties (gitignored):
+       storeFile=/absolute/path/outside/repo/open-record-release.jks
+       storePassword=...
+       keyAlias=...
+       keyPassword=...
+  3. Re-run ./gradlew assembleRelease
+
+For local performance builds only, explicitly opt into debug signing:
+  ./gradlew assembleRelease -PallowDebugSigning""")
+    }
 }

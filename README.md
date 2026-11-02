@@ -1,187 +1,260 @@
 # Open Record
 
-A vinyl record-shop listening room for your phone: browse the crates, build playlists, share them with collaborators, and play it all on a virtual turntable.
+A vinyl record-shop listening room for your phone and desktop: browse the crates, build playlists,
+import your own music, and play it all on a virtual turntable. **Version 1.0.0.**
 
 ![Open Record overview](docs/screenshots/00-overview.png)
 
+## Download
+
+| Platform | File | Notes |
+|---|---|---|
+| Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
+| Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
+| Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
+| macOS Apple Silicon | [OpenRecord-macos-arm64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-arm64.dmg) | Open the DMG, drag to Applications |
+| macOS Intel | [OpenRecord-macos-x64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-x64.dmg) | Same, with the Intel DMG |
+| Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; see [release builds](#release-builds) |
+| iPhone / iPad | [Build with Xcode](#run-on-iphone) | Free Apple ID; re-sign every 7 days |
+
+Desktop builds are unsigned. The links point at the latest release; the desktop workflow uploads
+installers on a `v*` tag. A missing file means that asset is not published yet. There is no App
+Store, TestFlight, Play Store or enterprise build.
+
 > **Notices**
 >
-> - **AI-built:** this app will be created using AI agents. See [AGENTS.md](AGENTS.md) for the rules they follow.
-> - **Design:** the design and mockup were created using the [Open Design](https://github.com/nexu-io/open-design) app. The design system is documented in [DESIGN.md](DESIGN.md).
-> - **Music disclaimer:** the author is not responsible for any music that users choose to download, and owns no copyrights to any songs downloaded. Users are solely responsible for ensuring they have the rights to any music they download or use.
+> - **AI-built:** this app was built with AI agents. See [AGENTS.md](AGENTS.md) for the rules they follow.
+> - **Design:** the design and mockup were created with the [Open Design](https://github.com/nexu-io/open-design) app. The design system is in [DESIGN.md](DESIGN.md).
+> - **Music disclaimer:** the author owns no copyrights to any music users download and is not responsible for what they choose to download. You are solely responsible for having the rights to any music you download, stream or use.
 
 ## Status
 
-Milestones M0 to M3.8 are implemented: foundations, data and player core, the five screens, local import and offline, Settings, the stream-first downloader server (`apps/server`) and QR scan for the server address. Optional Supabase accounts and Spotify import are also in (see roadmap). The app has three tabs (Browse, Search, Library). On phones a menu button in the top bar opens a drawer with the same content as the desktop sidebar (tabs, playlists, Account, Import and Settings); on desktop Import and Settings sit in the sidebar footer under the Account row. Android Back closes the drawer or an open dialog first, then goes to the previous screen, then to Browse, and on Browse sends the app to the background (uses `@capacitor/app`; run `npx cap sync` after updating). The Collaborators screen is hidden in v1 (role logic is kept in state for v2). Device testing on Android is about to start and is still pending, so none of it is verified on a device. The iOS QR scanner is an in-app scanner and its device test is pending. The interactive mobile mockup is in `mockup/`.
+Open Record 1.0.0 is the v1 source tree: an Angular + Capacitor app (Android, iOS and web) with a
+bundled public-domain catalogue, local imports, playlists, a queue, background downloads and
+optional accounts and sync. The Electron desktop app bundles the UI and local server, and
+`.github/workflows/desktop-build.yml` builds the desktop installers.
 
-## Roadmap
+Collaborators is hidden in v1; its role logic is kept for v2. Android and iOS device testing is
+still pending. A distributable Android release needs your own keystore, and no signed release APK is
+published yet. The iPhone install uses a free Apple ID in Xcode and expires after 7 days.
 
-Plans for v1 (frontend app), v2 (backend) and later are in [roadmap/](roadmap/README.md).
+## Install and run
 
-## Features (as shown in the mockup)
+Prerequisites: **Node 24** and npm. Android builds need the Android SDK; iPhone builds need a Mac
+with Xcode; streaming through your own server needs `yt-dlp` (`pipx install yt-dlp`). `ffmpeg` is
+optional for Cast transcoding. For the desktop app, see [docs/desktop.md](docs/desktop.md).
 
-- **Browse:** "The listening room" home with a "Now on the turntable" record (spinning disc and sleeve), Play record / Open player buttons, and genre bins (All, Dance band, Fox trot, Ragtime and more).
-- **Search:** search by title, artist, year or genre, with quick suggestions such as Sousa, Ragtime, 1920 and Bach.
-- **Library:** saved records (bookmark toggle) and your playlists, each marked Private or Public, with a New playlist button. Add Songs from Playlist bookmarks every track of a chosen playlist in one go, in the playlist's order (first track on top); already-saved tracks keep their place.
-- **Playlists:** play or shuffle, add records, rename, delete, and see each record's album, source, download state and duration. On desktop the list is a table you can sort by title, album, source, date added or duration.
-- **Collaborators (hidden in v1, shown in the mockup and screenshots only):** Private/Public visibility, plus Owner, Editor (can manage records) and Viewer (can listen) roles. A "Viewing as" switch previews what each role can do; members are samples only.
-- **Import local files:** on the Import page, choose "Audio files on this device" to add your own audio files (tags and embedded art are read, titles and artists are editable) and play them alongside the bundled records.
-- **Import history:** every import (audio files, a Spotify export, or a YouTube playlist or song) is saved as an import session (label, counts and track ids only) and, when signed in, synced to your other devices. Open Import history from the Import page to see each session's date, counts and records, edit or remove imported files, clear all imported files, or delete a session (its records stay). Spotify sessions are deleted with the rest of the Spotify import data, on this device and from your account.
-- **Stream and save (optional):** with your own [stream-link server](apps/server/README.md), search YouTube, YouTube Music and SoundCloud, or paste a link (Bandcamp, Audiomack, Mixcloud and other yt-dlp sites). The server only finds a direct link; the app streams it, and the download happens on your device. Tap a result to stream it; bookmarking it or adding it to a playlist saves the file to your device in the background, and removing it from the library and all playlists deletes the file. The app looks up tags and hi-res cover art from iTunes and Deezer itself and saves them with the track. Links are tied to the server's public IP and expire, so streaming and saving work on the same network as the server (e.g. home Wi-Fi), not on a different network such as mobile data. Android and iOS both use the server URL. Setup is one command (`npm run server:up`), phones scan a QR code for the server address, and when the PC has several LAN addresses the script lets you choose the one on your phone's Wi-Fi.
-- **Auto-download (untested on device):** a Library switch (off by default) and a per-playlist switch save tracks to the device automatically. They run only on Wi-Fi unless Settings > Allow auto-download on mobile data is on (uses `@capacitor/network`; run `npx cap sync` after updating). While songs download, a progress bar under the switch shows how many are left. On Android, downloads (auto and manual) keep running with the screen off: a foreground service (`BackgroundWorkPlugin.java`, type dataSync) shows a low-importance "Downloading · N left" notification and holds wake and Wi-Fi locks until the queue is idle, paused or stopped (needs a native rebuild; untested on device). Saved tracks always play from the device file, and the player pre-resolves and preloads the next track about 15 s before the current one ends.
-- **Fix failed downloads:** auto-download keeps going when individual songs fail (it pauses only for systemic problems such as the server being unreachable). The status line under each auto-download switch shows a live "N couldn't be downloaded" link to the Fix failed downloads page (`/downloads/failed`, also linked from Settings). Each failed song shows its reason, a Retry button that runs the same link again (e.g. after adding or refreshing YouTube cookies on the download server) and a Fix link dialog: pick a replacement from a remote search (the Spotify import review's suggestions) or paste a YouTube / YouTube Music video link (allow-listed to youtube.com, music.youtube.com and youtu.be on the device before anything is sent). Every candidate is checked first: the server resolves a stream link and the app fetches only its first 1 KB (no full download, no server audio proxying), with the usual link-not-ready retry. If the check fails (private, removed, restricted, live, playlist, unreachable or refused), the reason shows inline and nothing changes. On success the song keeps its title, artist, album, bookmark and playlist places; its id is updated everywhere (library, playlists, queue, downloads, import history and sync) and the download starts at once. A Retry all action above the list retries every failed song. While a retry is queued or saving, the row stays visible and its coral failed tag becomes a muted spinner "Retrying…" tag; on success the song leaves the list, and on failure the reason returns.
-- **Accounts (optional, untested on device):** sign in with email and password through your own [Supabase](https://supabase.com) project (Settings > Account, or the Account page). You can browse without an account; saving tracks, adding downloads to playlists and the Import wizard need you to sign in. See [Supabase setup](#supabase-accounts-optional).
-- **Spotify import (optional, untested on device):** the Import page (the sidebar Import row on desktop; on phones, Settings > Import playlists & files) holds the sources. Export a playlist or Liked Songs as CSV with [Exportify](https://exportify.app) and paste its text into the app (or pick the .csv file), or pick the JSON files from your Spotify data download (unzip it first). No Spotify account setup is needed. Matching to YouTube Music runs in the background through your stream-link server, and a review list lets you confirm or fix uncertain matches. See [Spotify import](#spotify-import-optional).
-- **YouTube playlist import (optional, untested on device):** in the same Import page, choose "YouTube or YT Music playlist or song" and paste the link of a public or unlisted playlist (`youtube.com`, `music.youtube.com` or `youtu.be`; private playlists are refused with a clear message). A single song link (`youtube.com/watch?v=…`, `music.youtube.com/watch?v=…` or `youtu.be/…`) instead adds just that song to your library, with no playlist made, and is listed in Import history as "YouTube · song title". Your stream-link server reads the playlist's entries (metadata only, first 500) and they become a new playlist named after it, streamable at once and listed in Import history as "YouTube · playlist name". Songs already in your library are reused as they are. It is one import flow on the Import page, with an "Also add to Liked Songs" checkbox. It runs through the same job as Spotify: pending, then a song-detail lookup through the server's `/meta/enrich` (YT Music, iTunes, Deezer and MusicBrainz; no API keys), then an automatic match at high confidence, otherwise review. One "Import progress" panel shows the source, counts (Matched, To review, Not found, Pending) and a single Pause, Resume and Stop, and an Added list shows finished songs. Review rows show metadata suggestions (art, title, artist, album and year, score) with a preview of the song's own link, and the actions Use this, Keep original, Skip, Search again and Paste another link. A confident match replaces the title, artist, album, artwork, year and genre (fields you edited yourself are kept). The original YouTube title and link are always kept. You can pause, resume or stop it, it resumes after a restart, and it never blocks playback. Only the resulting song details are stored and synced; raw catalogue responses are not.
-- **Settings:** storage usage, clear data, Audio quality (separate streaming and download quality: Highest by default, High ~160, Medium ~128, Low ~64 kbps; optional "use streaming quality for downloads" switch; untested on device), Allow auto-download on mobile data, Device storage (phone only: auto-download summary, downloaded songs, space used, free space; on Android a Download location choice between app storage and external app storage that applies to new downloads only; needs a native rebuild, untested on device), Stream server (address, test connection, Scan QR code on Android and iOS), and credits.
-- **Account:** profile (joined date, age, last sign-in), library and playlist stats, Sync now, change password (asks for the current one; a reset-email link is the only way to set one without it), change email, sign out, sign out of all devices and delete account. Deletion calls a `security definer` SQL function (`supabase/migrations/`), so no `service_role` key is ever used.
-- **Filter and long lists:** Library and each playlist have a filter field that matches title, artist and album (every word, ignoring case and accents); Play, Shuffle and row taps use the filtered list, and Move up/down hide while filtering. Long track lists (Library, playlists, import sessions) render 40 rows at first and add more as you scroll.
-- **Queue:** Play next (from a playlist row's options or an Up next row) plays before the normal queue; Up next rows also have Remove from queue.
-- **Now playing:** full-screen player with sleeve art, label, year and genre tags, seek bar, plus a persistent mini player with pause and next. On desktop the side panel shows art, details and Up next only (transport controls are in the player bar, which also has a save-to-library bookmark). Desktop playback also responds to Space, Page Up/Down and the PC's media keys.
+```bash
+git clone https://github.com/ahnafone/open-record.git
+cd open-record
+npm ci
+```
+
+Run the web UI in development (no API or stream server):
+
+```bash
+npm start
+```
+
+Or build and serve the web app with the local server:
+
+```bash
+npm run server:up          # builds app + server, starts detached, prints URL and QR
+npm run server:up -- --stop
+```
+
+`server:up` prints `http://<lan-ip>:8787/` and a pairing QR code. Open it, or enter the address in
+the phone app under **Settings > Stream server**. `npm run server:dev` runs it in the foreground.
+
+### Android
+
+```bash
+npm run android            # cap sync, then run on a device or emulator
+npm run android:release    # signed release APK (needs keystore.properties)
+npm run android:release:install
+```
+
+Release builds need `apps/app/android/keystore.properties` and your own keystore outside the repo;
+see [RELEASE_SIGNING.md](apps/app/android/RELEASE_SIGNING.md). For a local performance build only,
+`./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. No
+signed APK is published yet. Uninstall a debug-signed build before switching signatures.
+
+### Run on iPhone
+
+1. On a Mac with Xcode, run `npm ci` and `npm run ios:open` to sync the web build and open the
+   project.
+2. Select the **App** target > **Signing & Capabilities**, choose your Personal Team (a free Apple
+   ID), and use a unique bundle ID if `app.openrecord` is taken.
+3. Connect an iPhone (iOS 18+), enable Developer Mode if asked, select it and press Run.
+4. Trust the developer in **Settings > General > VPN & Device Management**. Free-account builds
+   expire after **7 days**; re-run from Xcode to re-sign. This is not TestFlight or the App Store.
+
+`npm run ios` uses the Capacitor CLI; `npm run ios:release` makes a generic Release build that is not
+directly installable. Use Xcode Run for a device.
+
+## Desktop app
+
+The desktop app wraps the Angular UI, the local Fastify server, `yt-dlp` and `ffmpeg` in one
+Electron application.
+
+- **Offline:** bundled catalogue, local imports, playback, playlists, history and settings. Remote
+  search/stream/save, metadata and Supabase need internet; phones need the same LAN.
+- **Fixed origin:** `http://127.0.0.1:47900`. Storage is tied to the origin, so a taken port reports
+  an error instead of silently changing it.
+- **Setup page:** **Settings > Desktop app** (or `http://127.0.0.1:47900/desktop`) saves your
+  Supabase project URL and anon key. It refuses `service_role` and `sb_secret_...` keys.
+- **Phones on this network:** the toggle restarts the local server on all interfaces and shows the
+  LAN address and QR code. Use a trusted Wi-Fi only (plain HTTP), and never port-forward 47900.
+- **Unsigned, no auto-update:** expect Gatekeeper/SmartScreen warnings; reinstall to update. The
+  data folder and fixed origin preserve your library.
+
+See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and troubleshooting.
+
+## Deploy over HTTPS
+
+Full DNS, router, firewall, Caddy and Supabase runbook: [deploy/README.md](deploy/README.md).
+The reference deployment uses `https://open-record.uttarasoftware.ca`: a DNS A record points it at
+the public address, and the router forwards **TCP 80 and 443 only**. Caddy on the LAN host
+(`10.0.0.139`) terminates TLS with a Let's Encrypt certificate and proxies to `127.0.0.1:8787`.
+
+`10.0.0.139:8787` is the home-Wi-Fi address, **not** the public URL. Keep 8787 firewalled to the LAN
+and never expose it directly. Verify `/health`, `/app-config`, the 401/200 `/ping` pair, and that
+8787 is closed from outside.
+
+## Website
+
+A static landing page is planned for GitHub Pages at <https://ahnafone.github.io/open-record/>. When
+published it will be served from [docs/](docs/) with the same downloads, screenshots and install
+links. The page is not live yet; until then this README and [docs/desktop.md](docs/desktop.md) are the docs.
+
+## Features
+
+- **Browse:** a "Now on the turntable" record with a spinning disc and sleeve, Play record and Open
+  player buttons, and record-shop genre bins (All, Dance band, Fox trot, Ragtime and more).
+- **Search:** by title, artist, year or genre, with quick suggestions. With a stream server, search
+  YouTube, YouTube Music and SoundCloud, or paste a link from a yt-dlp site.
+- **Library:** saved records with a bookmark toggle, plus playlists marked Private or Public. Filter
+  by title, artist and album; long lists render as you scroll; on desktop the list is a sortable table.
+- **Playlists:** play or shuffle, add records, rename, delete, and reorder. Each row shows its source,
+  download state and duration.
+- **Now playing and queue:** full-screen player with sleeve art, seek bar and track details, a
+  persistent mini player, Play next and an editable Up next list. Desktop has a resizable side panel,
+  keyboard shortcuts and media-key support.
+- **Imports:** audio files from the device with editable tags and art; Spotify Exportify CSV or JSON
+  from a data download; YouTube / YT Music playlist or song links. Matching runs through your server,
+  and uncertain matches wait in a review list. Every import becomes an Import history session.
+- **Stream and save:** with your own [stream-link server](apps/server/README.md), the app streams a
+  direct link and saves the file on your device. It looks up tags and hi-res cover art from iTunes and
+  Deezer. Links are tied to the server's public IP and expire, so streaming and saving work on the
+  same network as the server, not on mobile data.
+- **Auto-download and recovery:** a Library switch and per-playlist switches save tracks
+  automatically, on Wi-Fi by default (mobile data is opt-in). On Android a foreground service keeps
+  downloads running with the screen off. Failed songs show a reason, Retry and a Fix link page at
+  `/downloads/failed`.
+- **Accounts, sync and Cast (optional):** your own Supabase project adds email/password sign-in and
+  syncs track metadata, saved songs, playlists and import history, never audio. Conflicts are
+  last-write-wins. Signing in also shares the playback queue, and Google Cast speakers on the LAN
+  appear in the **Play on** picker.
+- **Settings:** storage usage, clear data, separate streaming and download quality, mobile data
+  permission, device storage, stream-server address with QR scan, and credits.
 
 ## Screenshots
 
-| | | |
-|---|---|---|
-| ![Browse](docs/screenshots/01-browse.png) | ![Search](docs/screenshots/02-search.png) | ![Library](docs/screenshots/03-library.png) |
-| **Browse:** the listening room and genre bins | **Search:** by title, artist, year or genre | **Library:** saved records and playlists |
-| ![Playlist](docs/screenshots/04-playlist.png) | ![Collaborators](docs/screenshots/05-collaborators.png) | ![Now playing](docs/screenshots/06-now-playing.png) |
-| **Playlist:** play, shuffle, add, rename, delete | **Collaborators:** visibility and roles | **Now playing:** player with seek bar and mini player |
+| | |
+|---|---|
+| ![Browse](docs/screenshots/01-browse.png) | ![Search](docs/screenshots/02-search.png) |
+| **Browse:** the listening room and genre bins | **Search:** by title, artist, year or genre |
+| ![Library](docs/screenshots/03-library.png) | ![Playlist](docs/screenshots/04-playlist.png) |
+| **Library:** saved records and playlists | **Playlist:** play, shuffle, add, rename, delete |
 
-## Run on Android
+![Now playing](docs/screenshots/06-now-playing.png)
 
-Prerequisites: Node 24, the Android SDK (Android Studio is not required), a phone with USB debugging on (or an emulator), yt-dlp installed with `pipx install yt-dlp` (for the server), and the phone on the same Wi-Fi as the PC.
-
-1. Install dependencies: `npm install`
-2. Start the stream server: `npm run server:up`. It prints one link, `http://<lan-ip>:8787/`, and a QR code. If several LAN addresses exist and it runs in a terminal, it asks which one matches the phone's Wi-Fi; override with `npm run server:up -- --ip 10.0.0.139`. If the `/health` hint says port 8787 is blocked, allow it through the PC firewall.
-3. Build and run the app: `npm run android` (builds, runs cap sync, then `cap run android` on the connected device or emulator).
-4. In the app, open Settings > Stream server > Scan QR code (or type the server address), tap Test connection, then sign in (Settings > Account). Then use Search > Download sources.
+**Now playing:** full-screen player with seek bar, queue and mini player.
 
 ## Release builds
 
-Debug builds are slower than what users get, so measure and test speed on a release build. Each script runs `npm run cap:sync` first.
+Build and measure with release builds, not debug.
 
-- `npm run android:release`: builds the release APK (`apps/app/android/app/build/outputs/apk/release/app-release.apk`, debug-signed).
-- `npm run android:release:install`: builds it, then installs it on the connected device with `adb install -r`.
-- `npm run ios`: builds and runs the debug app on a connected iPhone or simulator (`cap run ios`).
-- `npm run ios:open`: opens the project in Xcode.
-- `npm run ios:release`: Release-configuration `xcodebuild` for a generic iOS device (`apps/app/ios/App/build`). Needs a Mac with Xcode and signing set up.
-
-## Performance
-
-Targets (release build, 2000+ track library, median of 5 runs; full list in [.plans/performance-optimization.md](.plans/performance-optimization.md) section 0.3):
-
-- Cold start under 1500 ms.
-- Under 2500 DOM nodes on Browse, Library and Playlist; under 1200 on Now Playing.
-- Browse to Library under 250 ms, open Now Playing under 300 ms, open the drawer under 150 ms, library filter keystroke under 100 ms.
-- No long task over 50 ms while scrolling.
-- Initial JS bundle within the budgets in `apps/app/project.json` (500 kB warning, 1 MB error); check the `npx nx build app` output.
-
-How to measure:
-
-- Always use a release build (above), not `npm run android`.
-- Android cold start: `adb shell am force-stop app.openrecord`, then `adb shell am start -W app.openrecord/.MainActivity` and read `TotalTime`. Frame timing: `adb shell dumpsys gfxinfo app.openrecord reset`, use the app, then `adb shell dumpsys gfxinfo app.openrecord` for janky frames.
-- Android WebView: open `chrome://inspect` in desktop Chrome, inspect the app, and use the Performance panel and the console (`document.querySelectorAll('*').length` for DOM nodes).
-- iOS: Safari > Develop > your iPhone > the app for the same console and timelines (Timelines > JavaScript & Events; `longtask` is not available in WKWebView). Instruments "App Launch" for cold start.
+- **Desktop:** `.github/workflows/desktop-build.yml` builds the Linux `.deb`/AppImage, Windows NSIS
+  installer and both macOS DMGs on a `v*` tag, writes `SHA256SUMS.txt`, and uploads them to the
+  GitHub release. All desktop installers are unsigned; there is no auto-update.
+- **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
+  configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
+  opt-in with `-PallowDebugSigning` for local performance builds. No signed APK is published yet.
+- **iPhone:** run the **Release** configuration from Xcode with a Personal Team to install on a
+  device; `npm run ios:release` only makes a generic build. No TestFlight; free-account builds expire after 7 days.
+- **Checks:** `npm run check` runs token checks, lint, typecheck and build.
 
 ## Supabase accounts (optional)
 
-Accounts use your own Supabase project; the project hosts none. Sign-in also enables [sync between devices](#sync-between-devices).
+Accounts, sync, Cast and phone sign-in use a Supabase project you create and own; Open Record hosts
+no accounts, audio or relay.
 
-1. Local: install the [Supabase CLI](https://supabase.com/docs/guides/cli), then run `supabase start` in the repo root (uses `supabase/config.toml` and applies `supabase/migrations`). `supabase status` prints the API URL, anon key and JWT secret. Or create a hosted project at supabase.com and run the migration in `supabase/migrations/` against it.
-2. The host sets `SUPABASE_URL` and `SUPABASE_ANON_KEY` once in `apps/server/.env` (anon key only; never the service-role key). The server serves them at the public `GET /app-config`, and the web app and phones fetch them from it, so users never type a Supabase URL or key. On a phone use your PC's LAN address instead of `127.0.0.1`. A build-time `SUPABASE_BUILD_CONFIG` in `apps/app/src/app/supabase.config.ts` (`{ url, anonKey }`) still works.
-3. Optional: set `SUPABASE_JWT_SECRET` in the same file for shared-secret (HS256) projects; asymmetric projects are verified through `SUPABASE_URL`. The app sends the signed-in user's Supabase token to the server, which accepts it. See the [server README](apps/server/README.md).
+1. Create a project at [supabase.com](https://supabase.com), or run `supabase start` locally. Apply
+   `supabase/migrations/` in filename order (`npx supabase db push` or the SQL Editor).
+2. Enable **Email** auth with a minimum password length of 6, create the owner account, then close
+   sign-ups and anonymous sign-ins. Every public table needs row-level security, with no policy for
+   the `anon` role.
+3. Web/server: set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `apps/server/.env` and restart
+   `npm run server:up`. The app reads them from `GET /app-config`.
+4. Desktop: save the same values under **Settings > Desktop app** (`/desktop`).
 
-## Spotify import (optional)
+Use the anon key only; never put a `service_role` or `sb_secret_...` key in the server, the desktop
+config or a build. Sync covers metadata, saved songs, playlists and import history, never audio;
+conflicts are last-write-wins.
 
-No setup is needed. On the Import page, choose a source:
+## Stream-link server
 
-1. **Exportify (CSV):** tap "Open Exportify" (opens [exportify.app](https://exportify.app) in your browser), log in with Spotify and export a playlist or Liked Songs (or Export All). Open the CSV, copy all its text, come back and paste it into the box, then tap "Read pasted CSV". Paste one playlist at a time and give each an optional name (default "Imported playlist N"; "Liked Songs" adds to Liked Songs). You can also pick .csv files instead.
-2. **Spotify data download (JSON):** request it under Spotify > Privacy, unzip it, then pick `Playlist1.json` or `YourLibrary.json`.
+[apps/server](apps/server/README.md) is a small self-hosted Fastify + `yt-dlp` server. It finds a
+direct audio link and returns it; the phone fetches the audio. It never downloads, tags or proxies
+audio, except the Cast relay to a Google Cast speaker.
 
-Then select playlists, follow matching progress and review uncertain matches. After pulling changes that add or remove Capacitor plugins or native config, run `npx cap sync`.
+```bash
+npm run server:up
+```
 
-## Use it on a PC
+It needs Node 24 and `yt-dlp` on the host. The generated token lives in `~/.config/open-record/` with
+mode 0600, and the command prints the URL and QR code. The server has a concurrency cap, wait queue,
+rate limits and a link cache, and returns `503` with `Retry-After` when busy.
 
-`npm run server:up` also serves the web app at the URL it prints (`http://<lan-ip>:8787/`). Open that link in a browser, create an account or sign in, then use Import and paste or pick your Exportify CSVs there.
-
-## Sync between devices
-
-Sign in with the same Supabase account on both devices (see [Supabase accounts](#supabase-accounts-optional)); the library then syncs on its own, or tap **Sync now** in Settings.
-
-- Syncs: track metadata, saved songs, playlists and import history (labels, counts, track ids). Never audio files or raw Spotify data.
-- Conflicts: last write wins.
-- Setup: create a Supabase project, apply the SQL in `supabase/migrations/`, set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `apps/server/.env`, run `npm run server:up`, open the printed link and create an account.
-- Not yet tested against a real Supabase project or in a browser.
-
-### Playback on another device
-
-Signing in also shares the playback session: every device sees the same queue, and the player's **Play on** picker lists the other open tabs/apps. Selecting one sends the sound there; playback follows the current device when it is responding, and the picker's **Play on this device** moves it back. Transport controls, seek, queue edits and "play next" work from any signed-in device.
-
-Google Cast speakers on the same LAN appear in the same picker. **Catalog**, **remote** (yt-dlp) and **PC-browser imported** tracks cast through the server: it relays the audio to the speaker at a short-lived, signed URL. A PC import is uploaded once and kept in a per-account cache with a **Clear cast cache** button in Settings (a file that is playing is kept). A phone's own imported files cannot be cast — the file never leaves the phone; open the server's web page on the PC that imported it instead. Sources Cast cannot play natively (WebM/Ogg) are transcoded to AAC by the server's `ffmpeg`, which restarts the track when you seek on the speaker; without ffmpeg those sources answer `503`. Discovery needs the server and the speaker on the same network, and UDP 5353 plus TCP 8787 reachable; if they are on different VLANs, cast rows will not appear.
-
-The server keeps the queue in memory, so a restart ends the shared session; a speaker that is already playing keeps its URL until the next command.
-
-## Run the server
-
-`npm run server:up` builds and starts the server on this machine (see [Stream-link server](#stream-link-server) below) and exits, leaving it running in the background. Stop it with `npm run server:up -- --stop` (or `npm run server:stop`). For development, `npm run server:dev` runs it in the foreground.
+Use plain HTTP only on a trusted home LAN; the bearer token is unencrypted. Outside the home, put the
+server behind HTTPS (Tailscale or a Cloudflare tunnel) and set `TRUST_PROXY` and `PUBLIC_URL`. See the
+[server README](apps/server/README.md#https-recommended-required-outside-your-home). Never
+port-forward 8787.
 
 ## Repo layout
 
 ```
-apps/app/            Angular + Capacitor app (android/, ios/)
-supabase/           Supabase config and SQL migrations (optional accounts)
-apps/server/        Self-hosted stream-link server (Fastify, yt-dlp)
-libs/                Shared libraries (models, state, storage, player, ui, providers, metadata-lookup, features)
-mockup/              Interactive HTML mockup (index.html, assets/, ATTRIBUTION.md)
-docs/screenshots/    Screenshots of the six screens
-roadmap/             Planning docs (v1 frontend, v2 backend, stream-link server, later ideas)
-DESIGN.md            Design system
-AGENTS.md            Rules for AI agents working on this project
-LICENSE              MIT license
+apps/app/              Angular + Capacitor app (android/, ios/)
+apps/desktop/          Electron app, installer config and server-package-lock.json
+apps/server/           Self-hosted Fastify + yt-dlp stream-link server
+deploy/                Caddy/systemd deployment runbook and unit
+docs/                  Screenshots and the planned Pages landing page
+docs/desktop.md        Desktop install, Supabase and LAN phone guide
+supabase/              Supabase config and SQL migrations (optional accounts)
+libs/                  Shared models, state, storage, player, UI and feature libraries
+mockup/                Interactive HTML design mockup (index.html, assets/)
+.github/workflows/     Desktop installer CI
+DESIGN.md              Design system
+AGENTS.md              Rules for AI agents working on this project
+LICENSE                MIT license
 ```
 
-## View the mockup
+## Mockup and sample media
 
-Serve the folder, then open the printed address (usually http://localhost:8000):
-
-```bash
-cd mockup
-python3 -m http.server
-```
-
-Or open `mockup/index.html` directly in a browser. Serving is safer for audio playback.
-
-## Sample media
-
-The mockup's sample audio and cover art are openly licensed or public-domain items from Wikimedia Commons. Licences and credits are listed in [mockup/ATTRIBUTION.md](mockup/ATTRIBUTION.md).
+The interactive design mockup is in [`mockup/`](mockup/index.html); serve it with
+`cd mockup && python3 -m http.server` and open <http://localhost:8000>. Sample audio and cover art
+are openly licensed/public-domain Wikimedia Commons items; credits: [mockup/ATTRIBUTION.md](mockup/ATTRIBUTION.md).
 
 ## Metadata credits
 
-When you configure the optional stream-link server, the app itself calls (from the device, not through the server) and gets track metadata and cover art from the [iTunes Search API](https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/iTunesSearchAPI/) and the [Deezer public API](https://developers.deezer.com/api). Cover art remains the copyright of its rights holders. iTunes' terms limit artwork use to promoting store content and Deezer's API terms are unverified, so treat this as a personal, self-hosted tool. Without a server configured, the app makes no network calls.
-
-## Stream-link server
-
-The optional server in [apps/server](apps/server/README.md) uses yt-dlp to search and to return a direct stream link (`POST /stream`). It never downloads or tags audio; for casting, it relays one track at a time to the speaker (`GET /cast/relay/<signed token>`). It has load safeguards (concurrency cap, queue, `503` with `Retry-After`, rate limits, link cache; see `MAX_CONCURRENT_RESOLVES`, `STREAM_CACHE_TTL`, `RESOLVE_RATE_LIMIT_MAX`). Streaming or downloading may break the source site's terms of service; see the music disclaimer above and keep it out of store builds. Quick start:
-
-```bash
-npm run server:up
-```
-
-It starts the server on this machine and prints one link, `http://<lan-ip>:8787/`, and a QR code. In the app, open Settings > Stream server and tap "Scan QR code" (Android uses ML Kit, iOS scans in-app) or type the address; only the server address is stored, then sign in. Users sign in with Supabase and the app sends their token; the shared token is not asked for in the UI.
-
-To use your own token instead of the generated one:
-
-```bash
-export OPEN_RECORD_TOKEN=$(openssl rand -hex 32)
-npm run server:up
-curl http://192.168.1.20:8787/health   # the address the script printed
-```
-
-The server needs Node 24 and `yt-dlp` (`pipx install yt-dlp`) on the host. Its state, including the generated token, lives in `~/.config/open-record/`. On an always-on machine, `deploy/open-record-server.service` runs it as a systemd user unit instead (see the [server README](apps/server/README.md)).
-
-Expose it over HTTPS (Tailscale or a Cloudflare tunnel), or on a trusted home network use the plain `http://<lan-ip>:8787` address (unencrypted: tokens are visible to others on the network; see the [server README](apps/server/README.md#plain-http-on-your-home-lan)). Then enter the address in the app under Settings, Stream server (or scan the QR code). More in [roadmap/downloader-server.md](roadmap/downloader-server.md).
+With a stream server configured, the app calls the [iTunes Search API](https://performance-partners.apple.com/search-api)
+and the [Deezer public API](https://developers.deezer.com/api) directly from the device for tags and
+cover art. Cover art remains the copyright of its rights holders. iTunes' terms limit artwork use to
+promoting store content, and Deezer's API terms are unverified, so treat this as a personal,
+self-hosted tool. Without a server configured, the app makes no network calls.
 
 ## License
 
-Released under the [MIT License](LICENSE). Copyright (c) 2026 Ahnaf. Sample media keep their own licences (see above).
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Ahnaf. Sample media keep their own
+licences (see [mockup/ATTRIBUTION.md](mockup/ATTRIBUTION.md)).

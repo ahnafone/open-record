@@ -1,10 +1,20 @@
-# Runs the Open Record server as a systemd user service, directly on the host
-# (no Docker).
+# Runs the Open Record server as a systemd **user** service, directly on the
+# host (no Docker).
 #
-#   npx nx build app && npx nx build server      # or: npm run server:up (also prints the pairing QR)
+# Public HTTPS topology (see deploy/README.md for the full runbook):
+#   internet -> router TCP 80/443 -> 10.0.0.139
+#            -> Caddy (:80/:443, system service) -> 127.0.0.1:8787
+#            -> this unit (Open Record)
+# Caddy is the only public listener. Port 8787 must never be port-forwarded:
+# phones on the same Wi-Fi and Cast speakers use http://10.0.0.139:8787, and
+# ufw must allow 8787 only from the LAN. Tailscale already binds
+# 127.0.0.1:80/443, so Caddy binds the LAN address instead of the wildcard.
+#
+#   npx nx build app && npx nx build server      # required before starting
+#   npm run server:up -- --stop                 # both use port 8787
 #   mkdir -p ~/.config/systemd/user
 #   ln -sf "$PWD/deploy/open-record-server.service" ~/.config/systemd/user/
-#   loginctl enable-linger "$USER"               # start at boot, before you log in
+#   loginctl enable-linger "$USER"               # start at boot, before login
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now open-record-server
 #   journalctl --user -u open-record-server -f
@@ -15,8 +25,10 @@
 # ~/.local/bin/node is a symlink to the nvm-managed node. After an nvm upgrade,
 # repoint it: ln -sf "$(command -v node)" ~/.local/bin/node
 #
-# Binds HOST=0.0.0.0 by default: firewall the port, e.g.
-#   sudo ufw allow from 192.168.1.0/24 to any port 8787 proto tcp
+# Public values come from apps/server/.env: PUBLIC_URL, TRUST_PROXY=127.0.0.1,
+# CAST_MEDIA_BASE_URL=http://10.0.0.139:8787, CAST_CACHE_MB, LOG_LEVEL and the
+# Supabase public URL/anon key. Keep that file 0600; never commit it or put the
+# database password/service-role key in it.
 [Unit]
 Description=Open Record server
 
@@ -25,11 +37,16 @@ Type=simple
 WorkingDirectory=%h/Github/open-record
 Environment=NODE_ENV=production
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Bind all interfaces: Caddy proxies to 127.0.0.1 and LAN devices (phones,
+# Cast speakers) use 10.0.0.139:8787. The firewall keeps 8787 off the internet;
+# the bind address is not a security boundary.
+Environment=HOST=0.0.0.0
 # The built web app, served at / (dist/apps/app/browser).
 Environment=WEB_DIR=%h/Github/open-record/dist/apps/app/browser
 # Node's env-file loading never overrides a variable that is already set, so
-# the two values above win over the same names in apps/server/.env. Everything
-# else (PORT, PUBLIC_URL, SUPABASE_*, YTDLP_*) comes from that file.
+# the values above win over the same names in apps/server/.env. Everything
+# else (PORT, PUBLIC_URL, TRUST_PROXY, CAST_*, SUPABASE_*, YTDLP_*) comes from
+# that file.
 ExecStart=%h/.local/bin/node --env-file-if-exists=%h/Github/open-record/apps/server/.env %h/Github/open-record/dist/apps/server/main.mjs
 Restart=on-failure
 RestartSec=2
