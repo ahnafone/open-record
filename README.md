@@ -171,6 +171,10 @@ links. The page is not live yet; until then this README and [docs/desktop.md](do
 
 **Now playing:** full-screen player with seek bar, queue and mini player.
 
+![Open Record desktop app](docs/screenshots/07-desktop.png)
+
+**Desktop:** the same library and player in the Electron app, with the local server bundled.
+
 ## Release builds
 
 Build and measure with release builds, not debug.
