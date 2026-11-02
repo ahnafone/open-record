@@ -114,8 +114,9 @@ import {
     />
     <or-icon-button
       icon="more"
+      [attr.data-options]="t.id"
       [label]="'Options for ' + t.title"
-      (click)="options.emit()"
+      (click)="requestOptions($event)"
     />
   `,
   styles: `
@@ -259,8 +260,8 @@ export class OrLibraryRow {
   readonly playTrack = output<void>();
   /** Bookmark tap; emits whether the record was saved before the tap. */
   readonly toggleSave = output<boolean>();
-  /** Options button tap (Play next). */
-  readonly options = output<void>();
+  /** Options button tap (Play next, Fix source); emits the button for focus. */
+  readonly options = output<HTMLElement>();
 
   protected readonly player = inject(PlayerStore);
   private readonly library = inject(LibraryStore);
@@ -295,4 +296,10 @@ export class OrLibraryRow {
     const t = this.track();
     return [t.year, t.genre].filter(Boolean).join('  ·  ');
   });
+
+  /** Emit the native options button so the page can restore focus there. */
+  protected requestOptions(event: Event): void {
+    const host = event.currentTarget as HTMLElement;
+    this.options.emit(host.querySelector<HTMLElement>('button') ?? host);
+  }
 }

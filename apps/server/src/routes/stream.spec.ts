@@ -9,6 +9,15 @@ vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 
 const TOKEN = 'test-token-0123456789abcdef';
 const PAGE = 'https://93.184.216.34/watch?v=busy';
+// Stream links are warmed before they are returned; keep that probe offline.
+beforeAll(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(null, { status: 206 })),
+  );
+});
+afterAll(() => vi.unstubAllGlobals());
+
 const INFO = {
   id: 'busy',
   title: 'Busy',

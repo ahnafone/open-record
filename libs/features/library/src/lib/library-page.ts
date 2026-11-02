@@ -17,6 +17,7 @@ import {
   PlayerStore,
   PlaylistsStore,
   SettingsStore,
+  SourceFixService,
   SyncStore,
   ariaSortFor,
   filterTracks,
@@ -267,7 +268,7 @@ const ROW_STYLES = `
                   [addedAt]="library.savedAt(t.id)"
                   (playTrack)="play(t, saved)"
                   (toggleSave)="toggleSaved(t, $event)"
-                  (options)="optionsFor.set(t)"
+                  (options)="openOptions(t, $event)"
                 />
               </li>
             }
@@ -304,7 +305,7 @@ const ROW_STYLES = `
                 [addedAt]="library.importedAt(t.id)"
                 (playTrack)="play(t, imported)"
                 (toggleSave)="toggleSaved(t, $event)"
-                (options)="optionsFor.set(t)"
+                (options)="openOptions(t, $event)"
               />
             </li>
           }
@@ -409,6 +410,9 @@ const ROW_STYLES = `
     >
       <div orModalActions>
         <or-button block (click)="playNext()">Play next</or-button>
+        @if (optionsFor()?.source?.url) {
+          <or-button block (click)="fixSource()">Fix source</or-button>
+        }
         <or-button block (click)="optionsFor.set(null)">Close</or-button>
       </div>
     </or-modal>
@@ -580,6 +584,7 @@ export class LibraryPage {
   );
   private readonly sync = inject(SyncStore);
   private readonly toast = inject(OrToast);
+  private readonly sourceFix = inject(SourceFixService);
   private readonly router = inject(Router);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly injector = inject(Injector);
@@ -614,6 +619,8 @@ export class LibraryPage {
   protected readonly importedSort = signal<TrackSort | null>(null);
   /** Record whose options modal is open. */
   protected readonly optionsFor = signal<Track | null>(null);
+  /** The ⋯ button that opened the options modal (for focus return). */
+  private readonly optionsOrigin = signal<HTMLElement | null>(null);
 
   /** Filtered, sorted lists: what rows render and what a row tap queues. */
   protected readonly savedShown = computed(() =>
@@ -683,6 +690,21 @@ export class LibraryPage {
 
   protected sortArrow(list: ListId, key: TrackSortKey): string {
     return sortArrowFor(this.sortOf(list)(), key);
+  }
+
+  /** Open the row's options modal, remembering the button for focus. */
+  protected openOptions(track: Track, origin: HTMLElement): void {
+    this.optionsOrigin.set(origin);
+    this.optionsFor.set(track);
+  }
+
+  /** Close the options modal and open the shell's Fix source dialog. */
+  protected fixSource(): void {
+    const track = this.optionsFor();
+    const origin = this.optionsOrigin();
+    this.optionsFor.set(null);
+    if (!track) return;
+    this.sourceFix.open(track, origin ?? undefined);
   }
 
   /** Queue the optioned record right after the current one. */

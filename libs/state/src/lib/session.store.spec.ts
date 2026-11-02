@@ -86,6 +86,7 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     position,
     duration,
     isPlaying,
+    intendsToPlay: false,
     applyOrder,
     play,
     pause,
@@ -500,6 +501,34 @@ describe('SessionStore', () => {
     expect(
       port.reports().filter((report) => report.reason === 'native-skip'),
     ).toHaveLength(0);
+  });
+
+  it('reports an automatic advance as playing while the next media loads', async () => {
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          revision: 1,
+          order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+          cursor: 0,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    port.sent.length = 0;
+
+    engine.intendsToPlay = true;
+    engine.status.set('loading');
+    engine.currentIndex.set(1);
+    await settle();
+
+    expect(port.reports().at(-1)).toMatchObject({
+      reason: 'native-skip',
+      entryId: 'e1',
+      playing: true,
+    });
   });
 
   it('reports paused when playback fails terminally, but not during retries', async () => {
@@ -953,6 +982,20 @@ describe('SessionStore', () => {
       type: 'setRepeat',
       repeat: 'all',
     });
+    expect(store.error()).toBeNull();
+  });
+
+  it('does not record a transport failure when starting a queue', async () => {
+    const { store, port } = await setup();
+    port.result = () => ({ ok: false, error: 'offline' });
+
+    const ids = await store.startSession([catalogTrack('catalog:a')], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+
+    expect(ids).toBeNull();
     expect(store.error()).toBeNull();
   });
 

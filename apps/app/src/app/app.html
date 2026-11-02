@@ -23,7 +23,32 @@
 </main>
 
 @if (panelShown()) {
-<aside class="np-panel" aria-label="Now playing">
+<div
+  class="np-grip"
+  role="separator"
+  aria-orientation="vertical"
+  tabindex="0"
+  aria-label="Resize Now Playing panel"
+  aria-controls="or-np-panel"
+  [attr.aria-valuemin]="npPanelMinWidth"
+  [attr.aria-valuemax]="npPanelMaxWidth()"
+  [attr.aria-valuenow]="npPanelWidth()"
+  [attr.aria-valuetext]="npPanelWidth() + ' pixels'"
+  [class.dragging]="resizing()"
+  (pointerdown)="startPanelResize($event)"
+  (pointermove)="movePanelResize($event)"
+  (pointerup)="endPanelResize($event)"
+  (pointercancel)="endPanelResize($event)"
+  (lostpointercapture)="endPanelResize($event)"
+  (keydown)="onPanelResizeKeydown($event)"
+  (dblclick)="resetPanelWidth()"
+></div>
+<aside
+  id="or-np-panel"
+  class="np-panel"
+  aria-label="Now playing"
+  [style.inline-size.px]="npPanelWidth()"
+>
   @if (nowPlayingPanel(); as page) {
   <ng-container *ngComponentOutlet="page; inputs: { panel: true }" />
   }

@@ -46,6 +46,7 @@ function fakeEngine() {
         playNext: false,
       })),
   );
+  const loadSeq = signal(0);
   return {
     queue,
     currentIndex,
@@ -66,10 +67,11 @@ function fakeEngine() {
     muted: signal(false),
     canSetVolume: false,
     lastPlay: signal<{ seq: number; track: Track; at: number } | null>(null),
-    loadSeq: signal(0),
+    loadSeq,
     setQueue: vi.fn(async (tracks: readonly Track[], opts?: { startIndex?: number }) => {
       queue.set([...tracks]);
       currentIndex.set(opts?.startIndex ?? 0);
+      loadSeq.update((value) => value + 1);
     }),
     setShuffle: vi.fn(),
     setRepeat: vi.fn(),
@@ -79,6 +81,12 @@ function fakeEngine() {
     dropPlayed: vi.fn(),
     playNext: vi.fn(),
     removeUpcoming: vi.fn(() => true),
+    replaceUpcoming: vi.fn((oldId: string, next: Track) => {
+      const tracks = queue();
+      if (!tracks.some((t) => t.id === oldId)) return false;
+      queue.set(tracks.map((t) => (t.id === oldId ? next : t)));
+      return true;
+    }),
     markPlayNext: vi.fn(),
     playAt: vi.fn(async () => undefined),
     play: vi.fn(async () => undefined),
@@ -400,10 +408,7 @@ describe('PlayerStore', () => {
     const engine = fakeEngine();
     const session = fakeSession();
     session.available.set(true);
-    session.startSession.mockImplementation(async () => {
-      session.error.set('Sessions are not available.');
-      return null;
-    });
+    session.startSession.mockImplementation(async () => null);
     configure(engine, session);
     const player = TestBed.inject(PlayerStore);
 
@@ -418,10 +423,29 @@ describe('PlayerStore', () => {
     // The local queue is live rather than blocked by the failed session.
     expect(player.queue()).toEqual([queue[1], queue[0]]);
     expect(player.currentIndex()).toBe(0);
+    expect(player.error()).toBeNull();
+  });
+
+  it('shows one human notice when the server refuses the queue', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    session.available.set(true);
+    session.startSession.mockImplementation(async () => {
+      session.error.set('queue-too-large');
+      return null;
+    });
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+
+    await player.playTracks(queue, 1, { shuffle: true, autoplay: false });
+
+    // The queue still plays locally; the refusal is one readable notice.
+    expect(engine.setQueue).toHaveBeenCalled();
     expect(player.error()).toEqual({
       trackId: '',
       code: 'unknown',
-      message: 'Playing on this device only — Sessions are not available.',
+      message:
+        'Playing on this device — the server could not start synced playback.',
     });
   });
 
@@ -551,6 +575,60 @@ describe('PlayerStore', () => {
     expect(counts.recordStart).toHaveBeenCalledTimes(2);
   });
 
+  it('restores the saved queue paused at its saved position', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    const storage = createInMemoryStorage();
+    await storage.queueState.save({
+      trackIds: queue.map((t) => t.id),
+      index: 0,
+      positionSec: 42,
+      shuffle: false,
+      repeat: 'off',
+    });
+    configure(engine, session, storage, { resolveIds: () => queue });
+    engine.setQueue.mockImplementationOnce(async (tracks, opts) => {
+      engine.queue.set([...tracks]);
+      engine.currentIndex.set(opts?.startIndex ?? 0);
+      engine.loadSeq.update((value) => value + 1);
+      engine.status.set('paused');
+    });
+    const player = TestBed.inject(PlayerStore);
+
+    await player.restore();
+
+    expect(engine.queue()).toEqual(queue);
+    expect(engine.currentIndex()).toBe(0);
+    expect(engine.status()).toBe('paused');
+    expect(engine.seek).toHaveBeenCalledWith(42);
+  });
+
+  it('does not seek a restored position over a play started during restore', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    const storage = createInMemoryStorage();
+    await storage.queueState.save({
+      trackIds: queue.map((t) => t.id),
+      index: 0,
+      positionSec: 42,
+      shuffle: false,
+      repeat: 'off',
+    });
+    configure(engine, session, storage, { resolveIds: () => queue });
+    // The restore's own load plus a user load that landed while it resolved.
+    engine.setQueue.mockImplementationOnce(async (tracks) => {
+      engine.queue.set([...tracks]);
+      engine.currentIndex.set(1);
+      engine.loadSeq.update((value) => value + 2);
+      engine.status.set('playing');
+    });
+    const player = TestBed.inject(PlayerStore);
+
+    await player.restore();
+
+    expect(engine.seek).not.toHaveBeenCalled();
+  });
+
   it('does not save or flush the local queue while a session owns playback', async () => {
     const engine = fakeEngine();
     const session = fakeSession();
@@ -653,7 +731,7 @@ describe('PlayerStore', () => {
     expect(session.command).not.toHaveBeenCalled();
   });
 
-  it('replaceTrack leaves a replaced non-current local record paused and returns false', async () => {
+  it('replaceTrack swaps a replaced non-current local record in place and returns false', async () => {
     const engine = fakeEngine();
     const session = fakeSession();
     configure(engine, session);
@@ -663,12 +741,15 @@ describe('PlayerStore', () => {
     engine.currentIndex.set(1);
     engine.status.set('paused');
 
-    expect(await player.replaceTrack(queue[0].id, next, { playCurrent: true })).toBe(false);
+    expect(
+      await player.replaceTrack(queue[0].id, next, { playCurrent: true }),
+    ).toBe(false);
 
-    expect(engine.setQueue).toHaveBeenCalledWith([next, queue[1]], {
-      startIndex: 1,
-      autoplay: false,
-    });
+    expect(engine.replaceUpcoming).toHaveBeenCalledWith(queue[0].id, next);
+    expect(engine.setQueue).not.toHaveBeenCalled();
+    // Only the upcoming entry changes; the current track keeps playing.
+    expect(engine.queue()).toEqual([next, queue[1]]);
+    expect(engine.currentIndex()).toBe(1);
   });
 
   it('replaceTrack replaces session entries by id, then starts the current entry on the target', async () => {

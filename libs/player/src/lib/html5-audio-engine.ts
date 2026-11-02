@@ -102,13 +102,19 @@ export class Html5AudioEngine implements AudioEngine {
       if (err instanceof DOMException && err.name === 'NotAllowedError') {
         throw new PlaybackBlockedError();
       }
-      // AbortError: a newer load() interrupted this play().
-      // NotSupportedError: the `error` event reports it with a proper code.
-      if (
-        err instanceof DOMException &&
-        (err.name === 'AbortError' || err.name === 'NotSupportedError')
-      ) {
+      // AbortError: a newer load() interrupted this play(); not a failure.
+      if (err instanceof DOMException && err.name === 'AbortError') {
         return;
+      }
+      // NotSupportedError: an `error` event may never follow when the element
+      // is already in an error state, so report the failure here instead.
+      if (err instanceof DOMException && err.name === 'NotSupportedError') {
+        throw this.audio.error
+          ? mapMediaError(this.audio.error)
+          : {
+              code: 'unsupported',
+              message: 'This audio format is not supported.',
+            };
       }
       throw err;
     }

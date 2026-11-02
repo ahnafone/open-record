@@ -166,20 +166,13 @@ export class PlayerStore {
     }
     const engineError = this.engine.error();
     if (engineError) return engineError;
-    const fallback = this.fallbackError();
-    return fallback
-      ? {
-          trackId: '',
-          code: 'unknown',
-          message: 'Playing on this device only — ' + fallback,
-        }
-      : null;
+    const notice = this.fallbackNotice();
+    return notice ? { trackId: '', code: 'unknown', message: notice } : null;
   });
   /**
-   * A local playback failure the user can retry. Excludes the fallback notice
-   * ("Playing on this device only") and a remote/session error, so only a real
-   * engine error offers "Try again". Transient failures are surfaced through
-   * `retrying()` instead, once the engine gives up.
+   * A local playback failure the user can retry. Excludes a remote/session
+   * notice, so only a real engine error offers "Try again". Transient failures
+   * are surfaced through `retrying()` instead, once the engine gives up.
    */
   readonly playbackError = computed<PlayerError | null>(() => {
     if (this.session.mirroring()) return null;
@@ -214,8 +207,8 @@ export class PlayerStore {
   /** `seq` of the last play handed to the counts store. */
   private seenPlaySeq = 0;
   private lastSaved = '';
-  /** Set when a session start failed and playback fell back to this device. */
-  private readonly fallbackError = signal<string | null>(null);
+  /** Set when the queue started locally because the server refused it. */
+  private readonly fallbackNotice = signal<string | null>(null);
   /** The bounded queue this client started, or null while none is active. */
   private readonly queueSource = signal<QueueSource | null>(null);
   /** A top-up is in flight: concurrent effect runs must not enqueue twice. */
@@ -338,7 +331,7 @@ export class PlayerStore {
     opts: PlayOptions = {},
   ): Promise<void> {
     this.queueSource.set(null);
-    this.fallbackError.set(null);
+    this.fallbackNotice.set(null);
     const kind: QueueKind = opts.queue ?? 'auto';
     const shuffle = opts.shuffle ?? this.shuffle();
     const built = buildQueueWindow(tracks, startIndex, kind, { shuffle });
@@ -352,7 +345,6 @@ export class PlayerStore {
       return;
     }
 
-    let fallback: string | null = null;
     if (this.session.available()) {
       // The queue starts on the current session target; this client becomes
       // the target only when none is active or responding. The server owns
@@ -365,14 +357,17 @@ export class PlayerStore {
       });
       if (ids) {
         this.queueSource.set({ window: built.window, kind, createdIds: new Set(ids) });
-        this.fallbackError.set(null);
+        this.fallbackNotice.set(null);
         return;
       }
       // A failed command path (offline, refused, retrying) must never block
-      // local playback: `startSession` leaves a non-null error behind.
-      fallback = this.session.error();
+      // local playback: the queue simply plays here.
+      this.fallbackNotice.set(
+        this.session.error()
+          ? 'Playing on this device — the server could not start synced playback.'
+          : null,
+      );
     }
-    this.fallbackError.set(fallback);
     if (opts.shuffle !== undefined) this.engine.setShuffle(shuffle);
     await this.engine.setQueue(built.tracks, {
       startIndex: built.cursor,
@@ -724,8 +719,11 @@ export class PlayerStore {
     if (!queue.some((t) => t.id === oldId)) return false;
     const current = this.engine.current();
     const replacedCurrent = current?.id === oldId;
-    const position = this.engine.position();
-    const wasPlaying = this.engine.isPlaying();
+    if (!replacedCurrent) {
+      // Only upcoming entries change: no reload, no cursor/order movement.
+      this.engine.replaceUpcoming(oldId, next);
+      return false;
+    }
     const playNextIds = this.engine
       .playNextIndices()
       .map((i) => (queue[i].id === oldId ? next.id : queue[i].id));
@@ -733,11 +731,10 @@ export class PlayerStore {
       queue.map((t) => (t.id === oldId ? next : t)),
       {
         startIndex: Math.max(0, this.engine.currentIndex()),
-        autoplay: replacedCurrent ? playCurrent : wasPlaying,
+        autoplay: playCurrent,
       },
     );
     this.restorePlayNext(playNextIds);
-    if (!replacedCurrent && position > 0) await this.engine.seek(position);
     return replacedCurrent;
   }
 
@@ -916,9 +913,19 @@ export class PlayerStore {
 
     this.engine.setRepeat(saved.repeat);
     this.engine.setShuffle(saved.shuffle);
+    // Restoring is one load. If the user starts something else while it is
+    // still resolving, the generation moves past that and the old saved
+    // position must not seek over the new play.
+    const generation = this.engine.loadSeq();
     await this.engine.setQueue(tracks, { startIndex: index, autoplay: false });
     this.restorePlayNext(saved.playNextIds);
-    if (position > 0 && this.engine.status() === 'paused')
+    const sameLoad = this.engine.loadSeq() === generation + 1;
+    if (
+      position > 0 &&
+      sameLoad &&
+      this.engine.current()?.id === tracks[index]?.id &&
+      this.engine.status() === 'paused'
+    )
       await this.engine.seek(position);
     this.queueSource.set(this.restoreSource(saved));
   }

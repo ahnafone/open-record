@@ -8,12 +8,16 @@ import type { Track } from '@open-record/models';
 @Injectable({ providedIn: 'root' })
 export class SourceFixService {
   readonly track = signal<Track | null>(null);
+  /** Element to send focus back to when the dialog closes. */
+  readonly returnFocus = signal<HTMLElement | null>(null);
 
-  open(track: Track): void {
+  open(track: Track, returnFocus?: HTMLElement): void {
     this.track.set(track);
+    this.returnFocus.set(returnFocus ?? null);
   }
 
   close(): void {
     this.track.set(null);
+    this.returnFocus.set(null);
   }
 }

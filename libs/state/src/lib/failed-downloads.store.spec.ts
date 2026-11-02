@@ -178,4 +178,34 @@ describe('failed downloads store', () => {
     });
     expect(offline.ensureSaved).toHaveBeenCalledTimes(1);
   });
+
+  it('replaceSource swaps a non-current source without starting it or saving it', async () => {
+    const { store, old, candidate, player, library, playlists, sessions, importer, offline } =
+      setupPlaybackFix();
+    player.current.set(null);
+
+    const result = await store.replaceSource(old, candidate);
+
+    // No playCurrent option: only upcoming queue entries are swapped.
+    expect(player.replaceTrack).toHaveBeenCalledTimes(1);
+    expect(player.replaceTrack.mock.calls[0]).toEqual([
+      old.id,
+      expect.objectContaining({
+        id: candidate.id,
+        providerId: candidate.providerId,
+        source: candidate.source,
+      }),
+    ]);
+    expect(offline.forget).toHaveBeenCalledWith([old.id]);
+    expect(library.replaceTrackId).toHaveBeenCalledWith(old.id, expect.objectContaining({ id: candidate.id }));
+    expect(playlists.replaceTrackEverywhere).toHaveBeenCalledWith(old.id, candidate.id);
+    expect(sessions.replaceTrackId).toHaveBeenCalledWith(old.id, candidate.id);
+    expect(importer.replaceMatchId).toHaveBeenCalledWith(old.id, expect.objectContaining({ id: candidate.id }));
+    // Not stored before: no download is scheduled for the replacement.
+    expect(offline.ensureSaved).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      track: expect.objectContaining({ id: candidate.id }),
+      current: false,
+    });
+  });
 });

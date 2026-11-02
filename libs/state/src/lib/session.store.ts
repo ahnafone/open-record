@@ -45,6 +45,15 @@ const SEEK_TOLERANCE_SEC = 2;
 /** Window in which the same (entry, reason, playing) report is not sent twice. */
 const REPORT_DEDUPE_MS = 1000;
 
+/** Command failures that mean the transport is not usable, not a refusal. */
+const QUIET_COMMAND_FAILURES: ReadonlySet<string> = new Set([
+  'offline',
+  'unavailable',
+  'timeout',
+  'superseded',
+  'unknown-client',
+]);
+
 /** Internal: a newer transfer aborted this upload batch; never shown as an error. */
 const CAST_UPLOAD_ABORTED = { ok: false, error: 'aborted' } as const;
 
@@ -324,7 +333,9 @@ export class SessionStore {
         return;
       }
       if (entryId !== previousEntry) {
-        this.report('native-skip');
+        this.report('native-skip', {
+          playing: status === 'playing' || this.engine.intendsToPlay,
+        });
         return;
       }
       if (status === 'ended' && previousStatus !== 'ended') {
@@ -411,6 +422,12 @@ export class SessionStore {
     return true;
   }
 
+  /** Record a refused command; a transport failure just means local playback. */
+  private recordRefusal(error: string): void {
+    if (QUIET_COMMAND_FAILURES.has(error)) return;
+    this.error.set(error);
+  }
+
   /**
    * Replace the session queue with `order` (sent in natural order; the server
    * materialises shuffle) and start it on the current target when that target
@@ -426,7 +443,7 @@ export class SessionStore {
     // A queue change supersedes any upload batch for the queue being replaced.
     this.abortCastUploads();
     if (!this.port || !this.available()) {
-      this.error.set('Sessions are not available.');
+      this.error.set(null);
       return null;
     }
     await this.settings.ready();
@@ -467,7 +484,7 @@ export class SessionStore {
       result = await this.command(setQueue);
     }
     if (!result.ok) {
-      this.error.set(result.error ?? 'Could not start playback.');
+      this.recordRefusal(result.error ?? 'Could not start playback.');
       return null;
     }
 
@@ -489,7 +506,7 @@ export class SessionStore {
       repeat: opts.repeat,
     });
     if (!repeat.ok) {
-      this.error.set(repeat.error ?? 'Could not set the repeat mode.');
+      this.recordRefusal(repeat.error ?? 'Could not set the repeat mode.');
       return null;
     }
 
@@ -512,7 +529,7 @@ export class SessionStore {
         },
       });
       if (!transfer.ok) {
-        this.error.set(transfer.error ?? 'Could not transfer playback.');
+        this.recordRefusal(transfer.error ?? 'Could not transfer playback.');
         return null;
       }
     }
@@ -522,7 +539,9 @@ export class SessionStore {
   /** Report an observation to the server. Target only; throttled. */
   report(
     reason: SessionReportMessage['reason'],
-    extra?: Partial<Pick<SessionReportMessage, 'entryId' | 'durationSec'>>,
+    extra?: Partial<
+      Pick<SessionReportMessage, 'entryId' | 'durationSec' | 'playing'>
+    >,
   ): void {
     if (!this.started || !this.port || !this.isTarget()) return;
     if (this.applyingRemote) return;
@@ -914,7 +933,9 @@ export class SessionStore {
 
   private emitReport(
     reason: SessionReportMessage['reason'],
-    extra?: Partial<Pick<SessionReportMessage, 'entryId' | 'durationSec'>>,
+    extra?: Partial<
+      Pick<SessionReportMessage, 'entryId' | 'durationSec' | 'playing'>
+    >,
   ): void {
     const port = this.port;
     const state = this.session();
@@ -923,7 +944,7 @@ export class SessionStore {
       extra?.entryId ?? (this.engineEntryId() || this.currentEntryId() || '');
     if (!entryId) return;
 
-    const playing = this.engine.status() === 'playing';
+    const playing = extra?.playing ?? this.engine.status() === 'playing';
     const now = Date.now();
     if (reason === 'tick') {
       // No anchor while paused, and at most one tick per throttle window.

@@ -2,12 +2,17 @@ import type { PlayableSource, Track } from '@open-record/models';
 import type {
   AudioEngine,
   AudioEngineListener,
+  EngineError,
   EngineErrorCode,
   EngineMedia,
   EngineNeighbours,
   SkipDirection,
 } from './audio-engine';
-import { LOAD_RETRY_DELAYS_MS, PlayerEngine } from './player-engine';
+import {
+  LOAD_RETRY_DELAYS_MS,
+  PlayerEngine,
+  UNSUPPORTED_REMOTE_RETRY_DELAYS_MS,
+} from './player-engine';
 import type { PlayerEngineOptions } from './player-engine';
 
 class FakeEngine implements AudioEngine {
@@ -23,6 +28,8 @@ class FakeEngine implements AudioEngine {
   failCode: EngineErrorCode = 'decode';
   /** Ids whose `load` rejects (a load failure rather than a media error). */
   failLoadOn = new Set<string>();
+  /** When set, `play` rejects with this engine error (a failed resume). */
+  rejectPlayWith: EngineError | null = null;
 
   constructor(wantsNeighbours = false) {
     this.wantsNeighbours = wantsNeighbours;
@@ -37,6 +44,7 @@ class FakeEngine implements AudioEngine {
     if (this.failLoadOn.has(media.id)) throw new Error('load failed');
   }
   async play(): Promise<void> {
+    if (this.rejectPlayWith) throw this.rejectPlayWith;
     const id = this.loaded.at(-1) ?? '';
     if (this.failOn.has(id)) {
       this.listener?.onError({ code: this.failCode, message: 'bad file' });
@@ -236,6 +244,39 @@ describe('PlayerEngine', () => {
     expect(player.upcomingEntries().some((e) => e.playNext)).toBe(false);
   });
 
+  describe('replaceUpcoming', () => {
+    it('swaps a non-current entry in place without loading media', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      player.playNext([track('x')]);
+      fake.listener?.onTime(30);
+      const loads = fake.loaded.length;
+      const seq = player.loadSeq();
+      const position = player.position();
+      const status = player.status();
+      const current = player.current();
+      const next = sourced('b', '/b-v2.mp3');
+
+      expect(player.replaceUpcoming('b', next)).toBe(true);
+
+      expect(player.queue().map((t) => t.id)).toEqual(['a', 'x', 'b', 'c']);
+      expect(player.queue()[2]).toBe(next);
+      // Playback is untouched: same load generation, media and transport state.
+      expect(player.current()).toBe(current);
+      expect(player.currentIndex()).toBe(0);
+      expect(player.loadSeq()).toBe(seq);
+      expect(fake.loaded.length).toBe(loads);
+      expect(player.status()).toBe(status);
+      expect(player.position()).toBe(position);
+      expect(player.playNextIndices()).toEqual([1]);
+
+      // The current record and an absent id are refused.
+      expect(player.replaceUpcoming('a', track('z'))).toBe(false);
+      expect(player.replaceUpcoming('missing', track('z'))).toBe(false);
+      expect(player.queue().map((t) => t.id)).toEqual(['a', 'x', 'b', 'c']);
+    });
+  });
+
   describe('failed loads never move the queue', () => {
     it('retries a resolve failure on the same track, then errors', async () => {
       vi.useFakeTimers();
@@ -361,6 +402,228 @@ describe('PlayerEngine', () => {
       expect(player.error()).toMatchObject({ trackId: 'a', code: 'decode' });
       // Raw engine detail is not leaked into the user-facing copy.
       expect(player.error()?.message).not.toContain('bad file');
+    });
+
+    it('retries an unsupported remote source after the 2s floor, then plays', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup({
+          resolve: async (t) => ({
+            url: `/remote/${t.id}.mp3`,
+            kind: 'remote',
+          }),
+        });
+        fake.failOn.add('a');
+        fake.failCode = 'unsupported';
+
+        await player.setQueue(tracks.slice(0, 2));
+        expect(fake.loaded).toEqual(['a']);
+        expect(player.status()).toBe('loading');
+        expect(player.retrying()).toBe(true);
+
+        fake.failOn.delete('a');
+        // The 2s floor wins over the shorter default backoff.
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[0] - 1);
+        expect(fake.loaded).toEqual(['a']);
+        await wait(1);
+        expect(fake.loaded).toEqual(['a', 'a']);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('playing');
+        expect(player.retrying()).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('gives a cold remote link the full ~10s warm-up window', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, fake } = setup({
+          resolve: async (t) => ({
+            url: `/remote/${t.id}.mp3`,
+            kind: 'remote',
+          }),
+        });
+        fake.failOn.add('a');
+        fake.failCode = 'unsupported';
+
+        await player.setQueue([track('a')]);
+        expect(fake.loaded).toHaveLength(1);
+        expect(player.retrying()).toBe(true);
+
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[0]);
+        expect(fake.loaded).toHaveLength(2);
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[1]);
+        expect(fake.loaded).toHaveLength(3);
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[2]);
+        expect(fake.loaded).toHaveLength(4);
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an unsupported local source terminal (no retry)', async () => {
+      vi.useFakeTimers();
+      try {
+        for (const kind of ['bundled', 'file'] as const) {
+          const { player, fake } = setup({
+            resolve: async (t) => ({ url: `/${t.id}.mp3`, kind }),
+          });
+          fake.failOn.add('a');
+          fake.failCode = 'unsupported';
+
+          await player.setQueue([track('a')]);
+          expect(player.status()).toBe('error');
+          expect(player.retrying()).toBe(false);
+          expect(player.error()).toMatchObject({
+            trackId: 'a',
+            code: 'unsupported',
+          });
+
+          await wait(10_000);
+          expect(fake.loaded).toEqual(['a']);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries an unsupported resume of a remote source, then plays', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, ids, fake } = setup({
+          resolve: async (t) => ({
+            url: `/remote/${t.id}.mp3`,
+            kind: 'remote',
+          }),
+        });
+        await player.setQueue(tracks.slice(0, 2), { autoplay: false });
+        expect(player.status()).toBe('paused');
+        expect(fake.loaded).toEqual(['a']);
+
+        fake.rejectPlayWith = { code: 'unsupported', message: 'not ready' };
+        await player.play();
+        expect(player.status()).toBe('loading');
+        expect(player.retrying()).toBe(true);
+        expect(player.error()).toBeNull();
+
+        fake.rejectPlayWith = null;
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[0] - 1);
+        expect(fake.loaded).toEqual(['a']);
+        await wait(1);
+        expect(fake.loaded).toEqual(['a', 'a']);
+        expect(ids()).toBe('a');
+        expect(player.status()).toBe('playing');
+        expect(player.retrying()).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('lets a slow load finish when play is pressed again', async () => {
+      let release!: (source: PlayableSource) => void;
+      const { player, fake } = setup({
+        resolve: () =>
+          new Promise<PlayableSource>((resolve) => {
+            release = resolve;
+          }),
+      });
+      const started = player.setQueue([track('a')]);
+      await flush();
+      expect(player.status()).toBe('loading');
+
+      // The control shows Play while loading: a second press must not cancel
+      // the in-flight load (e.g. a cold remote link).
+      await player.togglePlay();
+      expect(player.status()).toBe('loading');
+      expect(player.error()).toBeNull();
+      expect(fake.loaded).toEqual([]);
+
+      release({ url: '/a.mp3', kind: 'bundled' });
+      await started;
+      expect(player.status()).toBe('playing');
+      expect(fake.loaded).toEqual(['a']);
+    });
+
+    it('retries a resume after playback had started', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, fake } = setup({
+          resolve: async (t) => ({
+            url: `/remote/${t.id}.mp3`,
+            kind: 'remote',
+          }),
+        });
+        await player.setQueue(tracks.slice(0, 2));
+        expect(player.status()).toBe('playing');
+        await player.pause();
+        expect(player.status()).toBe('paused');
+
+        fake.rejectPlayWith = { code: 'unsupported', message: 'not ready' };
+        await player.play();
+        expect(player.status()).toBe('loading');
+        expect(player.retrying()).toBe(true);
+
+        fake.rejectPlayWith = null;
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[0]);
+        expect(player.status()).toBe('playing');
+        expect(player.error()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an unsupported resume of a local source terminal (no retry)', async () => {
+      vi.useFakeTimers();
+      try {
+        for (const kind of ['bundled', 'file'] as const) {
+          const { player, ids, fake } = setup({
+            resolve: async (t) => ({ url: `/${t.id}.mp3`, kind }),
+          });
+          await player.setQueue([track('a')], { autoplay: false });
+          expect(player.status()).toBe('paused');
+
+          fake.rejectPlayWith = { code: 'unsupported', message: 'bad format' };
+          await player.play();
+          expect(player.status()).toBe('error');
+          expect(player.retrying()).toBe(false);
+          expect(ids()).toBe('a');
+          expect(player.error()).toMatchObject({
+            trackId: 'a',
+            code: 'unsupported',
+          });
+
+          await wait(10_000);
+          expect(fake.loaded).toEqual(['a']);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps a mid-track unsupported error terminal, even for a remote source', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, fake } = setup({
+          resolve: async (t) => ({
+            url: `/remote/${t.id}.mp3`,
+            kind: 'remote',
+          }),
+        });
+        await player.setQueue(tracks.slice(0, 2));
+        expect(player.status()).toBe('playing');
+
+        fake.listener?.onError({ code: 'unsupported', message: 'dropped' });
+        expect(player.status()).toBe('error');
+        expect(player.retrying()).toBe(false);
+
+        await wait(10_000);
+        expect(fake.loaded).toEqual(['a']);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not retry when autoplay is false', async () => {

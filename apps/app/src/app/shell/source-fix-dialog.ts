@@ -358,7 +358,10 @@ export class OrSourceFixDialog {
 
   protected close(): void {
     if (this.checking()) return;
+    // Capture before close() clears it: the opening screen's control.
+    const origin = this.sourceFix.returnFocus();
     this.sourceFix.close();
+    this.restoreFocus(origin);
   }
 
   protected onInput(event: Event): void {
@@ -429,7 +432,7 @@ export class OrSourceFixDialog {
       });
   }
 
-  /** Check a candidate, then swap the source and start playing it. */
+  /** Check a candidate, then swap the source (starting it when current). */
   private async apply(
     id: string,
     check: (signal: AbortSignal) => Promise<Track>,
@@ -443,14 +446,15 @@ export class OrSourceFixDialog {
     try {
       const candidate = await check(abort.signal);
       if (abort.signal.aborted) return;
-      const result = await this.store.replaceForPlayback(track.id, candidate);
+      const result = await this.store.replaceSource(track, candidate);
+      const origin = this.sourceFix.returnFocus();
       this.sourceFix.close();
       this.toast.show(
         result.current
           ? `Source changed. Playing “${result.track.title}”.`
-          : 'Source changed, but that record is no longer current.',
+          : 'Source changed.',
       );
-      this.focusTitle();
+      this.restoreFocus(origin, result.track.id);
     } catch (error) {
       if (abort.signal.aborted || isAbort(error)) return;
       this.error.set(
@@ -463,30 +467,51 @@ export class OrSourceFixDialog {
     }
   }
 
-  /** Return focus to the Now Playing title after the modal closes. */
-  private focusTitle(): void {
+  /**
+   * After the dialog closes, focus the replaced row's options button (the new
+   * id), else the control that opened the dialog, else Now Playing's title.
+   */
+  private restoreFocus(origin: HTMLElement | null, trackId?: string): void {
     afterNextRender(
       () => {
-        const page = this.document.querySelector<HTMLElement>(
-          'or-now-playing-page',
-        );
-        const title = page?.querySelector<HTMLElement>(
-          '[data-now-playing-title]',
-        );
-        if (title) {
-          title.focus();
+        // Only a row-opened dialog should return to a row; Now Playing keeps
+        // its own title/transport focus path below.
+        if (origin && trackId) {
+          for (const el of this.document.querySelectorAll<HTMLElement>(
+            '[data-options]',
+          )) {
+            if (el.dataset['options'] !== trackId) continue;
+            (el.querySelector<HTMLElement>('button') ?? el).focus();
+            return;
+          }
+        }
+        if (origin?.isConnected) {
+          origin.focus();
           return;
         }
-        const fallback =
-          page?.querySelector<HTMLElement>(
-            '.transport button[aria-label="Play"], .transport button[aria-label="Pause"], .status button',
-          ) ??
-          this.document.querySelector<HTMLElement>(
-            'or-player-bar .play button, or-mini-player button[aria-label="Pause"], or-mini-player button[aria-label="Play"]',
-          );
-        fallback?.focus();
+        this.focusTitle();
       },
       { injector: this.injector },
     );
+  }
+
+  /** Return focus to the Now Playing title (or transport) as a last resort. */
+  private focusTitle(): void {
+    const page = this.document.querySelector<HTMLElement>(
+      'or-now-playing-page',
+    );
+    const title = page?.querySelector<HTMLElement>('[data-now-playing-title]');
+    if (title) {
+      title.focus();
+      return;
+    }
+    const fallback =
+      page?.querySelector<HTMLElement>(
+        '.transport button[aria-label="Play"], .transport button[aria-label="Pause"], .status button',
+      ) ??
+      this.document.querySelector<HTMLElement>(
+        'or-player-bar .play button, or-mini-player button[aria-label="Pause"], or-mini-player button[aria-label="Play"]',
+      );
+    fallback?.focus();
   }
 }

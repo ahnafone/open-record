@@ -425,9 +425,10 @@ overlays.
   item's title turns coral. Library and Search rows carry the same source and
   download-state tags as playlist rows and a trailing tabular duration
   (`h:mm:ss` from an hour); missing fields are simply omitted. Library rows
-  (Saved and Imported) end with a bookmark toggle and an options button
-  (Play next); the playing row gets a faint coral tint and an "On the
-  turntable" / "Paused" line. On desktop each Library list gains Album,
+  (Saved and Imported) end with a bookmark toggle and a ⋯ options menu (Play
+  next, Fix source only when the record has a source link, and Close); the
+  playing row gets a faint coral tint and an "On the turntable" / "Paused"
+  line. On desktop each Library list gains Album,
   Source and Date added columns (saved date for Saved, import date for
   Imported; an em dash when unknown) under a header row (Title, Album,
   Source, Date added, Duration) whose buttons sort that list ascending,
@@ -444,13 +445,16 @@ overlays.
   ascending, descending, then back to the custom playlist order
   (`aria-sort`); Play, Shuffle and row taps follow the displayed order, and
   Move up/down only appear in custom order. The options menu also has Play
-  next.
+  next and, when the record has a source link, Fix source.
 - **Missing artwork:** a designed fallback, a grooved disc with an ivory centre
   label; never a broken-image icon or a fake sleeve.
 - **Now Playing:** large sleeve over a disc, artist in muted 15px, a status
   line (loading spinner or coral error), a seek slider (4px track, coral
   fill, 16px coral thumb ringed in background colour) with tabular times, and
-  a transport row of 52px circular buttons around a 68px coral play button.
+  a transport row of 52px circular buttons around a 68px coral play button. A
+  failed local playback shows a toast pointing to the song's ⋯ menu, where
+  Fix source opens the same suggestion list and YouTube / YouTube Music paste
+  field used by Fix failed downloads.
 - **Download progress:** under auto-download switches while songs download:
   12px muted "Downloading · N left" and tabular "X of Y on device" over a 4px
   coral bar (`role="progressbar"`); hidden when idle. On Android it
@@ -586,13 +590,25 @@ nothing changes.
   next and repeat over a seek bar with tabular times; a save-to-library
   bookmark toggle, volume (mute button plus slider) and a Now Playing
   toggle (`aria-pressed`).
-- **Now Playing:** a 360px side panel beside the content, toggled from the
-  player bar. It shows art, details and Up next only; transport controls live
-  in the player bar. Up next rows have an options menu (Play next, Remove from
-  queue), and tracks marked Play next play before the normal queue. The `/now-playing` route becomes two columns (sticky sleeve left,
+- **Now Playing:** a side panel beside the content, default 360px wide,
+  resizable from 280px to 600px by dragging the separator on its left edge
+  (the seam between the content/list and the panel, not the left navigation
+  sidebar). The separator has an 8–9px hit area around a 1px muted line that
+  turns coral on hover, focus or drag; Arrow Left/Right (Shift = 64px) and
+  Home/End resize it, and double-click resets to 360px. The panel is toggled
+  from the player bar, and its open/closed state and width are remembered per
+  device and restored on reload. It shows art, details and Up next only;
+  transport controls live in the player bar. Up next rows have an options menu
+  (Play next, Remove from queue), and tracks marked Play next play before the
+  normal queue. The `/now-playing` route becomes two columns (sticky sleeve left,
   details and queue right).
-- **Keyboard:** Space play/pause, Left/Right seek 5s, Shift+Left/Right
-  previous/next, M mute, / search. Ignored while typing or in a dialog.
+- **Keyboard:** Space play/pause, PageDown next, PageUp previous, Left/Right
+  seek 5s, Shift+Left/Right previous/next, M mute, / search. PC media keys
+  (play/pause, next and previous) work through Media Session, with a keydown
+  fallback. Ordinary shortcuts are ignored while typing or in a dialog; media
+  keys still work there, and a focused slider keeps its own PageUp/PageDown
+  steps. When the Now Playing separator has focus, Left/Right resize the
+  panel instead of seeking.
 - **Account:** a pushed page (opened from the sidebar Account row or Settings)
   with the profile (joined date, account age, last sign-in), library and
   playlist stats, Sync now, change password (current password required), change email, Sign out, Sign out

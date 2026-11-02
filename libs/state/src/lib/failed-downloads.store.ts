@@ -249,10 +249,9 @@ export class FailedDownloadsStore {
   }
 
   /**
-   * Replace the source of the record that failed to play, then start it.
-   * The queue swap happens before the library/playlist migration so a queue
-   * rejection leaves the library untouched. A failed queue play still keeps
-   * the source change for the rest of the queue.
+   * Point the failed record that is playing at a checked `candidate`, then
+   * start it. Current-only wrapper over `replaceSource`; a record that is no
+   * longer playing is refused rather than silently swapped.
    */
   async replaceForPlayback(
     oldId: string,
@@ -263,22 +262,44 @@ export class FailedDownloadsStore {
       this.library.track(oldId) ??
       (this.player.current()?.id === oldId ? this.player.current() : null);
     if (!old) throw new Error('That record is no longer available.');
+    if (this.player.current()?.id !== oldId) throw new Error('That record is no longer playing.');
+    return this.replaceSource(old, candidate);
+  }
+
+  /**
+   * Point `old` at a checked `candidate`, keeping the user's metadata,
+   * bookmark and playlist places. The queue swap happens before the
+   * library/playlist migration so a queue rejection leaves the library
+   * untouched; the queue entry is only started when it was already current.
+   */
+  async replaceSource(
+    old: Track,
+    candidate: Track,
+  ): Promise<{ track: Track; current: boolean }> {
+    await Promise.all([this.library.ready(), this.playlists.ready()]);
     if (!candidate.source?.url || !youtubeVideoUrl(candidate.source.url)) throw new Error(NOT_A_YOUTUBE_LINK);
     const oldVideo = old.source?.url ? youtubeVideoId(old.source.url) : null;
     const candidateVideo = youtubeVideoId(candidate.source.url);
     if (oldVideo && candidateVideo && oldVideo === candidateVideo) throw new Error(SAME_RECORDING);
-    if (this.player.current()?.id !== oldId) throw new Error('That record is no longer playing.');
 
-    const wasStored = !!this.library.storedRecord(oldId);
+    const wasCurrent = this.player.current()?.id === old.id;
+    const wasStored = !!this.library.storedRecord(old.id);
     const next = this.swappedSource(old, candidate);
-    const current = await this.player.replaceTrack(oldId, next, { playCurrent: true });
+    let current = false;
+    if (wasCurrent) {
+      current = await this.player.replaceTrack(old.id, next, {
+        playCurrent: true,
+      });
+    } else {
+      await this.player.replaceTrack(old.id, next);
+    }
     // The queue now points at the new id: stop any save still working on the
     // old one before its record is migrated away.
-    this.offline.forget([oldId]);
-    await this.library.replaceTrackId(oldId, next);
-    await this.playlists.replaceTrackEverywhere(oldId, next.id);
-    await this.sessions.replaceTrackId(oldId, next.id);
-    await this.importer.replaceMatchId(oldId, next);
+    this.offline.forget([old.id]);
+    await this.library.replaceTrackId(old.id, next);
+    await this.playlists.replaceTrackEverywhere(old.id, next.id);
+    await this.sessions.replaceTrackId(old.id, next.id);
+    await this.importer.replaceMatchId(old.id, next);
     if (wasStored) {
       // The source change and playback already happened: a download
       // scheduling failure must not turn that into a failed fix.

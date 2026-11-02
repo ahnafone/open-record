@@ -37,7 +37,7 @@ Plans for v1 (frontend app), v2 (backend) and later are in [roadmap/](roadmap/RE
 - **Account:** profile (joined date, age, last sign-in), library and playlist stats, Sync now, change password (asks for the current one; a reset-email link is the only way to set one without it), change email, sign out, sign out of all devices and delete account. Deletion calls a `security definer` SQL function (`supabase/migrations/`), so no `service_role` key is ever used.
 - **Filter and long lists:** Library and each playlist have a filter field that matches title, artist and album (every word, ignoring case and accents); Play, Shuffle and row taps use the filtered list, and Move up/down hide while filtering. Long track lists (Library, playlists, import sessions) render 40 rows at first and add more as you scroll.
 - **Queue:** Play next (from a playlist row's options or an Up next row) plays before the normal queue; Up next rows also have Remove from queue.
-- **Now playing:** full-screen player with sleeve art, label, year and genre tags, seek bar, plus a persistent mini player with pause and next. On desktop the side panel shows art, details and Up next only (transport controls are in the player bar, which also has a save-to-library bookmark).
+- **Now playing:** full-screen player with sleeve art, label, year and genre tags, seek bar, plus a persistent mini player with pause and next. On desktop the side panel shows art, details and Up next only (transport controls are in the player bar, which also has a save-to-library bookmark). Desktop playback also responds to Space, Page Up/Down and the PC's media keys.
 
 ## Screenshots
 

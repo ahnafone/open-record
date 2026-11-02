@@ -35,6 +35,8 @@ interface AttemptFailure {
   retryable: boolean;
   /** Server's Retry-After hint in seconds, when it sent a usable one. */
   retryAfterSec?: number;
+  /** Backoff sequence for this failure, in place of `retryDelaysMs`. */
+  retryDelaysMs?: readonly number[];
 }
 
 export interface PlayerEngineOptions {
@@ -72,6 +74,14 @@ export const LOAD_RETRY_DELAYS_MS: readonly number[] = Object.freeze([
 
 /** Cap the server's Retry-After hint so a failed play stays responsive. */
 const MAX_RETRY_AFTER_MS = 3000;
+
+/**
+ * Backoff before retrying a remote link that is not playable yet (googlevideo
+ * URLs can answer 403 for roughly 2-10 s while warming). Matches the download
+ * path's window, so a cold link gets the same chance to become ready.
+ */
+export const UNSUPPORTED_REMOTE_RETRY_DELAYS_MS: readonly number[] =
+  Object.freeze([2000, 3000, 5000]);
 
 /** A track as it will play, with where it sits in the queue. */
 export interface UpcomingEntry {
@@ -207,6 +217,8 @@ export class PlayerEngine {
   private failedToken = -1;
   /** Load token whose media has been loaded into the engine. */
   private loadedToken = -1;
+  /** Kind of the source most recently handed to the engine. */
+  private loadedSourceKind: PlayableSource['kind'] | undefined;
   /** Load token for which playback actually started. */
   private startedToken = -1;
   /** Load token that already reported a play. */
@@ -256,7 +268,7 @@ export class PlayerEngine {
       onDuration: (sec) => this._duration.set(sec),
       onEnded: () => void this.handleEnded(),
       onError: (err) =>
-        this.fail(engineFailure(err), this.loadToken),
+        this.fail(engineFailure(err, this.loadedSourceKind), this.loadToken),
       onSkipped: (dir, trackId?: string) =>
         void this.handleSkipped(dir, trackId),
     });
@@ -362,6 +374,21 @@ export class PlayerEngine {
   }
 
   /**
+   * Swap `oldId` for `next` in every upcoming queue entry, in place. The
+   * current track (or an absent id) is refused, so no media is reloaded and
+   * status, position, cursor, order and "Play next" marks are untouched.
+   * Returns whether an entry was replaced.
+   */
+  replaceUpcoming(oldId: string, next: Track): boolean {
+    if (oldId === this.current()?.id) return false;
+    const queue = this._queue();
+    if (!queue.some((t) => t.id === oldId)) return false;
+    this._queue.set(queue.map((t) => (t.id === oldId ? next : t)));
+    this.refreshNeighbours();
+    return true;
+  }
+
+  /**
    * Forget all but the most recent `keep` played entries before the cursor.
    * Playback is unaffected: no media is reloaded and status/position stay put.
    */
@@ -391,6 +418,7 @@ export class PlayerEngine {
     this.attempts = 0;
     this.loadedToken = -1;
     this.startedToken = -1;
+    this.loadedSourceKind = undefined;
     this.playIntent = false;
     this.neighbourSignature = '';
     this._queue.set([]);
@@ -479,6 +507,15 @@ export class PlayerEngine {
 
   // ---- Transport ---------------------------------------------------------
 
+  /**
+   * Whether the current media load is meant to play once it is ready. An
+   * automatic advance is `loading` for a while; a shared session must still
+   * see it as playing instead of pausing the next record.
+   */
+  get intendsToPlay(): boolean {
+    return this.playIntent;
+  }
+
   async play(): Promise<void> {
     if (this._cursor() < 0) return;
     this.playIntent = true;
@@ -500,8 +537,14 @@ export class PlayerEngine {
       await this.engine.seek(0);
       this.resetListen();
     }
-    // A resume is a fresh failure surface: do not suppress an error because
-    // the previous attempt (which the user paused) was already handled.
+    // Starting/resuming is a load phase too: show progress until the engine
+    // reports `playing`, instead of leaving the UI on "paused" while buffering.
+    // It is also a fresh failure surface: reset the token guards so a failed
+    // resume can retry instead of being treated as a mid-track failure.
+    if (status !== 'playing') {
+      this._status.set('loading');
+      this.startedToken = -1;
+    }
     this.failedToken = -1;
     await this.startEngine();
   }
@@ -524,9 +567,15 @@ export class PlayerEngine {
 
   async togglePlay(): Promise<void> {
     const status = this._status();
-    if (status === 'playing' || (status === 'loading' && this.playIntent)) {
+    if (status === 'playing') {
       await this.pause();
-    } else await this.play();
+      return;
+    }
+    // The control shows "Play" during a load, so pressing it again is a
+    // request to start, not to cancel. Ignoring it lets a slow remote link
+    // finish instead of cancelling the retry behind the user's back.
+    if (status === 'loading') return;
+    await this.play();
   }
 
   /** Go to the next track. Returns false at the end with repeat off. */
@@ -778,9 +827,14 @@ export class PlayerEngine {
     try {
       await this.engine.play();
     } catch (err) {
-      if (!(err instanceof PlaybackBlockedError)) throw err;
-      this.playIntent = false;
-      this._status.set('paused');
+      if (err instanceof PlaybackBlockedError) {
+        this.playIntent = false;
+        this._status.set('paused');
+        return;
+      }
+      // A resume/replay failure must be recorded (and retried when it can be)
+      // rather than escaping as an unhandled rejection.
+      this.fail(engineFailure(err, this.loadedSourceKind), this.loadToken);
     }
   }
 
@@ -823,6 +877,7 @@ export class PlayerEngine {
         ? await this.resolveNeighbours()
         : undefined;
       if (token !== this.loadToken) return;
+      this.loadedSourceKind = media.source.kind;
       await this.engine.load(media, neighbours);
       if (token !== this.loadToken) return;
       this.loadedToken = token;
@@ -835,7 +890,7 @@ export class PlayerEngine {
         this._status.set('paused');
         return;
       }
-      this.fail(engineFailure(err), token);
+      this.fail(engineFailure(err, media.source.kind), token);
     }
   }
 
@@ -851,17 +906,18 @@ export class PlayerEngine {
     // A failure after playback started is a mid-track error: stop here.
     const started =
       this.startedToken === token || this._status() === 'playing';
+    const retryDelays = failure.retryDelaysMs ?? this.retryDelaysMs;
     if (
       this.playIntent &&
       !started &&
       failure.retryable &&
-      this.attempts <= this.retryDelaysMs.length
+      this.attempts <= retryDelays.length
     ) {
       const hint = failure.retryAfterSec;
       const delayMs =
         hint !== undefined && hint > 0
           ? Math.min(hint * 1000, MAX_RETRY_AFTER_MS)
-          : (this.retryDelaysMs[this.attempts - 1] ?? 0);
+          : (retryDelays[this.attempts - 1] ?? 0);
       this.scheduleRetry(token, delayMs);
       return;
     }
@@ -1040,12 +1096,22 @@ const ENGINE_ERROR_MESSAGES: Record<EngineError['code'], string> = {
   unknown: 'This record could not be played. Try again.',
 };
 
-function engineFailure(err: unknown): AttemptFailure {
+function engineFailure(
+  err: unknown,
+  sourceKind?: PlayableSource['kind'],
+): AttemptFailure {
   const code = engineErrorCode(err);
+  const warmingRemote = code === 'unsupported' && sourceKind === 'remote';
   return {
     code,
     message: ENGINE_ERROR_MESSAGES[code],
-    retryable: code === 'network' || code === 'unknown',
+    retryable:
+      code === 'network' ||
+      code === 'unknown' ||
+      (code === 'unsupported' && sourceKind === 'remote'),
+    ...(warmingRemote
+      ? { retryDelaysMs: UNSUPPORTED_REMOTE_RETRY_DELAYS_MS }
+      : {}),
   };
 }
 

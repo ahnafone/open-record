@@ -36,8 +36,21 @@ import {
 import { OrDevicePicker } from '@open-record/features/now-playing';
 import { OrToast, OrToastHost, OrViewport } from '@open-record/ui';
 import type { ScreenData } from './app.routes';
+import { mediaKeyAction, pageKeyAction } from './keyboard-shortcuts';
 import { OrDrawer } from './shell/drawer';
 import { OrMiniPlayer } from './shell/mini-player';
+import {
+  NOW_PLAYING_DEFAULT_WIDTH,
+  NOW_PLAYING_KEY_STEP,
+  NOW_PLAYING_MIN_WIDTH,
+  NOW_PLAYING_SHIFT_STEP,
+  clampNowPlayingPanelWidth,
+  maxNowPlayingPanelWidth,
+  readNowPlayingPanelOpen,
+  readNowPlayingPanelWidth,
+  writeNowPlayingPanelOpen,
+  writeNowPlayingPanelWidth,
+} from './shell/panel-prefs';
 import { OrPlayerBar } from './shell/player-bar';
 import { OrSidebar } from './shell/sidebar';
 import { OrSourceFixDialog } from './shell/source-fix-dialog';
@@ -118,9 +131,34 @@ export class App {
   protected readonly drawerOpen = signal(false);
 
   /** Desktop: the user opened the Now Playing side panel. */
-  private readonly nowPlayingOpen = signal(false);
+  private readonly nowPlayingOpen = signal(readNowPlayingPanelOpen());
   /** Now Playing page component, loaded with its chunk when the panel first opens. */
   protected readonly nowPlayingPanel = signal<Type<unknown> | null>(null);
+
+  /** The separator's accessible minimum; the maximum tracks the viewport. */
+  protected readonly npPanelMinWidth = NOW_PLAYING_MIN_WIDTH;
+  /** Desktop side panel width (px), remembered across reloads. */
+  protected readonly npPanelWidth = signal(
+    readNowPlayingPanelWidth(this.document.defaultView?.innerWidth ?? 0),
+  );
+  /** Live viewport width, used to keep the panel within the screen. */
+  protected readonly viewportWidth = signal(
+    this.document.defaultView?.innerWidth ?? 0,
+  );
+  /** True while the separator is being dragged. */
+  protected readonly resizing = signal(false);
+  protected readonly npPanelMaxWidth = computed(() =>
+    maxNowPlayingPanelWidth(this.viewportWidth()),
+  );
+
+  /** Pointer-drag state for the separator (never persisted until release). */
+  private resizeHandle: HTMLElement | null = null;
+  private resizePointerId: number | null = null;
+  private resizeStartX = 0;
+  private resizeStartWidth = 0;
+  private resizeBodyStylesSet = false;
+  private resizePreviousCursor = '';
+  private resizePreviousUserSelect = '';
 
   protected readonly screen = toSignal(
     this.router.events.pipe(
@@ -187,7 +225,7 @@ export class App {
       untracked(() =>
         this.toast.show(
           error.message +
-            (canFix ? ' Open Now Playing to change the source.' : ''),
+            (canFix ? ' Open the song’s ⋯ menu to fix the source.' : ''),
           4000,
         ),
       );
@@ -212,6 +250,23 @@ export class App {
       this.screen();
       untracked(() => this.sourceFix.close());
     });
+
+    // Keep the panel inside the viewport as the window resizes; clamp the
+    // width in memory only, so the user's persisted choice is kept.
+    const win = this.document.defaultView;
+    if (win) {
+      const onResize = () => {
+        this.viewportWidth.set(win.innerWidth);
+        this.npPanelWidth.update((width) =>
+          clampNowPlayingPanelWidth(width, win.innerWidth),
+        );
+      };
+      win.addEventListener('resize', onResize);
+      this.destroyRef.onDestroy(() =>
+        win.removeEventListener('resize', onResize),
+      );
+    }
+    this.destroyRef.onDestroy(() => this.teardownPanelResize(false));
 
     // Android hardware / gesture Back (native only).
     if (Capacitor.isNativePlatform()) {
@@ -255,18 +310,188 @@ export class App {
       this.back();
       return;
     }
-    this.nowPlayingOpen.update((open) => !open);
+    this.setNowPlayingOpen(!this.nowPlayingOpen());
   }
 
-  /** Desktop shortcuts; ignored while typing, in dialogs or with modifiers. */
+  /** Remember the panel's open state for the next launch. */
+  private setNowPlayingOpen(open: boolean): void {
+    this.nowPlayingOpen.set(open);
+    writeNowPlayingPanelOpen(open);
+  }
+
+  /**
+   * Separator drag: grow to the left. Only the primary mouse button starts a
+   * drag; the width is persisted on release.
+   */
+  protected startPanelResize(event: PointerEvent): void {
+    if (this.resizing()) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    if (handle instanceof HTMLElement) {
+      handle.focus();
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch {
+        // Capture is best effort (unsupported in some embedded browsers).
+      }
+      this.resizeHandle = handle;
+      this.resizePointerId = event.pointerId;
+    }
+    this.resizeStartX = event.clientX;
+    this.resizeStartWidth = this.npPanelWidth();
+    this.resizing.set(true);
+
+    const body = this.document.body;
+    if (body) {
+      this.resizePreviousCursor = body.style.cursor;
+      this.resizePreviousUserSelect = body.style.userSelect;
+      this.resizeBodyStylesSet = true;
+      body.style.cursor = 'col-resize';
+      body.style.userSelect = 'none';
+    }
+  }
+
+  protected movePanelResize(event: PointerEvent): void {
+    if (!this.resizing()) return;
+    const width = this.resizeStartWidth - (event.clientX - this.resizeStartX);
+    this.npPanelWidth.set(
+      clampNowPlayingPanelWidth(width, this.viewportWidth()),
+    );
+  }
+
+  /** Pointerup/cancel/lost-capture all end the drag; only the first acts. */
+  protected endPanelResize(event?: PointerEvent): void {
+    if (!this.resizing()) return;
+    // Ignore a stray second pointer; the drag belongs to the one that started.
+    if (
+      event &&
+      this.resizePointerId !== null &&
+      event.pointerId !== this.resizePointerId
+    ) {
+      return;
+    }
+    this.resizing.set(false);
+    this.teardownPanelResize(true);
+  }
+
+  /** Release capture and body styles once; persist the width when asked. */
+  private teardownPanelResize(persist: boolean): void {
+    this.resizing.set(false);
+    const handle = this.resizeHandle;
+    const pointerId = this.resizePointerId;
+    this.resizeHandle = null;
+    this.resizePointerId = null;
+    if (handle && pointerId !== null) {
+      try {
+        handle.releasePointerCapture(pointerId);
+      } catch {
+        // Already released (lostpointercapture/pointerup).
+      }
+    }
+    if (this.resizeBodyStylesSet) {
+      this.resizeBodyStylesSet = false;
+      this.document.body.style.cursor = this.resizePreviousCursor;
+      this.document.body.style.userSelect = this.resizePreviousUserSelect;
+    }
+    if (persist) writeNowPlayingPanelWidth(this.npPanelWidth());
+  }
+
+  /** Double-click the separator: back to the default width. */
+  protected resetPanelWidth(): void {
+    const width = clampNowPlayingPanelWidth(
+      NOW_PLAYING_DEFAULT_WIDTH,
+      this.viewportWidth(),
+    );
+    this.npPanelWidth.set(width);
+    writeNowPlayingPanelWidth(width);
+  }
+
+  /**
+   * Separator keyboard control: Left grows, Right shrinks, Home/End jump to
+   * the limits, Shift uses a larger step. preventDefault keeps the app-wide
+   * Left/Right seek shortcut from also running.
+   */
+  protected onPanelResizeKeydown(event: KeyboardEvent): void {
+    const step = event.shiftKey ? NOW_PLAYING_SHIFT_STEP : NOW_PLAYING_KEY_STEP;
+    let width: number;
+    switch (event.key) {
+      case 'ArrowLeft':
+        width = this.npPanelWidth() + step;
+        break;
+      case 'ArrowRight':
+        width = this.npPanelWidth() - step;
+        break;
+      case 'Home':
+        width = NOW_PLAYING_MIN_WIDTH;
+        break;
+      case 'End':
+        width = this.npPanelMaxWidth();
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    width = clampNowPlayingPanelWidth(width, this.viewportWidth());
+    this.npPanelWidth.set(width);
+    writeNowPlayingPanelWidth(width);
+  }
+
+  /**
+   * Desktop shortcuts; ignored while typing, in dialogs or with modifiers.
+   * PC media keys and PageUp/PageDown also control playback; media keys work
+   * even while a field or dialog has focus.
+   */
   protected onKeydown(event: KeyboardEvent): void {
     if (!this.isDesktop() || event.defaultPrevented) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const target = event.target instanceof Element ? event.target : null;
+    const hasTrack = !!this.player.current();
+
+    // Media keys work even while a field or dialog is focused.
+    const media = mediaKeyAction(event.key);
+    if (media) {
+      if (!hasTrack) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      switch (media) {
+        case 'play':
+          void this.player.play();
+          break;
+        case 'pause':
+          void this.player.pause();
+          break;
+        case 'toggle':
+          void this.player.togglePlay();
+          break;
+        case 'next':
+          void this.player.next();
+          break;
+        case 'previous':
+          void this.player.previous();
+          break;
+      }
+      return;
+    }
+
     if (target?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"], dialog')) {
       return;
     }
-    const hasTrack = !!this.player.current();
+
+    // A focused seek/volume slider keeps PageUp/PageDown for its own step.
+    const page = pageKeyAction(event.key);
+    if (page) {
+      if (!hasTrack) return;
+      // A focused slider handles PageUp/PageDown itself.
+      if (target?.closest('[role="slider"]')) return;
+      // Keep holding the key from scrolling the screen after the first skip.
+      event.preventDefault();
+      if (event.repeat) return;
+      if (page === 'next') void this.player.next();
+      else void this.player.previous();
+      return;
+    }
+
     switch (event.key) {
       case ' ':
         // Space on a focused control activates that control instead.
@@ -334,7 +559,7 @@ export class App {
       return;
     }
     if (this.panelShown()) {
-      this.nowPlayingOpen.set(false);
+      this.setNowPlayingOpen(false);
       return;
     }
     if (this.canGoBack()) {

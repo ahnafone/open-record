@@ -55,14 +55,47 @@
 }
 :host(.desktop) .np-panel {
   grid-area: panel;
-  inline-size: 360px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
   padding: var(--spacing-md);
   background: var(--color-background);
-  border-left: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+}
+/* Resize separator between the content column and the Now Playing panel. */
+:host(.desktop) .np-grip {
+  grid-area: panel;
+  grid-row: 1 / 3;
+  justify-self: start;
+  align-self: stretch;
+  inline-size: 9px;
+  margin-inline-start: -4px;
+  z-index: 2;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+:host(.desktop) .np-grip::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 4px;
+  inline-size: 1px;
+  background: color-mix(in srgb, var(--color-border) 50%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  :host(.desktop) .np-grip::before {
+    transition: background-color var(--duration-fast) var(--ease-standard);
+  }
+}
+:host(.desktop) .np-grip:hover::before,
+:host(.desktop) .np-grip:focus-visible::before,
+:host(.desktop) .np-grip.dragging::before {
+  background: var(--color-primary);
+}
+:host(.desktop) .np-grip:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 :host(.desktop) .dock {
   grid-area: dock;

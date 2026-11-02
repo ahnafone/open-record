@@ -619,7 +619,7 @@ export class NowPlayingPage {
   });
 
   protected readonly eyebrowText = computed(
-    () => `Playing on ${this.targetName()} · ${this.playbackWord()}`,
+    () => `On ${this.targetName()} · ${this.playbackWord()}`,
   );
 
   protected readonly eyebrowLabel = computed(

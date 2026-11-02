@@ -29,6 +29,7 @@ import {
   nextSort,
   sortArrowFor,
   sortByColumn,
+  SourceFixService,
   sourceLabel,
   trackMatches,
   type TrackSort,
@@ -629,7 +630,7 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
                     icon="more"
                     [attr.data-options]="t.id"
                     [label]="'Options for ' + t.title"
-                    (click)="optionsFor.set(t)"
+                    (click)="openOptions(t, $event)"
                   />
                 </div>
               </div>
@@ -675,6 +676,9 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
       >
         <div orModalActions>
           <or-button block (click)="playNext()">Play next</or-button>
+          @if (optionsFor()?.source?.url) {
+            <or-button block (click)="fixSource()">Fix source</or-button>
+          }
           @if (vm.kind === 'playlist') {
             <!-- Reordering only makes sense in the playlist's own, unfiltered order. -->
             @if (!sort() && !filtering()) {
@@ -833,6 +837,7 @@ export class PlaylistPage {
   protected readonly player = inject(PlayerStore);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
+  private readonly sourceFix = inject(SourceFixService);
   private readonly router = inject(Router);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly injector = inject(Injector);
@@ -996,6 +1001,8 @@ export class PlaylistPage {
   protected readonly addOpen = signal(false);
   /** Record whose options modal is open. */
   protected readonly optionsFor = signal<Track | null>(null);
+  /** The ⋯ button that opened the options modal (for focus return). */
+  private readonly optionsOrigin = signal<HTMLElement | null>(null);
   protected readonly optionIndex = computed(() => {
     const t = this.optionsFor();
     return t ? this.tracks().findIndex((x) => x.id === t.id) : -1;
@@ -1071,6 +1078,22 @@ export class PlaylistPage {
     } catch {
       this.toast.show('Could not change visibility. Try again.');
     }
+  }
+
+  /** Open the row's options modal, remembering the button for focus. */
+  protected openOptions(track: Track, event: Event): void {
+    const host = event.currentTarget as HTMLElement;
+    this.optionsOrigin.set(host.querySelector<HTMLElement>('button') ?? host);
+    this.optionsFor.set(track);
+  }
+
+  /** Close the options modal and open the shell's Fix source dialog. */
+  protected fixSource(): void {
+    const track = this.optionsFor();
+    const origin = this.optionsOrigin();
+    this.optionsFor.set(null);
+    if (!track) return;
+    this.sourceFix.open(track, origin ?? undefined);
   }
 
   /** Queue the optioned record right after the current one. */
