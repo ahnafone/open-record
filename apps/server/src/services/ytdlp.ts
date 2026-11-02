@@ -17,12 +17,15 @@ import { createLimiter } from './resolve-limiter';
 /** yt-dlp binary; override with YTDLP_PATH. */
 export const YTDLP_BIN = process.env['YTDLP_PATH']?.trim() || 'yt-dlp';
 
-/** Arguments every yt-dlp call gets: no user config files, JS challenges solved with Node. */
+/** JS runtime yt-dlp solves challenges with; override with YTDLP_JS_RUNTIME. */
+const YTDLP_JS_RUNTIME = process.env['YTDLP_JS_RUNTIME']?.trim() || 'node';
+
+/** Arguments every yt-dlp call gets: no user config files, JS challenges solved with the JS runtime. */
 export const BASE_ARGS = [
   '--ignore-config',
   '--no-colors',
   '--js-runtimes',
-  'node',
+  YTDLP_JS_RUNTIME,
 ];
 
 /**
@@ -1106,6 +1109,45 @@ export function toStreamResponse(info: YtDlpInfo): StreamResponse {
   return response;
 }
 
+/** Waits used while a freshly minted googlevideo link warms up. */
+const STREAM_WARMUP_DELAYS_MS = [2_000, 3_000, 5_000];
+
+/**
+ * Ask the media host for the first bytes until it serves them. A fresh
+ * googlevideo link can answer 403 for several seconds; returning it cold makes
+ * the browser's first play fail with an unsupported-media error. Failures are
+ * ignored: the link is still returned, and the client can retry.
+ */
+async function warmStreamLink(response: StreamResponse): Promise<void> {
+  let target: URL;
+  try {
+    target = new URL(response.url);
+  } catch {
+    return;
+  }
+  if (!target.hostname.endsWith('.googlevideo.com')) return;
+  target.searchParams.set('range', '0-1023');
+  const headers: Record<string, string> = { ...response.httpHeaders };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(target, {
+        headers,
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8_000),
+      });
+      await res.body?.cancel().catch(() => undefined);
+      if (res.ok || res.status === 206) return;
+      if (res.status !== 403 && res.status !== 404) return;
+    } catch {
+      // Network hiccup or timeout: try again while the link may still warm.
+    }
+    if (attempt >= STREAM_WARMUP_DELAYS_MS.length) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, STREAM_WARMUP_DELAYS_MS[attempt]),
+    );
+  }
+}
+
 /** Resolves a validated page URL to a direct, playable audio link (nothing is downloaded). */
 export async function resolveStream(
   url: string,
@@ -1119,5 +1161,7 @@ export async function resolveStream(
     '--',
     url,
   ]);
-  return toStreamResponse(info);
+  const response = toStreamResponse(info);
+  await warmStreamLink(response);
+  return response;
 }

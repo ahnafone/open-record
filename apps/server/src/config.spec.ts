@@ -61,6 +61,13 @@ describe('loadConfig', () => {
     expect(load({ SESSION_ENABLED: '0' }).sessionEnabled).toBe(false);
   });
 
+  it('parses TRUST_PROXY as a boolean or a trusted proxy list', () => {
+    expect(load().trustProxy).toBe(false);
+    expect(load({ TRUST_PROXY: '1' }).trustProxy).toBe(true);
+    expect(load({ TRUST_PROXY: 'false' }).trustProxy).toBe(false);
+    expect(load({ TRUST_PROXY: '10.0.0.0/8, 127.0.0.1' }).trustProxy).toBe('10.0.0.0/8, 127.0.0.1');
+  });
+
   it('falls back to "ffmpeg" for a blank FFMPEG_PATH', () => {
     expect(load({ FFMPEG_PATH: '   ' }).ffmpegPath).toBe('ffmpeg');
   });

@@ -14,8 +14,11 @@ export interface ServerConfig {
   corsOrigin: true | string[];
   /** Requests per minute per client (T1.6 keys it by user/token/IP). */
   rateLimitMax: number;
-  /** Trust X-Forwarded-For from a reverse proxy / tunnel. */
-  trustProxy: boolean;
+  /**
+   * Trust X-Forwarded-For from a reverse proxy / tunnel: `true` trusts every
+   * hop, a string limits it to those proxy IPs / CIDRs (comma list).
+   */
+  trustProxy: boolean | string;
   /** Max yt-dlp processes running at once (search, resolve, stream). */
   maxConcurrentResolves: number;
   /** Seconds a resolved stream link is cached (capped by its own expiry). 0 disables. */
@@ -102,6 +105,15 @@ function bool(env: Env, key: string, fallback: boolean): boolean {
   throw new ConfigError(`${key} must be true, false, 1 or 0`);
 }
 
+/** `true`/`1` and `false`/`0`/blank as booleans; anything else is a trusted proxy IP / CIDR list. */
+function trustProxy(raw: string | undefined): boolean | string {
+  const value = raw?.trim() ?? '';
+  const lower = value.toLowerCase();
+  if (lower === 'true' || lower === '1') return true;
+  if (!value || lower === 'false' || lower === '0') return false;
+  return value;
+}
+
 /** Optional http(s) URL, trailing slashes trimmed. Invalid values are a config error. */
 function httpUrl(env: Env, key: string, fallback: string | null): string | null {
   const raw = env[key]?.trim().replace(/\/+$/, '');
@@ -145,7 +157,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     // 600/min: 1 s polling and two tabs from one IP must not hit the old cap.
     // T1.6 re-keys this by user/token/IP; per-route limits still apply.
     rateLimitMax: int(env, 'RATE_LIMIT_MAX', 600, 1, 100_000),
-    trustProxy: env['TRUST_PROXY'] === 'true' || env['TRUST_PROXY'] === '1',
+    trustProxy: trustProxy(env['TRUST_PROXY']),
     maxConcurrentResolves: int(env, 'MAX_CONCURRENT_RESOLVES', 2, 1, 16),
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
