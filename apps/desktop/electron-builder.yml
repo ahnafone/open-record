@@ -1,0 +1,124 @@
+# electron-builder 26 configuration for the Open Record desktop app.
+#
+# Run from the repository root:
+#   npx electron-builder --config apps/desktop/electron-builder.yml --publish never
+#
+# The app directory is the staged output of
+# apps/desktop/scripts/stage-app.mjs. The server, web build and media binaries
+# are read-only resources outside asar.
+appId: app.openrecord
+productName: Open Record
+executableName: open-record
+asar: true
+npmRebuild: false
+publish: null
+
+directories:
+  app: dist/apps/desktop/app
+  output: dist/apps/desktop/release
+  buildResources: apps/desktop/build
+
+# Only the staged Electron entrypoints (main.cjs, preload.cjs, package.json).
+# Everything else is shipped via extraResources so Fastify can serve real files
+# and the Electron runtime can spawn the server and yt-dlp/ffmpeg.
+files:
+  - main.cjs
+  - preload.cjs
+  - package.json
+  # electron-builder 26 searches upward for node_modules and would otherwise
+  # pull the workspace tree into asar. The staged app has no dependencies.
+  - '!node_modules/**/*'
+  - '!**/node_modules/**/*'
+
+extraResources:
+  - from: dist/apps/app/browser
+    to: app/browser
+  # electron-builder refuses to copy the *root* node_modules of an
+  # extraResources source (issue #867). Source the staged server from its
+  # parent directory with a filter so resources/server/node_modules is copied.
+  - from: dist/apps/desktop
+    to: .
+    filter:
+      - server/**/*
+  - from: dist/apps/desktop/bin
+    to: bin
+  - from: apps/desktop/THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+
+extraMetadata:
+  version: 1.0.0
+  description: Open Record desktop app
+  author: Open Record contributors
+  # Electron's Linux app_id / WM_CLASS; linux.syncDesktopName uses it for the
+  # installed .desktop filename (open-record.desktop).
+  desktopName: open-record
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  category: AudioVideo
+  maintainer: Open Record maintainers <maintainers@openrecord.app>
+  synopsis: Play and download music from your own library
+  syncDesktopName: true
+
+appImage:
+  artifactName: OpenRecord-linux-x86_64.AppImage
+
+deb:
+  artifactName: OpenRecord-linux-amd64.deb
+  # Freedesktop application category (desktop entry) and Debian package section.
+  category: AudioVideo
+  packageCategory: sound
+  priority: optional
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  artifactName: OpenRecord-windows-x64.exe
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Open Record
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  category: public.app-category.music
+  # Unsigned build: no Developer ID, no hardened runtime, no notarization.
+  identity: null
+  hardenedRuntime: false
+  notarize: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSLocalNetworkUsageDescription: Open Record uses your local network only when you enable phone access or Cast discovery.
+    NSBonjourServices:
+      - _googlecast._tcp
+
+dmg:
+  artifactName: OpenRecord-macos-${arch}.dmg
+  title: Open Record ${version}
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 130
+      y: 190
+    - x: 410
+      y: 190
+      type: link
+      path: /Applications

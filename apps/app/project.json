@@ -19,7 +19,8 @@
         "browser": "apps/app/src/main.ts",
         "tsConfig": "apps/app/tsconfig.app.json",
         "allowedCommonJsDependencies": [
-          "jsqr"
+          "jsqr",
+          "qrcode"
         ],
         "assets": [
           {

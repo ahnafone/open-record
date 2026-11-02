@@ -27,11 +27,32 @@
         "command": "node apps/desktop/scripts/stage-server.mjs"
       }
     },
+    "stage-app": {
+      "executor": "nx:run-commands",
+      "dependsOn": [{ "projects": ["app"], "target": "build" }],
+      "options": {
+        "command": "node apps/desktop/scripts/stage-app.mjs"
+      }
+    },
+    "dist": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        "build",
+        "stage-server",
+        "stage-app",
+        "fetch-binaries",
+        { "projects": ["app"], "target": "build" }
+      ],
+      "options": {
+        "command": "electron-builder --config apps/desktop/electron-builder.yml"
+      }
+    },
     "serve": {
       "executor": "nx:run-commands",
       "dependsOn": [
         "build",
         "stage-server",
+        "stage-app",
         { "projects": ["app"], "target": "build" }
       ],
       "options": {

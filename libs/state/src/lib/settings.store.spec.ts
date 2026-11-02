@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { buildPairingLink } from '@open-record/models';
 import {
   SETTINGS_KEYS,
   StoragePort,
@@ -7,12 +8,19 @@ import {
   type SettingsRepository,
 } from '@open-record/storage';
 import { defaultDeviceName, ensureDeviceId } from './device-identity';
+import { RemoteServerPort } from './ports';
 import { SettingsStore } from './settings.store';
 
-function boot(storage: StoragePort): SettingsStore {
+function boot(
+  storage: StoragePort,
+  remote?: RemoteServerPort,
+): SettingsStore {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
-    providers: [{ provide: StoragePort, useValue: storage }],
+    providers: [
+      { provide: StoragePort, useValue: storage },
+      ...(remote ? [{ provide: RemoteServerPort, useValue: remote }] : []),
+    ],
   });
   return TestBed.inject(SettingsStore);
 }
@@ -102,5 +110,76 @@ describe('SettingsStore device identity', () => {
 
     await expect(store.setCastEnabled(false)).rejects.toThrow('write failed');
     expect(store.castEnabled()).toBe(true);
+  });
+});
+
+/** A RemoteServerPort whose reachability probe can be made to fail. */
+function fakeRemote(probe: () => Promise<void> = async () => undefined): {
+  port: RemoteServerPort;
+  probeServer: ReturnType<typeof vi.fn>;
+  testConnection: ReturnType<typeof vi.fn>;
+} {
+  let configured = false;
+  const probeServer = vi.fn(probe);
+  const testConnection = vi.fn(async () => undefined);
+  const port = {
+    get configured() {
+      return configured;
+    },
+    configure(config: { baseUrl: string; token: string } | null) {
+      configured = !!config?.baseUrl;
+    },
+    probeServer,
+    testConnection,
+  } as unknown as RemoteServerPort;
+  return { port, probeServer, testConnection };
+}
+
+const PHONE_LINK = buildPairingLink({ url: 'http://192.168.1.20:47900' });
+
+describe('SettingsStore pairing', () => {
+  it('saves a signed-out phone pairing after the unauthenticated probe', async () => {
+    const storage = createInMemoryStorage();
+    const { port, probeServer, testConnection } = fakeRemote();
+    const store = boot(storage, port);
+    await store.ready();
+
+    const result = await store.pairFromLink(PHONE_LINK);
+
+    expect(result).toEqual({
+      ok: true,
+      message: 'Saved — sign in to continue',
+    });
+    // Signed out: no authenticated request, but the server was probed.
+    expect(probeServer).toHaveBeenCalledTimes(1);
+    expect(testConnection).not.toHaveBeenCalled();
+    expect(store.downloadServerUrl()).toBe('http://192.168.1.20:47900');
+    expect(store.connection().status).toBe('ok');
+    expect(
+      await storage.settings.get(SETTINGS_KEYS.downloadServer),
+    ).toEqual({ url: 'http://192.168.1.20:47900', token: '' });
+  });
+
+  it('reports an unreachable server but keeps the saved address', async () => {
+    const storage = createInMemoryStorage();
+    const { port } = fakeRemote(async () => {
+      const error = new Error('no route');
+      error.name = 'NetworkError';
+      throw error;
+    });
+    const store = boot(storage, port);
+    await store.ready();
+
+    const result = await store.pairFromLink(PHONE_LINK);
+
+    expect(result).toEqual({
+      ok: false,
+      message: 'Could not reach the download server.',
+    });
+    expect(store.connection()).toEqual({
+      status: 'error',
+      message: 'Could not reach the download server.',
+    });
+    expect(store.downloadServerUrl()).toBe('http://192.168.1.20:47900');
   });
 });

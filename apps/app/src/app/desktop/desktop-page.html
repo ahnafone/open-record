@@ -1,0 +1,227 @@
+@if (!desktop) {
+  <or-empty-state>
+    Desktop setup is available in the Open Record desktop app. Open the app
+    from your computer to configure Supabase, phones on your network and the
+    bundled server.
+  </or-empty-state>
+} @else if (loading() && !status()) {
+  <p class="status status-muted" role="status">
+    <or-spinner [size]="16" />Reading desktop status…
+  </p>
+} @else if (loadError() && !status()) {
+  <or-empty-state>{{ loadError() }}</or-empty-state>
+  <or-button class="retry" (click)="refresh()">Try again</or-button>
+} @else if (status(); as s) {
+  <or-section-head heading="Supabase account" />
+  <p class="lede">
+    Connect a Supabase project so you and your phones can sign in, sync your
+    library and use shared playlists. The app works offline and anonymously
+    without one; only local features are available then.
+  </p>
+  <p class="status" role="status">
+    @if (s.supabaseConfigured) {
+      <span class="status-ok"
+        ><or-icon name="check" [size]="14" />Configured for
+        <strong>{{ s.supabaseHost || 'this project' }}</strong></span
+      >
+    } @else {
+      <span class="status-muted"
+        >No project configured. The app runs anonymously.</span
+      >
+    }
+  </p>
+  <form class="form" (submit)="saveSupabase($event)">
+    <label class="field-label" for="or-desktop-supabase-url"
+      >Project URL</label
+    >
+    <input
+      id="or-desktop-supabase-url"
+      class="input"
+      type="url"
+      inputmode="url"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      placeholder="https://your-project.supabase.co"
+      [value]="projectUrl()"
+      (input)="onProjectUrl($event)"
+    />
+    <label class="field-label" for="or-desktop-anon-key"
+      >Anon (public) key</label
+    >
+    <input
+      id="or-desktop-anon-key"
+      class="input"
+      type="password"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      placeholder="Paste the project anon key"
+      [value]="anonKey()"
+      (input)="onAnonKey($event)"
+    />
+    <p class="note">
+      Use the project’s anon key. Service-role keys and
+      <code>sb_secret_</code> keys are rejected. Saved secrets are never shown
+      again.
+    </p>
+    <details class="advanced">
+      <summary>Advanced: legacy JWT secret</summary>
+      <p class="note">
+        Only for legacy projects that sign sessions with an HS256 JWT secret.
+        Current Supabase projects use asymmetric keys and do not need this.
+        Leave it empty unless your project requires it.
+      </p>
+      <label class="field-label" for="or-desktop-jwt-secret"
+        >JWT secret (optional)</label
+      >
+      <input
+        id="or-desktop-jwt-secret"
+        class="input"
+        type="password"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+        placeholder="Paste the legacy JWT secret"
+        [value]="jwtSecret()"
+        (input)="onJwtSecret($event)"
+      />
+    </details>
+    <or-button
+      class="submit"
+      type="submit"
+      variant="primary"
+      [disabled]="!canSaveSupabase()"
+      >{{ savingSupabase() ? 'Saving and testing…' : 'Save & test' }}</or-button
+    >
+    <p class="status" role="status" aria-live="polite">
+      @if (supabaseError(); as error) {
+        <span class="status-bad"
+          ><or-icon name="alert" [size]="14" />{{ error }}</span
+        >
+      }
+    </p>
+  </form>
+
+  <or-section-head heading="Phones on this network" />
+  <p class="lede">
+    Turn this on to let phones on your Wi-Fi open Open Record, sign in with the
+    same Supabase account and control playback. It restarts the local server on
+    your network address.
+  </p>
+  <or-switch
+    label="Allow phones on this network"
+    description="Off by default. Turn off again when you leave a trusted network."
+    [checked]="s.lanEnabled"
+    [disabled]="lanBusy()"
+    (checkedChange)="setLan($event)"
+  />
+  <p class="status" role="status" aria-live="polite">
+    @if (lanError(); as error) {
+      <span class="status-bad"
+        ><or-icon name="alert" [size]="14" />{{ error }}</span
+      >
+    }
+  </p>
+  @if (s.lanEnabled) {
+    @if (lanUrl(); as url) {
+      <div class="lan-card">
+        <span class="field-label">LAN address</span>
+        <div class="lan-row">
+          <code class="lan-url">{{ url }}</code>
+          <or-button size="sm" (click)="copyLanUrl()"
+            ><or-icon name="link" [size]="15" />Copy</or-button
+          >
+        </div>
+        <div class="qr">
+          @if (qrDataUrl(); as src) {
+            <img
+              [src]="src"
+              alt="QR code that opens this Open Record server on your network"
+              width="240"
+              height="240"
+            />
+          } @else if (pairingLoading()) {
+            <or-spinner [size]="20" label="Drawing the QR code" />
+          }
+        </div>
+        <p class="note">
+          Scan the code with your phone camera. It contains only this address,
+          never your access token.
+        </p>
+      </div>
+    } @else if (pairingLoading()) {
+      <p class="status status-muted" role="status">
+        <or-spinner [size]="14" />Waiting for the network server…
+      </p>
+    } @else {
+      <p class="status status-muted" role="status">
+        LAN access is on, but the network address is not ready yet.
+      </p>
+    }
+    <ul class="notes">
+      <li>Use the same Wi-Fi network on the phone and this computer.</li>
+      <li>
+        Allow port 47900 through the computer’s firewall for private networks.
+      </li>
+      <li>
+        The phone must use the same Supabase project and account as this app.
+      </li>
+      <li>
+        LAN traffic is plain HTTP: only use trusted home or office networks,
+        never port-forward 47900.
+      </li>
+    </ul>
+  }
+
+  <or-section-head heading="Server" />
+  <dl class="usage" aria-live="polite">
+    <div class="usage-row">
+      <dt>Status</dt>
+      <dd [class.bad]="s.server === 'error'">{{ serverLabel() }}</dd>
+    </div>
+    <div class="usage-row">
+      <dt>Local address</dt>
+      <dd>{{ s.localUrl }}</dd>
+    </div>
+    <div class="usage-row">
+      <dt>Data folder</dt>
+      <dd>{{ s.dataDir }}</dd>
+    </div>
+    <div class="usage-row">
+      <dt>Version</dt>
+      <dd>{{ s.version }}</dd>
+    </div>
+  </dl>
+  @if (s.error) {
+    <p class="status status-bad" role="status">
+      <or-icon name="alert" [size]="14" />{{ s.error }}
+    </p>
+  }
+  @if (loadError(); as error) {
+    <p class="status status-bad" role="status">
+      <or-icon name="alert" [size]="14" />{{ error }}
+    </p>
+  }
+  <p class="status" role="status">
+    @if (serverError(); as error) {
+      <span class="status-bad"
+        ><or-icon name="alert" [size]="14" />{{ error }}</span
+      >
+    }
+  </p>
+  <div class="actions">
+    <or-button [disabled]="restarting()" (click)="restartServer()">{{
+      restarting() ? 'Restarting…' : 'Restart server'
+    }}</or-button>
+    <or-button (click)="openDataFolder()">Open data folder</or-button>
+    <or-button (click)="openGuide()">Setup guide</or-button>
+    <or-button [disabled]="loading()" (click)="refresh()">{{
+      loading() ? 'Refreshing…' : 'Refresh status'
+    }}</or-button>
+  </div>
+  <p class="note">
+    Offline, the bundled catalogue, local imports, playback and your saved
+    library still work. Sign-in and sync resume when the network is back.
+  </p>
+}

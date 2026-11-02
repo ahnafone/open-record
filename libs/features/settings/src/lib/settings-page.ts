@@ -97,6 +97,13 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       </a>
     }
 
+    @if (desktopApp) {
+      <a class="fix-row" routerLink="/desktop">
+        <or-icon name="desktop" [size]="20" />
+        <span class="fix-txt">Desktop app</span>
+      </a>
+    }
+
     <or-section-head heading="Stream server" />
     <p class="lede">
       Connect your self-hosted Open Record server to search sites and stream
@@ -663,6 +670,12 @@ export class SettingsPage {
 
   protected readonly disclaimer = MUSIC_DISCLAIMER;
 
+  /** The Electron preload bridge is present (desktop app, not the web build). */
+  protected readonly desktopApp =
+    typeof window !== 'undefined' &&
+    (window as Window & { openRecordDesktop?: unknown }).openRecordDesktop !==
+      undefined;
+
   protected readonly qualities: readonly { value: AudioQuality; label: string }[] =
     AUDIO_QUALITIES.map((value) => ({ value, label: QUALITY_LABELS[value] }));
 
@@ -825,7 +838,8 @@ export class SettingsPage {
       const result = await this.settings.pairFromLink(text);
       // Show the saved address (the pasted link text is not a URL).
       this.serverUrl.set(this.settings.downloadServerUrl());
-      if (result.ok) this.toast.show('Paired with your server');
+      if (result.ok)
+        this.toast.show(result.message ?? 'Paired with your server');
       else this.serverError.set(result.message);
     } finally {
       this.savingServer.set(false);

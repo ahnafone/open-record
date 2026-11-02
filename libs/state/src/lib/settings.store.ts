@@ -15,6 +15,7 @@ import {
   type DownloadLocation,
 } from '@open-record/models';
 import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
+import { AuthStore } from './auth.store';
 import {
   MAX_DEVICE_NAME_LENGTH,
   defaultDeviceName,
@@ -34,7 +35,9 @@ export interface DownloadServerSettings {
 }
 
 /** Outcome of pairing from a pasted or scanned link. */
-export type PairResult = { ok: true } | { ok: false; message: string };
+export type PairResult =
+  | { ok: true; message?: string }
+  | { ok: false; message: string };
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -97,6 +100,7 @@ export class SettingsStore {
   // Settings are read from and written to `storage.settings`.
   protected readonly storage = inject(StoragePort);
   private readonly remote = inject(RemoteServerPort, { optional: true });
+  private readonly auth = inject(AuthStore);
 
   private readonly _hydrated = signal(false);
   private readonly _server = signal<DownloadServerSettings>(NO_SERVER);
@@ -287,8 +291,11 @@ export class SettingsStore {
 
   /**
    * Pair with a server from an `openrecord://pair` link: save its address
-   * (any token in the link is ignored), then run the connection test. The settings stay saved even when the test
-   * fails, so the message can be fixed in place.
+   * (any token in the link is ignored), then check it. Signed in, the check is
+   * authenticated (`/health` + `/ping`); signed out (e.g. a phone before
+   * signing in), it is the unauthenticated `/health` + `/app-config` probe, so
+   * reachability does not look like a failure. The settings stay saved even
+   * when the check fails, so the address can be fixed in place.
    */
   async pairFromLink(text: string): Promise<PairResult> {
     await this.loaded;
@@ -306,16 +313,50 @@ export class SettingsStore {
             : 'Could not save the server. Try again.',
       };
     }
-    await this.testConnection();
-    const state = this.connection();
-    if (state.status === 'ok') return { ok: true };
-    return {
-      ok: false,
-      message:
-        state.status === 'error'
-          ? state.message
-          : 'Connection test did not finish. Try again.',
-    };
+    await this.auth.start();
+    if (this.auth.signedIn()) {
+      await this.testConnection();
+      const state = this.connection();
+      if (state.status === 'ok') return { ok: true };
+      return {
+        ok: false,
+        message:
+          state.status === 'error'
+            ? state.message
+            : 'Connection test did not finish. Try again.',
+      };
+    }
+    return this.probePairing();
+  }
+
+  /**
+   * Signed-out pairing check: reachable server, no account token required.
+   * The authenticated test stays for signed-in users above.
+   */
+  private async probePairing(): Promise<PairResult> {
+    this.testAbort?.abort();
+    if (!this.remote || !this._serverReady()) {
+      this._connection.set({
+        status: 'error',
+        message: 'Enter a server URL first.',
+      });
+      return { ok: false, message: 'Enter a server URL first.' };
+    }
+    const abort = (this.testAbort = new AbortController());
+    this._connection.set({ status: 'testing' });
+    try {
+      await this.remote.probeServer(abort.signal);
+      if (abort.signal.aborted)
+        return { ok: false, message: 'Connection test did not finish. Try again.' };
+      this._connection.set({ status: 'ok' });
+      return { ok: true, message: 'Saved — sign in to continue' };
+    } catch (err) {
+      if (abort.signal.aborted || isAbort(err))
+        return { ok: false, message: 'Connection test did not finish. Try again.' };
+      const message = remoteErrorMessage(err);
+      this._connection.set({ status: 'error', message });
+      return { ok: false, message };
+    }
   }
 
   /** Check the saved server is reachable and accepts the token. */

@@ -1,0 +1,207 @@
+:host {
+  display: block;
+}
+
+/* Match Settings' readable width on desktop without changing the phone layout. */
+@media (min-width: 900px) {
+  :host {
+    max-inline-size: 800px;
+    margin-inline: auto;
+  }
+}
+
+.lede,
+.note {
+  margin: var(--spacing-xs) 0 var(--spacing-md);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-muted);
+}
+.note {
+  margin: var(--spacing-sm) 0 0;
+  font-size: 12px;
+}
+.note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.form {
+  display: grid;
+  gap: var(--spacing-xs);
+}
+.field-label {
+  margin-top: var(--spacing-xs);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.input {
+  inline-size: 100%;
+  min-block-size: var(--spacing-touch);
+  padding: 0 var(--spacing-sm);
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--rounded-md);
+  outline: none;
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+.input::placeholder {
+  color: var(--color-muted);
+}
+.input:focus {
+  border-color: var(--color-primary);
+}
+
+.advanced {
+  margin-top: var(--spacing-sm);
+  padding: 0 var(--spacing-md);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border) 55%, transparent);
+  border-radius: var(--rounded-md);
+}
+.advanced[open] {
+  padding-block-end: var(--spacing-md);
+}
+.advanced summary {
+  display: flex;
+  align-items: center;
+  min-block-size: var(--spacing-touch);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  cursor: pointer;
+  border-radius: var(--rounded-md);
+}
+.advanced summary:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.submit {
+  justify-self: start;
+  margin-top: var(--spacing-sm);
+}
+.retry {
+  margin-top: var(--spacing-sm);
+}
+
+/* Reserved status line, so forms and toggles never jump. */
+.status {
+  margin: 0;
+  min-block-size: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.status-ok,
+.status-bad,
+.status-muted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-ok {
+  color: var(--color-text);
+}
+.status-bad {
+  color: var(--color-primary);
+}
+.status-muted {
+  color: var(--color-muted);
+}
+
+.lan-card {
+  display: grid;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: var(--color-surface);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border) 55%, transparent);
+  border-radius: var(--rounded-md);
+}
+.lan-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.lan-url {
+  flex: 1 1 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.qr {
+  display: flex;
+  justify-content: center;
+  padding: var(--spacing-xs) 0;
+}
+.qr img {
+  display: block;
+  inline-size: min(240px, 100%);
+  block-size: auto;
+  border-radius: var(--rounded-md);
+  background: var(--color-ivory);
+}
+
+.notes {
+  margin: var(--spacing-sm) 0 0;
+  padding-inline-start: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-muted);
+}
+.notes li + li {
+  margin-top: var(--spacing-xs);
+}
+
+.usage {
+  display: grid;
+  margin: var(--spacing-sm) 0 var(--spacing-md);
+}
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  padding: 10px 0;
+  font-size: 14px;
+  border-top: 1px solid
+    color-mix(in srgb, var(--color-border) 32%, transparent);
+}
+.usage-row:first-child {
+  border-top: 0;
+}
+dt {
+  flex: none;
+  color: var(--color-text);
+}
+dd {
+  margin: 0;
+  min-inline-size: 0;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+dd.bad {
+  color: var(--color-primary);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input {
+    transition-duration: 1ms;
+  }
+}

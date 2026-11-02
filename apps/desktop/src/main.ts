@@ -1,240 +1,661 @@
-// Electron main process (feasibility spike): spawns the bundled Fastify server
-// as a child (Electron in Node mode), waits for /health and loads the web app
-// it serves on a fixed loopback origin. No preload/IPC yet.
-import { type ChildProcess, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { chmodSync, createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  session,
+  shell,
+  type IpcMainInvokeEvent,
+  type MessageBoxOptions,
+} from 'electron';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { BrowserWindow, app, dialog, session, shell } from 'electron';
+import {
+  loadDesktopConfig,
+  saveDesktopConfig,
+  supabaseHost,
+  validateSupabaseConfig,
+  type DesktopConfig,
+  type ValidatedSupabaseConfig,
+} from './config';
+import {
+  createCspBuilder,
+  installContentSecurityPolicy,
+  isHttpsUrl,
+  isLocalOrigin,
+  lockPermissions,
+} from './security';
+import {
+  isPortAvailable,
+  pickLanIpv4,
+  readOrCreateToken,
+  resolveResourcePaths,
+  SERVER_HOST,
+  SERVER_ORIGIN,
+  SERVER_PORT,
+  ServerManager,
+  type ResourcePaths,
+} from './server';
+import {
+  DESKTOP_CHANNELS,
+  type ActionResult,
+  type DesktopStatus,
+  type ServerState,
+} from './types';
 
-const HOST = '127.0.0.1';
-const PORT = 47900;
-const ORIGIN = `http://${HOST}:${PORT}`;
-const HEALTH_POLL_MS = 150;
-const HEALTH_TIMEOUT_MS = 30_000;
-const STOP_GRACE_MS = 5_000;
+const APP_TITLE = 'Open Record';
+const GUIDE_URL = 'https://github.com/ahnafone/open-record/blob/main/docs/desktop.md';
+const BUSY_ERROR = 'Another desktop operation is in progress. Try again in a moment.';
+const RELOAD_DELAY_MS = 100;
 
-/** Packaged: extraResources. Dev: the workspace dist folders. */
-function resourcePaths(): { serverDir: string; webDir: string; binDir: string } {
-  if (app.isPackaged) {
-    return {
-      serverDir: join(process.resourcesPath, 'server'),
-      webDir: join(process.resourcesPath, 'app', 'browser'),
-      binDir: join(process.resourcesPath, 'bin'),
-    };
-  }
-  // dist/apps/desktop/main/main.cjs -> workspace root
-  const root = resolve(__dirname, '../../../..');
-  return {
-    serverDir: join(root, 'dist/apps/desktop/server'),
-    webDir: join(root, 'dist/apps/app/browser'),
-    binDir: join(root, 'dist/apps/desktop/bin'),
-  };
-}
+// Test/profile isolation must happen before Electron touches userData.
+app.setName(APP_TITLE);
+const userDataOverride = process.env['OPEN_RECORD_DESKTOP_USER_DATA']?.trim();
+if (userDataOverride) app.setPath('userData', resolve(userDataOverride));
 
-/**
- * Same file the server would use (`<dataDir>/token`, 0600), created here so
- * the main process knows the token without parsing server output, and can
- * redact it from logs and hand it to the window later.
- */
-function readOrCreateToken(dataDir: string): string {
-  const path = join(dataDir, 'token');
-  try {
-    const stored = readFileSync(path, 'utf8').trim();
-    if (stored.length >= 16) return stored;
-  } catch {
-    // missing: generate below
-  }
-  const token = randomBytes(32).toString('hex');
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${token}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
-  return token;
-}
-
-function portFree(port: number, host: string): Promise<boolean> {
-  return new Promise((done) => {
-    const probe = createServer();
-    probe.once('error', () => done(false));
-    probe.once('listening', () => probe.close(() => done(true)));
-    probe.listen(port, host);
-  });
-}
-
-let child: ChildProcess | null = null;
 let win: BrowserWindow | null = null;
+let server: ServerManager | null = null;
+let resources: ResourcePaths | null = null;
+let config: DesktopConfig = { lanEnabled: false };
+let token = '';
+let lanUrl: string | null = null;
+let state: { server: ServerState; error: string | null } = { server: 'starting', error: null };
 let quitting = false;
+let shutdownStarted = false;
+let shutdownComplete = false;
+let actionBusy = false;
+let recovering = false;
+let reloadTimer: NodeJS.Timeout | null = null;
+let allowDataNavigation = false;
+let ipcRegistered = false;
 
-function startServer(token: string): ChildProcess {
-  const { serverDir, webDir, binDir } = resourcePaths();
-  const userData = app.getPath('userData');
-  const logDir = join(userData, 'logs');
-  mkdirSync(logDir, { recursive: true, mode: 0o700 });
-  const log = createWriteStream(join(logDir, 'server.log'), { flags: 'a', mode: 0o600 });
-
-  const proc = spawn(process.execPath, [join(serverDir, 'main.mjs')], {
-    cwd: serverDir,
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      HOST,
-      PORT: String(PORT),
-      WEB_DIR: webDir,
-      OPEN_RECORD_DATA_DIR: join(userData, 'server'),
-      OPEN_RECORD_TOKEN: token,
-      YTDLP_PATH: join(binDir, 'yt-dlp'),
-      FFMPEG_PATH: join(binDir, 'ffmpeg'),
-      YTDLP_JS_RUNTIME: `node:${process.execPath}`,
-      PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
-      NODE_ENV: 'production',
-      LOG_LEVEL: 'info',
-      TRUST_PROXY: 'false',
-      CORS_ORIGINS: ORIGIN,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-
-  // The startup banner prints the token and a QR of it: redact before logging.
-  const write = (chunk: Buffer): void => {
-    const text = chunk.toString('utf8').split(token).join('[token]');
-    for (const line of text.split('\n')) {
-      if (/[█▀▄]/.test(line) || line.includes('Pairing:')) continue;
-      if (line) log.write(`${line}\n`);
-    }
+/** Stable loopback origin. Never changes: IndexedDB and localStorage are keyed by it. */
+function currentStatus(): DesktopStatus {
+  const activeLan = config.lanEnabled && state.server === 'ready' ? lanUrl : null;
+  return {
+    server: state.server,
+    localUrl: SERVER_ORIGIN,
+    lanEnabled: config.lanEnabled,
+    lanUrl: activeLan,
+    supabaseConfigured: Boolean(config.supabaseUrl && config.supabaseAnonKey),
+    supabaseHost: supabaseHost(config),
+    dataDir: app.getPath('userData'),
+    version: app.getVersion(),
+    error: state.error,
   };
-  proc.stdout?.on('data', write);
-  proc.stderr?.on('data', write);
-  proc.once('exit', (code, signal) => {
-    log.write(`[desktop] server exited code=${code} signal=${signal}\n`);
-    log.end();
-    if (child === proc) child = null;
-    if (!quitting) {
-      dialog.showErrorBox('Open Record', `The local server stopped (code ${code}, signal ${signal}).`);
-      app.quit();
-    }
-  });
-  return proc;
 }
 
-async function waitForHealth(proc: ChildProcess): Promise<void> {
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) throw new Error('server exited during startup');
-    try {
-      const res = await fetch(`${ORIGIN}/health`);
-      if (res.ok) return;
-    } catch {
-      // not listening yet
-    }
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
-  }
-  throw new Error(`server did not answer ${ORIGIN}/health within ${HEALTH_TIMEOUT_MS / 1000}s`);
+function setState(serverState: ServerState, error: string | null): void {
+  state = { server: serverState, error };
 }
 
-/** SIGTERM, then SIGKILL after the grace period. */
-function stopServer(): Promise<void> {
-  const proc = child;
-  if (!proc || proc.exitCode !== null) return Promise.resolve();
-  return new Promise((done) => {
-    const timer = setTimeout(() => proc.kill('SIGKILL'), STOP_GRACE_MS);
-    proc.once('exit', () => {
-      clearTimeout(timer);
-      done();
-    });
-    proc.kill('SIGTERM');
-  });
+function activeLanUrl(): string | null {
+  return config.lanEnabled && state.server === 'ready' ? lanUrl : null;
 }
 
-function createWindow(): BrowserWindow {
-  const w = new BrowserWindow({
+/* -------------------------------------------------------------------------- */
+/* Window and renderer security                                               */
+/* -------------------------------------------------------------------------- */
+
+function ensureWindow(): BrowserWindow {
+  if (win && !win.isDestroyed()) return win;
+
+  const created = new BrowserWindow({
     width: 1280,
     height: 900,
-    backgroundColor: '#171b20',
+    minWidth: 800,
+    minHeight: 600,
     show: false,
+    title: APP_TITLE,
+    backgroundColor: '#171b20',
+    autoHideMenuBar: true,
     webPreferences: {
+      preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      webviewTag: false,
+      spellcheck: false,
     },
   });
-  w.webContents.on('will-navigate', (event, url) => {
-    if (new URL(url).origin !== ORIGIN) event.preventDefault();
+  win = created;
+
+  created.on('closed', () => {
+    if (win === created) win = null;
   });
-  w.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://')) void shell.openExternal(url);
+
+  created.once('ready-to-show', () => {
+    if (quitting) return;
+    if (created.isMinimized()) created.restore();
+    created.show();
+    created.focus();
+  });
+
+  created.webContents.on('will-navigate', (event, url) => {
+    if (allowDataNavigation && url.startsWith('data:text/html')) return;
+    if (!isLocalOrigin(url)) event.preventDefault();
+  });
+  created.webContents.on('will-redirect', (event, url) => {
+    if (!isLocalOrigin(url)) event.preventDefault();
+  });
+  created.webContents.setWindowOpenHandler(({ url }) => {
+    // External links only: https, never the local origin, never file://.
+    if (isHttpsUrl(url) && !isLocalOrigin(url)) {
+      void shell.openExternal(url).catch((err: unknown) => {
+        console.error(`[desktop] could not open external link: ${errorText(err)}`);
+      });
+    }
     return { action: 'deny' };
   });
-  w.once('ready-to-show', () => w.show());
-  return w;
+  created.webContents.on('will-attach-webview', (event) => event.preventDefault());
+
+  return created;
 }
 
-/** Spike-only: OPEN_RECORD_SPIKE_SCREENSHOT=<png> captures the window and quits. */
-function spikeCapture(w: BrowserWindow): void {
-  const out = process.env['OPEN_RECORD_SPIKE_SCREENSHOT'];
-  if (!out) return;
-  w.webContents.once('did-finish-load', () => {
-    setTimeout(async () => {
-      const image = await w.webContents.capturePage();
-      writeFileSync(out, image.toPNG());
-      console.log(`[desktop] screenshot ${out} title=${JSON.stringify(w.getTitle())}`);
-      app.quit();
-    }, 3000);
+async function loadApp(): Promise<void> {
+  const window = ensureWindow();
+  allowDataNavigation = false;
+  // Keep the screen the user was on (e.g. /desktop) when a config change
+  // restarts the server; a reload must not dump them back on Browse.
+  const current = window.webContents.getURL();
+  const target = current && isLocalOrigin(current) ? current : `${SERVER_ORIGIN}/`;
+  await window.loadURL(target);
+}
+
+/** Shows a real error document instead of Chromium's blank/offline page. */
+async function showErrorPage(message: string): Promise<void> {
+  const window = ensureWindow();
+  allowDataNavigation = true;
+  try {
+    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorPageHtml(message))}`);
+  } catch (err) {
+    console.error(`[desktop] could not show the error page: ${errorText(err)}`);
+  } finally {
+    allowDataNavigation = false;
+  }
+  if (!window.isVisible() && !window.isMinimized() && !quitting) window.show();
+}
+
+function errorPageHtml(message: string): string {
+  const logs = join(app.getPath('userData'), 'logs');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${APP_TITLE}</title>
+<style>
+:root { color-scheme: dark; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid; place-items: center; padding: 32px;
+  background: #171b20; color: #f5f0e6;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+main { max-width: 620px; }
+h1 { margin: 0 0 12px; font-family: Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 400; }
+p { margin: 0 0 14px; line-height: 1.55; color: #bcc4cb; }
+pre {
+  overflow-wrap: anywhere; white-space: pre-wrap; margin: 18px 0;
+  padding: 14px 16px; border: 1px solid #56616c; border-radius: 8px;
+  background: #252c33; color: #ffb4ad; font-size: 13px; line-height: 1.5;
+}
+code { color: #f5f0e6; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Open Record can't start its local server</h1>
+  <p>The UI is served by a local Fastify process on <code>${SERVER_ORIGIN}</code>. It did not become healthy, so the app is not going to show a blank window.</p>
+  <pre>${escapeHtml(message)}</pre>
+  <p>Logs are in <code>${escapeHtml(logs)}</code>. Use <strong>Retry</strong>, <strong>Open logs folder</strong>, or <strong>Quit</strong> in the dialog.</p>
+</main>
+</body>
+</html>`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Server lifecycle                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function startServer(): Promise<void> {
+  if (!resources) throw new Error('desktop resources are not resolved');
+  assertResources(resources);
+
+  setState('starting', null);
+  lanUrl = null;
+
+  const lanIp = config.lanEnabled ? pickLanIpv4() : null;
+  if (config.lanEnabled && !lanIp) {
+    throw new Error(
+      'LAN mode is enabled, but this computer has no non-internal IPv4 address. Connect to Wi-Fi/Ethernet and try again.',
+    );
+  }
+  const nextLanUrl = lanIp ? `http://${lanIp}:${SERVER_PORT}` : null;
+  const bindHost = config.lanEnabled ? '0.0.0.0' : SERVER_HOST;
+  if (!(await isPortAvailable(SERVER_PORT, bindHost))) {
+    throw new Error(
+      `Port ${SERVER_PORT} is already in use on ${bindHost}. Close the program using it and retry. Open Record never changes its loopback origin silently.`,
+    );
+  }
+
+  const manager = new ServerManager({
+    userData: app.getPath('userData'),
+    token,
+    resources,
+    onUnexpectedExit: handleUnexpectedExit,
+  });
+  server = manager;
+  await manager.startWithRetries(config, nextLanUrl);
+  lanUrl = nextLanUrl;
+}
+
+async function stopServer(): Promise<void> {
+  // A pending reload from the previous action must not race the next restart:
+  // it would hit a deliberately-stopped server and show the error page.
+  cancelScheduledReload();
+  const current = server;
+  server = null;
+  await current?.stop();
+}
+
+/** Initial start + immediate load: there is no renderer to report to yet. */
+async function startAndLoad(): Promise<void> {
+  await stopServer();
+  await startServer();
+  setState('ready', null);
+  try {
+    await loadApp();
+  } catch (err) {
+    const message = errorText(err);
+    setState('error', message);
+    await stopServer();
+    throw err;
+  }
+}
+
+/** IPC-driven restart: return the new status first, then reload the renderer. */
+async function restartForIpc(): Promise<ActionResult> {
+  setState('starting', null);
+  try {
+    await stopServer();
+    await startServer();
+    setState('ready', null);
+    scheduleReload();
+    return { ok: true, status: currentStatus() };
+  } catch (err) {
+    const message = errorText(err);
+    setState('error', message);
+    await stopServer();
+    return { ok: false, error: message };
+  }
+}
+
+function scheduleReload(): void {
+  cancelScheduledReload();
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    if (quitting || !win || win.isDestroyed()) return;
+    void loadApp().catch((err: unknown) => {
+      const message = errorText(err);
+      setState('error', message);
+      void recoveryLoop(message);
+    });
+  }, RELOAD_DELAY_MS);
+}
+
+function cancelScheduledReload(): void {
+  if (reloadTimer) {
+    clearTimeout(reloadTimer);
+    reloadTimer = null;
+  }
+}
+
+function handleUnexpectedExit(reason: string): void {
+  if (quitting || actionBusy) return;
+  console.error(`[desktop] ${reason}`);
+  setState('error', reason);
+  void recoveryLoop(reason).catch((err: unknown) => {
+    console.error(`[desktop] recovery failed: ${errorText(err)}`);
+    quitting = true;
+    dialog.showErrorBox(APP_TITLE, `The local server failed and recovery could not continue.\n\n${reason}`);
+    app.quit();
   });
 }
 
-function fatal(message: string): void {
-  console.error(`[desktop] ${message}`);
-  dialog.showErrorBox('Open Record', message);
-  app.exit(1);
+/* -------------------------------------------------------------------------- */
+/* Failure dialog + retry loop                                                */
+/* -------------------------------------------------------------------------- */
+
+async function recoveryLoop(initialMessage: string): Promise<void> {
+  if (recovering || quitting) return;
+  recovering = true;
+  let message = initialMessage;
+
+  try {
+    for (;;) {
+      setState('error', message);
+      await showErrorPage(message);
+      const choice = await showFailureDialog(message);
+
+      if (choice === 'quit') {
+        quitting = true;
+        app.quit();
+        return;
+      }
+      if (choice === 'logs') {
+        await openLogsFolder();
+        continue;
+      }
+
+      try {
+        await startAndLoad();
+        return;
+      } catch (err) {
+        message = errorText(err);
+      }
+    }
+  } finally {
+    recovering = false;
+  }
 }
+
+async function showFailureDialog(message: string): Promise<'retry' | 'logs' | 'quit'> {
+  const options: MessageBoxOptions = {
+    type: 'error',
+    title: APP_TITLE,
+    message: 'Open Record could not start its local server.',
+    detail: `${message}\n\nLogs: ${join(app.getPath('userData'), 'logs')}`,
+    buttons: ['Retry', 'Open logs folder', 'Quit'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+
+  const owner = win && !win.isDestroyed() ? win : null;
+  const result = owner
+    ? await dialog.showMessageBox(owner, options)
+    : await dialog.showMessageBox(options);
+  if (result.response === 1) return 'logs';
+  if (result.response === 2) return 'quit';
+  return 'retry';
+}
+
+async function openLogsFolder(): Promise<void> {
+  const dir = join(app.getPath('userData'), 'logs');
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const failure = await shell.openPath(dir);
+    if (failure) console.error(`[desktop] could not open logs: ${failure}`);
+  } catch (err) {
+    console.error(`[desktop] could not open logs: ${errorText(err)}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Actions                                                                    */
+/* -------------------------------------------------------------------------- */
+
+async function runExclusive<T>(fallback: T, work: () => Promise<T>): Promise<T> {
+  if (actionBusy) return fallback;
+  actionBusy = true;
+  try {
+    return await work();
+  } finally {
+    actionBusy = false;
+  }
+}
+
+async function saveSupabaseConfigAction(input: unknown): Promise<ActionResult> {
+  let validated: ValidatedSupabaseConfig;
+  try {
+    validated = validateSupabaseConfig(input);
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+
+  return runExclusive<ActionResult>({ ok: false, error: BUSY_ERROR }, async () => {
+    const next: DesktopConfig = {
+      ...config,
+      supabaseUrl: validated.supabaseUrl,
+      supabaseAnonKey: validated.supabaseAnonKey,
+    };
+    if (validated.jwtSecret === undefined) delete next.jwtSecret;
+    else next.jwtSecret = validated.jwtSecret;
+    return applyConfig(next);
+  });
+}
+
+async function setLanEnabledAction(enabled: unknown): Promise<ActionResult> {
+  if (typeof enabled !== 'boolean') {
+    return { ok: false, error: 'enabled must be a boolean.' };
+  }
+  if (enabled && !pickLanIpv4()) {
+    return {
+      ok: false,
+      error:
+        'Cannot enable LAN mode: this computer has no non-internal IPv4 address. Connect to Wi-Fi/Ethernet and try again.',
+    };
+  }
+
+  return runExclusive<ActionResult>({ ok: false, error: BUSY_ERROR }, async () =>
+    applyConfig({ ...config, lanEnabled: enabled }),
+  );
+}
+
+/**
+ * Persist and apply a config change. The renderer keeps its origin and data;
+ * only the Fastify child restarts. A failed rollout is rolled back so a LAN
+ * toggle cannot strand the user on a broken server with no setup page.
+ */
+async function applyConfig(next: DesktopConfig): Promise<ActionResult> {
+  const previous = config;
+  try {
+    saveDesktopConfig(app.getPath('userData'), next);
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+
+  config = next;
+  const result = await restartForIpc();
+  if (result.ok) return result;
+
+  try {
+    saveDesktopConfig(app.getPath('userData'), previous);
+    config = previous;
+    const rollback = await restartForIpc();
+    if (rollback.ok) {
+      return { ok: false, error: `${result.error} The previous settings were restored.` };
+    }
+    return {
+      ok: false,
+      error: `${result.error} Restoring the previous settings also failed: ${rollback.error}`,
+    };
+  } catch (rollbackErr) {
+    return {
+      ok: false,
+      error: `${result.error} Restoring the previous settings also failed: ${errorText(rollbackErr)}`,
+    };
+  }
+}
+
+async function restartServerAction(): Promise<ActionResult> {
+  return runExclusive<ActionResult>({ ok: false, error: BUSY_ERROR }, async () => restartForIpc());
+}
+
+/* -------------------------------------------------------------------------- */
+/* IPC                                                                        */
+/* -------------------------------------------------------------------------- */
+
+function registerIpc(): void {
+  if (ipcRegistered) return;
+  ipcRegistered = true;
+
+  handle(DESKTOP_CHANNELS.getStatus, () => currentStatus());
+  handle(DESKTOP_CHANNELS.getConnection, () => {
+    if (!token) throw new Error('The local server is not ready.');
+    return { url: SERVER_ORIGIN, token };
+  });
+  handle(DESKTOP_CHANNELS.saveSupabaseConfig, (input) => saveSupabaseConfigAction(input));
+  handle(DESKTOP_CHANNELS.setLanEnabled, (enabled) => setLanEnabledAction(enabled));
+  handle(DESKTOP_CHANNELS.restartServer, () => restartServerAction());
+  handle(DESKTOP_CHANNELS.getPairing, () => ({ lanUrl: activeLanUrl() }));
+  handle(DESKTOP_CHANNELS.openGuide, async () => {
+    await shell.openExternal(GUIDE_URL);
+  });
+  handle(DESKTOP_CHANNELS.openDataFolder, async () => {
+    const dir = app.getPath('userData');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const failure = await shell.openPath(dir);
+    if (failure) throw new Error(`could not open the data folder: ${failure}`);
+  });
+}
+
+type IpcHandler = (...args: unknown[]) => unknown;
+
+function handle(channel: string, handler: IpcHandler): void {
+  ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    return handler(...args);
+  });
+}
+
+/** Only the top frame of our own window, loaded from the fixed loopback origin. */
+function assertTrustedSender(event: IpcMainInvokeEvent): void {
+  const window = win;
+  if (!window || window.isDestroyed() || event.sender !== window.webContents) {
+    throw new Error('Untrusted IPC sender.');
+  }
+  const frame = event.senderFrame;
+  if (!frame) throw new Error('Untrusted IPC sender.');
+  try {
+    if (frame.parent !== null || !isLocalOrigin(frame.url)) {
+      throw new Error('Untrusted IPC sender.');
+    }
+  } catch {
+    throw new Error('Untrusted IPC sender.');
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Boot / shutdown                                                            */
+/* -------------------------------------------------------------------------- */
 
 async function boot(): Promise<void> {
-  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
-
-  if (!(await portFree(PORT, HOST))) {
-    fatal(`Port ${PORT} on ${HOST} is already in use. Close the program using it and start Open Record again.`);
-    return;
-  }
-
-  const token = readOrCreateToken(join(app.getPath('userData'), 'server'));
-  child = startServer(token);
   try {
-    await waitForHealth(child);
-  } catch (err) {
-    quitting = true;
-    await stopServer();
-    fatal(`The local server failed to start: ${(err as Error).message}`);
-    return;
-  }
-  console.log(`[desktop] server healthy at ${ORIGIN} (pid ${child.pid})`);
+    resources = resolveResourcePaths(app.isPackaged, process.resourcesPath, __dirname);
+    const userData = app.getPath('userData');
+    mkdirSync(join(userData, 'server'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(userData, 'logs'), { recursive: true, mode: 0o700 });
 
-  win = createWindow();
-  spikeCapture(win);
-  await win.loadURL(`${ORIGIN}/`);
+    config = loadDesktopConfig(userData);
+    token = readOrCreateToken(join(userData, 'server'));
+
+    lockPermissions(session.defaultSession);
+    const csp = createCspBuilder(
+      () => config,
+      () => activeLanUrl(),
+      resources.webDir,
+    );
+    installContentSecurityPolicy(csp);
+    registerIpc();
+
+    await startAndLoad();
+  } catch (err) {
+    const message = errorText(err);
+    console.error(`[desktop] boot failed: ${message}`);
+    setState('error', message);
+    await recoveryLoop(message);
+  }
 }
 
-// Spike/testing: keep test runs out of the real profile.
-const userDataOverride = process.env['OPEN_RECORD_DESKTOP_USER_DATA'];
-app.setName('Open Record');
-if (userDataOverride) app.setPath('userData', userDataOverride);
+function assertResources(paths: ResourcePaths): void {
+  if (!existsSync(join(paths.serverDir, 'main.mjs'))) {
+    throw new Error(
+      `The bundled local server is missing (${join(paths.serverDir, 'main.mjs')}). Reinstall Open Record.`,
+    );
+  }
+  if (!existsSync(join(paths.webDir, 'index.html'))) {
+    throw new Error(
+      `The bundled web app is missing (${join(paths.webDir, 'index.html')}). Reinstall Open Record.`,
+    );
+  }
+}
+
+function focusWindow(): void {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function onBeforeQuit(event: Electron.Event): void {
+  if (shutdownComplete) return;
+  if (shutdownStarted) {
+    event.preventDefault();
+    return;
+  }
+  if (!server) {
+    shutdownComplete = true;
+    return;
+  }
+
+  event.preventDefault();
+  shutdownStarted = true;
+  quitting = true;
+  cancelScheduledReload();
+  void stopServer()
+    .catch((err: unknown) => console.error(`[desktop] server shutdown failed: ${errorText(err)}`))
+    .finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      default:
+        return '&#39;';
+    }
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* App events                                                                 */
+/* -------------------------------------------------------------------------- */
 
 if (!app.requestSingleInstanceLock()) {
+  // A second launch focuses the existing window instead of racing for port 47900.
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  });
+  app.on('second-instance', () => focusWindow());
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', (event) => {
-    if (quitting || !child) return;
-    event.preventDefault();
-    quitting = true;
-    void stopServer().then(() => app.quit());
-  });
-  process.on('exit', () => child?.kill('SIGKILL'));
-  void app.whenReady().then(boot);
+  app.on('before-quit', onBeforeQuit);
+  process.on('exit', () => server?.forceKill());
+
+  void app
+    .whenReady()
+    .then(boot)
+    .catch((err: unknown) => {
+      const message = errorText(err);
+      console.error(`[desktop] fatal boot failure: ${message}`);
+      quitting = true;
+      dialog.showErrorBox(APP_TITLE, `Open Record could not start.\n\n${message}`);
+      app.quit();
+    });
 }

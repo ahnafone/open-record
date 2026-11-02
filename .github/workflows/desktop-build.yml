@@ -1,0 +1,137 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  # Unsigned macOS builds: never discover a Developer ID identity.
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            platform: linux
+            arch: x64
+            artifact: open-record-linux-x64
+            builder_args: --linux --x64
+          - name: windows-x64
+            os: windows-2025
+            platform: win32
+            arch: x64
+            artifact: open-record-windows-x64
+            builder_args: --win --x64
+          - name: macos-arm64
+            os: macos-14
+            platform: darwin
+            arch: arm64
+            artifact: open-record-macos-arm64
+            builder_args: --mac --arm64
+          - name: macos-x64
+            os: macos-14
+            platform: darwin
+            arch: x64
+            artifact: open-record-macos-x64
+            builder_args: --mac --x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build web app, server and desktop main/preload
+        run: npm run desktop:build
+        env:
+          NX_DAEMON: 'false'
+
+      - name: Fetch and verify pinned yt-dlp/ffmpeg
+        run: >-
+          node apps/desktop/scripts/fetch-binaries.mjs
+          --platform ${{ matrix.platform }}
+          --arch ${{ matrix.arch }}
+        env:
+          # Optional stable mirror for pinned assets (flat layout; see the
+          # script header). Set the repository variable when BtbN's dated
+          # ffmpeg tag or GitHub release retention becomes a problem.
+          OPEN_RECORD_BINARIES_BASE: ${{ vars.OPEN_RECORD_BINARIES_BASE }}
+
+      - name: Stage server with the committed lockfile
+        run: node apps/desktop/scripts/stage-server.mjs
+
+      - name: Stage Electron app directory
+        run: node apps/desktop/scripts/stage-app.mjs
+
+      - name: Ad-hoc sign bundled media binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - dist/apps/desktop/bin/yt-dlp
+          codesign --force --sign - dist/apps/desktop/bin/ffmpeg
+
+      - name: Build installers
+        run: >-
+          npx electron-builder
+          --config apps/desktop/electron-builder.yml
+          --publish never
+          ${{ matrix.builder_args }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/apps/desktop/release/*.AppImage
+            dist/apps/desktop/release/*.deb
+            dist/apps/desktop/release/*.exe
+            dist/apps/desktop/release/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Upload installers to the GitHub release
+    # Only tags publish. Matrix jobs never touch the release, so there are no
+    # concurrent uploads/races between platforms.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload assets to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

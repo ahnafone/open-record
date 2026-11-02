@@ -22,7 +22,8 @@ export interface ScreenData {
     | 'now-playing'
     | 'settings'
     | 'account'
-    | 'import';
+    | 'import'
+    | 'desktop';
   root: boolean;
   /** Top-bar title for non-root screens (the playlist screen uses its name). */
   title?: string;
@@ -105,6 +106,17 @@ export const appRoutes: Route[] = [
     } satisfies ScreenData,
     loadComponent: () =>
       import('@open-record/features/account').then((m) => m.AccountPage),
+  },
+  {
+    path: 'desktop',
+    title: 'Desktop app · Open Record',
+    data: {
+      screen: 'desktop',
+      root: false,
+      title: 'Desktop app',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('./desktop/desktop-page').then((m) => m.DesktopPage),
   },
   {
     path: 'import/sessions',

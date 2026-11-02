@@ -66,6 +66,12 @@ export abstract class RemoteServerPort {
   abstract readonly configured: boolean;
   /** Settings "Test connection": reachable and token accepted (rejects otherwise). */
   abstract testConnection(signal?: AbortSignal): Promise<void>;
+  /**
+   * Unauthenticated reachability check (`GET /health` + `GET /app-config`).
+   * Used when pairing a signed-out phone: the server is reachable even though
+   * this device has no account token yet.
+   */
+  abstract probeServer(signal?: AbortSignal): Promise<void>;
   /** Search one site; results stream on play or save. */
   abstract searchSite(
     query: string,

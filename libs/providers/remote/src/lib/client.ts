@@ -345,6 +345,16 @@ export class RemoteClient {
   }
 
   /**
+   * Signed-out pairing probe: `GET /health` and `GET /app-config`, both
+   * unauthenticated. Resolves when the address answers like an Open Record
+   * server; never sends a bearer token.
+   */
+  async probeServer(signal?: AbortSignal): Promise<void> {
+    await this.health(signal);
+    await this.appConfig(signal);
+  }
+
+  /**
    * Settings "Test connection": `health()` then an authenticated probe
    * (`GET /ping`, an authenticated route).
    * Rejects with {@link AuthError} for a bad token.

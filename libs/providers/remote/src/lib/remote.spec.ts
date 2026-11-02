@@ -66,4 +66,29 @@ describe('remote provider', () => {
     const client = new RemoteClient({ baseUrl: 'http://192.168.1.20:8080', token: 'wrong' }, fakeTransport(401, { error: 'Unauthorized' }));
     await expect(client.search('anything')).rejects.toBeInstanceOf(AuthError);
   });
+
+  it('probes /health and /app-config without a bearer token', async () => {
+    const requests: { url: string; authorization: string | undefined }[] = [];
+    const transport: HttpTransport = {
+      async request(req) {
+        requests.push({ url: req.url, authorization: req.headers['Authorization'] });
+        return req.url.endsWith('/health')
+          ? { status: 200, headers: { 'content-type': 'application/json' }, data: { status: 'ok' } }
+          : { status: 200, headers: { 'content-type': 'application/json' }, data: { supabaseUrl: null, supabaseAnonKey: null } };
+      },
+    };
+    const provider = new RemoteProvider({
+      config: { baseUrl: 'http://192.168.1.20:47900', token: 'legacy-static-token' },
+      transport,
+      accessToken: async () => 'user-token',
+    });
+
+    await provider.probeServer();
+
+    expect(requests.map((r) => r.url)).toEqual([
+      'http://192.168.1.20:47900/health',
+      'http://192.168.1.20:47900/app-config',
+    ]);
+    expect(requests.every((r) => r.authorization === undefined)).toBe(true);
+  });
 });

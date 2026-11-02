@@ -43,6 +43,7 @@ import {
 import { StoragePort, provideStorage } from '@open-record/storage';
 import { appRoutes } from './app.routes';
 import { createBackgroundWork } from './background-work';
+import { connectDesktop, getDesktopBridge } from './desktop-bridge';
 import { createDeviceStorage } from './device-storage';
 import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
@@ -162,8 +163,14 @@ export const appConfig: ApplicationConfig = {
       settings = inject(SettingsStore);
       settingsReady();
       auth = inject(AuthStore);
-      // Web build served by the download server: use it (not awaited).
-      void autoPairWeb(settings);
+      // Desktop: the bridge owns the bundled server and its static token. Save
+      // them before the UI can search or stream, but never block startup on a
+      // broken bridge (the web build pairs with its own origin instead).
+      const bridge = getDesktopBridge();
+      const desktopReady = bridge
+        ? connectDesktop(settings, bridge)
+        : undefined;
+      if (!bridge) void autoPairWeb(settings);
       // A new server address may offer a different account project.
       const store = settings;
       const accounts = auth;
@@ -174,6 +181,7 @@ export const appConfig: ApplicationConfig = {
         if (lastUrl !== undefined && url !== lastUrl) void accounts.refresh();
         lastUrl = url;
       });
+      return desktopReady;
     }),
     // Route params (e.g. playlist `:id`) bind to component inputs. 'computed'
     // stamps each history entry with a page index (ɵrouterPageId) that

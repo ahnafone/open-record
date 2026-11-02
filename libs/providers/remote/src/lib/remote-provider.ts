@@ -201,6 +201,11 @@ export class RemoteProvider {
     return this.client.testConnection(signal);
   }
 
+  /** Reachable without a token (`/health` + `/app-config`); for signed-out pairing. */
+  probeServer(signal?: AbortSignal): Promise<void> {
+    return this.client.probeServer(signal);
+  }
+
   /** MusicSourceProvider search on the default site. Empty when no server is configured. */
   async search(query: string, signal?: AbortSignal): Promise<Track[]> {
     if (!this._client) return [];
