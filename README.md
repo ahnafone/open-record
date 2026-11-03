@@ -17,9 +17,9 @@ import your own music, and play it all on a virtual turntable. **Version 1.0.0.*
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; see [release builds](#release-builds) |
 | iPhone / iPad | [Build with Xcode](#run-on-iphone) | Free Apple ID; re-sign every 7 days |
 
-Desktop builds are unsigned. The links point at the latest release; the desktop workflow uploads
-installers on a `v*` tag. A missing file means that asset is not published yet. There is no App
-Store, TestFlight, Play Store or enterprise build.
+Desktop builds are unsigned. The v1.0.0 desktop installers and Android APK are built and staged,
+but **no GitHub release is published yet**; the download links below resolve once it is. There is
+no App Store, TestFlight, Play Store or enterprise build.
 
 > **Notices**
 >
@@ -35,8 +35,9 @@ optional accounts and sync. The Electron desktop app bundles the UI and local se
 `.github/workflows/desktop-build.yml` builds the desktop installers.
 
 Collaborators is hidden in v1; its role logic is kept for v2. Android and iOS device testing is
-still pending. A signed Android APK is attached to the v1.0.0 release; building your own release
-needs your own keystore. The iPhone install uses a free Apple ID in Xcode and expires after 7 days.
+still pending. A signed Android APK and the desktop installers are built and staged for v1.0.0, but
+the GitHub release is not published yet. The iPhone install uses a free Apple ID in Xcode and expires
+after 7 days.
 
 ## Install and run
 
@@ -77,7 +78,8 @@ npm run android:release:install
 Release builds need `apps/app/android/keystore.properties` and your own keystore outside the repo;
 see [RELEASE_SIGNING.md](apps/app/android/RELEASE_SIGNING.md). For a local performance build only,
 `./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. The
-v1.0.0 release includes a signed APK; uninstall a debug-signed build before switching signatures.
+signed v1.0.0 APK is built and staged but not published; uninstall a debug-signed build before
+switching signatures.
 
 ### Run on iPhone
 
@@ -186,8 +188,8 @@ Build and measure with release builds, not debug.
   GitHub release. All desktop installers are unsigned; there is no auto-update.
 - **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
   configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
-  opt-in with `-PallowDebugSigning` for local performance builds. The v1.0.0 release includes the
-  signed `OpenRecord-android.apk`.
+  opt-in with `-PallowDebugSigning` for local performance builds. The signed `OpenRecord-android.apk`
+  is built and staged for v1.0.0, but not published yet.
 - **iPhone:** run the **Release** configuration from Xcode with a Personal Team to install on a
   device; `npm run ios:release` only makes a generic build. No TestFlight; free-account builds expire after 7 days.
 - **Checks:** `npm run check` runs token checks, lint, typecheck and build.
