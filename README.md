@@ -35,8 +35,8 @@ optional accounts and sync. The Electron desktop app bundles the UI and local se
 `.github/workflows/desktop-build.yml` builds the desktop installers.
 
 Collaborators is hidden in v1; its role logic is kept for v2. Android and iOS device testing is
-still pending. A distributable Android release needs your own keystore, and no signed release APK is
-published yet. The iPhone install uses a free Apple ID in Xcode and expires after 7 days.
+still pending. A signed Android APK is attached to the v1.0.0 release; building your own release
+needs your own keystore. The iPhone install uses a free Apple ID in Xcode and expires after 7 days.
 
 ## Install and run
 
@@ -76,8 +76,8 @@ npm run android:release:install
 
 Release builds need `apps/app/android/keystore.properties` and your own keystore outside the repo;
 see [RELEASE_SIGNING.md](apps/app/android/RELEASE_SIGNING.md). For a local performance build only,
-`./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. No
-signed APK is published yet. Uninstall a debug-signed build before switching signatures.
+`./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. The
+v1.0.0 release includes a signed APK; uninstall a debug-signed build before switching signatures.
 
 ### Run on iPhone
 
@@ -186,7 +186,8 @@ Build and measure with release builds, not debug.
   GitHub release. All desktop installers are unsigned; there is no auto-update.
 - **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
   configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
-  opt-in with `-PallowDebugSigning` for local performance builds. No signed APK is published yet.
+  opt-in with `-PallowDebugSigning` for local performance builds. The v1.0.0 release includes the
+  signed `OpenRecord-android.apk`.
 - **iPhone:** run the **Release** configuration from Xcode with a Personal Team to install on a
   device; `npm run ios:release` only makes a generic build. No TestFlight; free-account builds expire after 7 days.
 - **Checks:** `npm run check` runs token checks, lint, typecheck and build.
