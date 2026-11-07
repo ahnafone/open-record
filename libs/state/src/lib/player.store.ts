@@ -545,7 +545,7 @@ export class PlayerStore {
       return;
     }
     await this.engine.seek(positionSec);
-    if (this.session.isTarget()) this.session.report('tick');
+    if (this.session.isTarget()) this.session.reportSeek();
   }
 
   /** Seek relative to the current position (clamped by the engine). */
@@ -558,7 +558,7 @@ export class PlayerStore {
       return;
     }
     await this.engine.seek(this.engine.position() + deltaSec);
-    if (this.session.isTarget()) this.session.report('tick');
+    if (this.session.isTarget()) this.session.reportSeek();
   }
 
   setVolume(volume: number): void {

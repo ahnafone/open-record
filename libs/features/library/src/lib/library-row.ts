@@ -51,17 +51,29 @@ import {
       class="record-main"
       type="button"
       [attr.aria-label]="
-        (isCurrent ? 'Now playing: ' : 'Play ') + t.title + ' by ' + t.artist
+        isCurrent ? null : 'Play ' + t.title + ' by ' + t.artist
       "
       [attr.aria-current]="isCurrent ? 'true' : null"
       (click)="playTrack.emit()"
     >
-      <or-sleeve
-        size="thumb"
-        [src]="art()"
-        [alt]="''"
-        [playing]="isCurrent && player.isPlaying()"
-      />
+      <span class="sleeve-slot">
+        <or-sleeve
+          size="thumb"
+          [src]="art()"
+          [alt]="''"
+          [playing]="isCurrent && player.isPlaying()"
+        />
+        @if (isCurrent) {
+          <span class="now-overlay" aria-hidden="true">
+            @if (player.isPlaying()) {
+              <span class="eq"><span></span><span></span><span></span></span>
+            } @else {
+              <or-icon name="pause" [size]="22" />
+            }
+          </span>
+          <span class="sr-only">{{ player.isPlaying() ? 'On the turntable' : 'Paused' }}</span>
+        }
+      </span>
       <span class="info">
         <span class="title">{{ t.title }}</span>
         <span class="artist">{{ t.artist }}@if (t.album) {<span class="album-inline"> · {{ t.album }}</span>}</span>
@@ -88,12 +100,6 @@ import {
             <span class="detail-text">{{ detail() }}</span>
           }
         </span>
-        @if (isCurrent) {
-          <span class="now">
-            <or-icon name="disc" [size]="13" />
-            {{ player.isPlaying() ? 'On the turntable' : 'Paused' }}
-          </span>
-        }
       </span>
     </button>
     <!-- Desktop table cells (hidden below 900px, where the row shows them inline). -->
@@ -204,14 +210,66 @@ import {
       font-size: 13px;
       color: var(--color-muted);
     }
-    .now {
-      display: flex;
-      align-items: center;
-      gap: var(--spacing-xs);
-      margin-top: 2px;
-      font-size: var(--type-meta-font-size);
-      line-height: 16px;
+    .sleeve-slot {
+      position: relative;
+      display: block;
+      flex: none;
+    }
+    /* Status overlay covers the thumb sleeve, whatever its size. */
+    .now-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: grid;
+      place-items: center;
+      border-radius: var(--rounded-sleeve);
+      background: color-mix(in srgb, var(--color-vinyl) 62%, transparent);
       color: var(--color-text);
+      pointer-events: none;
+    }
+    .eq {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 3px;
+      inline-size: 22px;
+      block-size: 20px;
+    }
+    .eq span {
+      inline-size: 4px;
+      block-size: 100%;
+      border-radius: 1px;
+      background: var(--color-primary);
+      transform-origin: bottom;
+      /* Static heights, used under reduced motion and before animation runs. */
+      transform: scaleY(0.6);
+      animation: or-eq 900ms ease-in-out infinite alternate;
+    }
+    .eq span:nth-child(2) {
+      transform: scaleY(1);
+      animation-duration: 700ms;
+      animation-delay: -300ms;
+    }
+    .eq span:nth-child(3) {
+      transform: scaleY(0.4);
+      animation-duration: 1100ms;
+      animation-delay: -600ms;
+    }
+    @keyframes or-eq {
+      from {
+        transform: scaleY(0.2);
+      }
+      to {
+        transform: scaleY(1);
+      }
+    }
+    .sr-only {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
 
     /* Hover only where a pointer can hover: no unused transitions on touch. */
@@ -246,6 +304,9 @@ import {
     @media (prefers-reduced-motion: reduce) {
       .record-main {
         transition-duration: 1ms;
+      }
+      .eq span {
+        animation: none;
       }
     }
   `,

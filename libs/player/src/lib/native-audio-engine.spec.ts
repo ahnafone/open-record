@@ -14,6 +14,7 @@ import { NativeAudioEngine } from './native-audio-engine';
 
 interface FakeStatusValue {
   currentPosition?: number;
+  position?: number;
   duration?: number;
   code?: number;
   message?: string;
@@ -41,6 +42,8 @@ const Msg = {
   ERROR: 5,
   PLAYING: 30,
   PAUSE: 35,
+  POSITION: 40,
+  SEEK: 45,
   COMPLETED: 50,
   TRACK_CHANGED: 100,
 } as const;
@@ -138,6 +141,7 @@ interface Recorder {
   plays: number;
   pauses: number;
   ended: number;
+  times: number[];
 }
 
 function recorder(): Recorder {
@@ -148,6 +152,7 @@ function recorder(): Recorder {
     plays: 0,
     pauses: 0,
     ended: 0,
+    times: [],
   };
   rec.listener = {
     onPlaying: () => {
@@ -156,7 +161,7 @@ function recorder(): Recorder {
     onPaused: () => {
       rec.pauses++;
     },
-    onTime: () => undefined,
+    onTime: (sec) => rec.times.push(sec),
     onDuration: () => undefined,
     onEnded: () => {
       rec.ended++;
@@ -342,6 +347,23 @@ describe('NativeAudioEngine native window', () => {
     // After a successful retry, neighbour skips are live again.
     plugin.trackChanged('c');
     expect(rec.skipped).toEqual([{ direction: 'next', trackId: 'c' }]);
+  });
+
+  it('gates POSITION until playback starts, but lets a seek through before play', async () => {
+    const { plugin, engine, rec } = setup();
+    await engine.load(media('b'), { next: media('c') });
+
+    // PREPARING with duration 0 reports position before anything plays.
+    plugin.emit('b', Msg.POSITION, { currentPosition: 3 });
+    expect(rec.times).toEqual([]);
+
+    // A seek before first play must update the UI (native SEEK carries `position`).
+    plugin.emit('b', Msg.SEEK, { position: 1 });
+    expect(rec.times).toEqual([1]);
+
+    plugin.playing('b');
+    plugin.emit('b', Msg.POSITION, { currentPosition: 4 });
+    expect(rec.times).toEqual([1, 4]);
   });
 
   it('maps known native error codes to friendly copy', async () => {

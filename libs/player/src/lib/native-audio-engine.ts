@@ -32,7 +32,9 @@ interface NativeStatus {
   trackId: string;
   msgType: number;
   value: {
+    /** Sent with POSITION; SEEK carries the seek target as `position`. */
     currentPosition?: number;
+    position?: number;
     duration?: number;
     code?: number;
     message?: string;
@@ -197,6 +199,11 @@ export class NativeAudioEngine implements AudioEngine {
   private chain: Promise<void> = Promise.resolve();
   private loadSeq = 0;
   private windowSignature: string | null = null;
+  /**
+   * Id whose playback has actually started (native PLAYING). Position reports
+   * before this, e.g. PREPARING with duration 0, must not drive the timer.
+   */
+  private startedFor: string | null = null;
 
   constructor(
     plugin: PlaylistPlugin = registerPlugin<PlaylistPlugin>(
@@ -282,7 +289,10 @@ export class NativeAudioEngine implements AudioEngine {
 
     this.neighbours = { previous, next };
     this.currentId = media.id;
-    if (!sameItem) this.endedFor = null;
+    if (!sameItem) {
+      this.endedFor = null;
+      this.startedFor = null;
+    }
 
     const task = this.chain.then(async () => {
       // A newer load was requested while this one waited its turn.
@@ -363,6 +373,7 @@ export class NativeAudioEngine implements AudioEngine {
     this.loadSeq++;
     this.playing = false;
     this.failedFor = null;
+    this.startedFor = null;
     const task = this.chain.then(async () => {
       await this.plugin.clearAllItems();
     });
@@ -386,6 +397,7 @@ export class NativeAudioEngine implements AudioEngine {
     this.loadSeq++;
     this.playing = false;
     this.failedFor = null;
+    this.startedFor = null;
     this.currentId = null;
     this.loadedId = null;
     this.neighbours = {};
@@ -415,10 +427,12 @@ export class NativeAudioEngine implements AudioEngine {
           // The native player has already moved: a follow-up load of this id
           // must refresh the window in place rather than restart at 0.
           this.loadedId = id;
+          this.startedFor = this.playing ? id : null;
           l.onSkipped('next', id);
         } else if (id === this.neighbours.previous?.id) {
           this.currentId = id;
           this.loadedId = id;
+          this.startedFor = this.playing ? id : null;
           l.onSkipped('previous', id);
         }
         return;
@@ -427,6 +441,7 @@ export class NativeAudioEngine implements AudioEngine {
         if (isCurrent) {
           this.playing = true;
           this.failedFor = null;
+          this.startedFor = this.currentId;
           l.onPlaying();
         }
         return;
@@ -438,11 +453,19 @@ export class NativeAudioEngine implements AudioEngine {
         }
         return;
       case Msg.POSITION:
-      case Msg.SEEK:
-        if (isCurrent && status.value.currentPosition !== undefined) {
+        // Timer gate: nothing reports time until this item has started.
+        if (!isCurrent || this.startedFor !== this.currentId) return;
+        if (status.value.currentPosition !== undefined) {
           l.onTime(status.value.currentPosition);
         }
         return;
+      case Msg.SEEK: {
+        // A seek is the user's target and must reach the UI even before play.
+        if (!isCurrent) return;
+        const sec = status.value.position ?? status.value.currentPosition;
+        if (sec !== undefined) l.onTime(sec);
+        return;
+      }
       case Msg.DURATION:
         if (isCurrent && status.value.duration) {
           l.onDuration(status.value.duration);
@@ -470,6 +493,7 @@ export class NativeAudioEngine implements AudioEngine {
         if (this.failedFor === failedId) return;
         this.failedFor = failedId;
         this.playing = false;
+        this.startedFor = null;
         this.windowSignature = null;
         // The cleanup below empties the native playlist.
         this.loadedId = null;

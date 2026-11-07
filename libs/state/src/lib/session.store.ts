@@ -41,6 +41,8 @@ import {
 
 /** How close the local engine must be to the server anchor to leave it alone. */
 const SEEK_TOLERANCE_SEC = 2;
+/** Ticks sent before the server saw a local seek are ignored for this long. */
+const LOCAL_SEEK_GRACE_MS = 3000;
 
 /** Window in which the same (entry, reason, playing) report is not sent twice. */
 const REPORT_DEDUPE_MS = 1000;
@@ -205,7 +207,13 @@ export class SessionStore {
   readonly currentEntryId = computed(
     () => this.session()?.order[this.remoteCursor()]?.entryId,
   );
-  readonly remotePlaying = computed(() => this.session()?.playing ?? false);
+  /** A stale target keeps its last `playing`, but nothing is playing on it. */
+  private readonly mirroringStale = computed(
+    () => this.mirroring() && this.targetStale(),
+  );
+  readonly remotePlaying = computed(
+    () => (this.session()?.playing ?? false) && !this.mirroringStale(),
+  );
   readonly remoteDuration = computed(
     () => this.remoteCurrent()?.durationSec ?? 0,
   );
@@ -216,7 +224,7 @@ export class SessionStore {
   readonly remoteStatus = computed<PlayerStatus>(() => {
     const state = this.session();
     if (!state) return 'idle';
-    if (state.playing) return 'playing';
+    if (this.remotePlaying()) return 'playing';
     return state.cursor >= 0 ? 'paused' : 'idle';
   });
   readonly remoteError = computed(() =>
@@ -233,10 +241,10 @@ export class SessionStore {
     this.tick();
     const state = this.session();
     if (!state || state.cursor < 0) return 0;
-    const position = anchoredPosition(
-      state,
-      Date.now() + this.serverSkew(),
-    );
+    // A stale target is frozen at its last anchor: no extrapolation.
+    const position = this.mirroringStale()
+      ? Math.max(0, state.positionSec)
+      : anchoredPosition(state, Date.now() + this.serverSkew());
     const duration = state.order[state.cursor]?.durationSec ?? 0;
     return duration > 0 ? Math.min(position, duration) : position;
   });
@@ -264,6 +272,14 @@ export class SessionStore {
   private disconnect?: () => void;
   private unsubscribeChange?: () => void;
   private unsubscribeMessage?: () => void;
+  /** Target clientId this client already adopted from; one attempt per target. */
+  private adoptedFrom = '';
+  /** Target clientId whose adoption is in flight; cleared on failure to retry. */
+  private adoptingFrom = '';
+  /** Target clientId whose pause already succeeded, so a retry only transfers. */
+  private pausedFrom = '';
+  /** Bumped on every disconnect so an in-flight adoption cannot write stale state. */
+  private connectionEpoch = 0;
   private connectedName = '';
   private connectedServer = '';
   private refused = false;
@@ -280,6 +296,8 @@ export class SessionStore {
   private observedEntryId = '';
   private observedStatus: PlayerStatus = 'idle';
   private lastReportAt = Number.NEGATIVE_INFINITY;
+  /** When this client last seeked locally; in-flight stale ticks must not undo it. */
+  private lastLocalSeekAt = Number.NEGATIVE_INFINITY;
   private lastReportKey = '';
   private lastReportKeyAt = 0;
   /** `track.id` + `sourceFile` → server upload id, so a retry uploads once. */
@@ -591,6 +609,18 @@ export class SessionStore {
     this.emitReport(reason, extra);
   }
 
+  /**
+   * Report a seek this client just made, bypassing the tick throttle and the
+   * playing check: the server must learn the new anchor at once, or its next
+   * tick still carries the old position and drags the engine back to it.
+   */
+  reportSeek(): void {
+    if (!this.started || !this.port || !this.isTarget()) return;
+    if (this.applyingRemote) return;
+    this.lastLocalSeekAt = Date.now();
+    this.emitReport('tick', undefined, true);
+  }
+
   entryIdAt(index: number): string | undefined {
     return this.session()?.order[index]?.entryId;
   }
@@ -676,6 +706,7 @@ export class SessionStore {
 
     this.connectedName = name;
     this.connectedServer = server;
+    this.resetAdoption();
     this.disconnect = port.connect(this.profile(), () =>
       this.auth.accessToken(),
     );
@@ -714,6 +745,7 @@ export class SessionStore {
   }
 
   private disconnectOnly(): void {
+    this.resetAdoption();
     const disconnect = this.disconnect;
     this.disconnect = undefined;
     this.connectedName = '';
@@ -798,7 +830,10 @@ export class SessionStore {
           targetStale: message.targetStale,
         };
         this.session.set(next);
-        if (this.isTarget()) {
+        if (
+          this.isTarget() &&
+          Date.now() - this.lastLocalSeekAt > LOCAL_SEEK_GRACE_MS
+        ) {
           void this.engine.seekIfDrifted(
             anchoredPosition(next, Date.now() + this.serverSkew()),
           );
@@ -837,6 +872,78 @@ export class SessionStore {
       // This client stopped being the target: stop owning the speakers.
       this.stopTargetPlayback();
     }
+    if (!nowTarget) this.adoptEarlierInstance(next);
+  }
+
+  /**
+   * An earlier instance of this same install holds the target (the app was
+   * relaunched, or another tab on the web). That instance is dead on native,
+   * so adopt it at once; on the web a sibling tab may be live, so adopt only a
+   * stale target. Adoption pauses first (a transfer keeps `playing`, which
+   * would autoplay on launch), then transfers to this client. One attempt per
+   * old target clientId, so the server's own pause revision cannot loop.
+   */
+  private adoptEarlierInstance(state: SessionState): void {
+    const target = state.target;
+    if (target?.kind !== 'device') return;
+    if (target.deviceId !== this.deviceId()) return;
+    if (target.clientId === this.clientId()) return;
+    if (detectPlatform() === 'web' && !state.targetStale) return;
+    if (target.clientId === this.adoptedFrom) return;
+    if (target.clientId === this.adoptingFrom) return;
+    this.adoptingFrom = target.clientId;
+    void this.runAdoption(target.clientId, state.playing);
+  }
+
+  /**
+   * Pause (if playing) then transfer from `oldClientId` to this client. A
+   * failed pause or transfer clears `adoptingFrom` so the next state retries;
+   * a pause that already succeeded is not repeated. Nothing is recorded as
+   * adopted until the transfer succeeds.
+   */
+  private async runAdoption(oldClientId: string, wasPlaying: boolean): Promise<void> {
+    const epoch = this.connectionEpoch;
+    const fail = (error: string | undefined) => {
+      if (epoch !== this.connectionEpoch) return;
+      this.adoptingFrom = '';
+      this.recordRefusal(error ?? 'Could not take over playback.');
+    };
+
+    if (wasPlaying && this.pausedFrom !== oldClientId) {
+      const paused = await this.command({ type: 'pause' });
+      if (epoch !== this.connectionEpoch) return;
+      if (!paused.ok) return fail(paused.error);
+      this.pausedFrom = oldClientId;
+    }
+
+    // The round-trip may have moved the target on; only transfer from the old instance.
+    const target = this.session()?.target;
+    if (target?.kind !== 'device' || target.clientId !== oldClientId) {
+      if (epoch === this.connectionEpoch) this.adoptingFrom = '';
+      return;
+    }
+
+    const moved = await this.command({
+      type: 'transfer',
+      target: {
+        kind: 'device',
+        clientId: this.clientId(),
+        deviceId: this.deviceId(),
+      },
+    });
+    if (epoch !== this.connectionEpoch) return;
+    if (!moved.ok) return fail(moved.error);
+    this.adoptingFrom = '';
+    this.adoptedFrom = oldClientId;
+    this.pausedFrom = '';
+  }
+
+  /** Forget adoption progress: disconnect, sign-out and reconnect start fresh. */
+  private resetAdoption(): void {
+    this.connectionEpoch++;
+    this.adoptedFrom = '';
+    this.adoptingFrom = '';
+    this.pausedFrom = '';
   }
 
   // ---- Target: apply the server's state -----------------------------------
@@ -979,6 +1086,7 @@ export class SessionStore {
     extra?: Partial<
       Pick<SessionReportMessage, 'entryId' | 'durationSec' | 'playing'>
     >,
+    force = false,
   ): void {
     const port = this.port;
     const state = this.session();
@@ -990,8 +1098,11 @@ export class SessionStore {
     const playing = extra?.playing ?? this.engine.status() === 'playing';
     const now = Date.now();
     if (reason === 'tick') {
-      // No anchor while paused, and at most one tick per throttle window.
-      if (!playing || now - this.lastReportAt < REPORT_THROTTLE_MS) return;
+      // No anchor while paused, and at most one tick per throttle window;
+      // a seek is always reported.
+      if (!force && (!playing || now - this.lastReportAt < REPORT_THROTTLE_MS)) {
+        return;
+      }
     } else {
       const key = `${entryId}|${reason}|${playing}`;
       // PlayerStore and the engine observer may both report the same change.

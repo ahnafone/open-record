@@ -64,4 +64,10 @@ the flag is present.
 
 A release-signed APK cannot be installed over a debug-signed build
 (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Uninstalling the old app removes its
-data, so back up anything important first.
+data, including downloaded songs, and `allowBackup` is off so Android cannot
+restore it.
+
+To keep user data, always update in place with `adb install -r` (what
+`npm run android:release:install` does) and sign every install on a device with
+the same key. Never ask users to uninstall to get past a signature mismatch
+unless they accept losing their downloads.

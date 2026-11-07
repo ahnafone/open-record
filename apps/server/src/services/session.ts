@@ -352,7 +352,10 @@ export class SessionService {
         this.broadcast(room, {
           type: 'tick',
           revision: room.session.revision,
-          positionSec: anchoredPosition(room.session, now),
+          // A stale target is not advancing: keep its last known position.
+          positionSec: room.session.targetStale
+            ? room.session.positionSec
+            : anchoredPosition(room.session, now),
           playing: room.session.playing,
           updatedAt: now,
           ...(room.session.targetStale ? { targetStale: true } : {}),
@@ -1129,7 +1132,7 @@ export class SessionService {
 
       const state = room.session;
       state.target = { kind: 'device', clientId: target.clientId, deviceId: device.deviceId };
-      state.positionSec = anchoredPosition(state, now);
+      this.freezePosition(state, now);
       delete state.targetStale;
       delete state.castOwner;
       delete state.castVolume;
@@ -1218,8 +1221,13 @@ export class SessionService {
     return { ok: true, revision: next.revision };
   }
 
+  /**
+   * Pin the playhead at `now`. A stale target has been silent, so its stored
+   * anchor is the only position we trust: extrapolating from an old `updatedAt`
+   * would jump the playhead when that target is paused or adopted.
+   */
   private freezePosition(state: SessionState, now: number): void {
-    state.positionSec = anchoredPosition(state, now);
+    if (!state.targetStale) state.positionSec = anchoredPosition(state, now);
     state.updatedAt = now;
   }
 

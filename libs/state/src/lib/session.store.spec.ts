@@ -673,6 +673,35 @@ describe('SessionStore', () => {
     expect(store.remotePosition()).toBe(12);
   });
 
+  it('freezes a stale mirrored target: no extrapolation and not playing', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const { store, port } = await setup();
+    port.push(
+      welcome(
+        store,
+        session({
+          target: remoteTarget(),
+          targetStale: true,
+          order: [wire('e1', 'catalog:a', { durationSec: 200 })],
+          cursor: 0,
+          positionSec: 10,
+          playing: true,
+          updatedAt: 1_000_000,
+        }),
+        [],
+        1_000_000,
+      ),
+    );
+    await settle();
+
+    vi.advanceTimersByTime(3000);
+    expect(store.mirroring()).toBe(true);
+    expect(store.remotePosition()).toBe(10);
+    expect(store.remotePlaying()).toBe(false);
+    expect(store.remoteStatus()).toBe('paused');
+  });
+
   it('rehydrates local entries from the library and exposes unavailable sets', async () => {
     const { store, port, tracks } = await setup();
     const full: Track = {
@@ -804,6 +833,44 @@ describe('SessionStore', () => {
     const missing = await store.removeAt(9);
     expect(missing).toMatchObject({ ok: false, error: 'entry-not-found' });
     expect(port.commands).toHaveLength(before);
+  });
+
+  it('reports a local seek at once and ignores in-flight stale ticks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    port.sent.length = 0;
+
+    engine.status.set('playing');
+    engine.position.set(5);
+    store.report('tick'); // opens the throttle window
+    engine.position.set(81);
+    store.reportSeek(); // inside the window: must still go out
+    expect(port.reports()).toHaveLength(2);
+    expect(port.reports()[1]).toMatchObject({ reason: 'tick', positionSec: 81 });
+
+    engine.seekIfDrifted.mockClear();
+    port.push({
+      type: 'tick',
+      revision: 1,
+      positionSec: 242,
+      playing: true,
+      updatedAt: Date.now(),
+    });
+    await settle();
+    expect(engine.seekIfDrifted).not.toHaveBeenCalled();
   });
 
   it('reports target observations immediately and throttles ticks', async () => {
@@ -1135,6 +1202,126 @@ describe('SessionStore', () => {
       kind: 'device',
       clientId: store.clientId(),
     });
+  });
+
+  it('adopts a stale earlier instance of this device paused, without autoplay', async () => {
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'device', clientId: 'old-client', deviceId: 'device-1' },
+          targetStale: true,
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          positionSec: 42,
+          playing: true,
+          updatedAt: Date.now(),
+        }),
+      ),
+    );
+    await settle();
+
+    expect(port.commands.map((entry) => entry.command.type)).toEqual([
+      'pause',
+      'transfer',
+    ]);
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'transfer',
+      target: { kind: 'device', clientId: store.clientId(), deviceId: 'device-1' },
+    });
+
+    // The server applies the transfer: this client is the target, now paused.
+    port.push({
+      type: 'state',
+      session: device(store, {
+        revision: 2,
+        order: [wire('e0', 'catalog:a')],
+        cursor: 0,
+        positionSec: 42,
+        playing: false,
+        updatedAt: Date.now(),
+      }),
+    });
+    await settle();
+
+    expect(store.isTarget()).toBe(true);
+    expect(engine.play).not.toHaveBeenCalled();
+    expect(engine.status()).not.toBe('playing');
+    expect(port.commands).toHaveLength(2);
+  });
+
+  it('retries only the transfer after a failed transfer, and resets on sign-out', async () => {
+    const { store, port, auth } = await setup();
+    const staleOld = session({
+      target: { kind: 'device', clientId: 'old-client', deviceId: 'device-1' },
+      targetStale: true,
+      order: [wire('e0', 'catalog:a')],
+      cursor: 0,
+      positionSec: 42,
+      playing: true,
+      updatedAt: Date.now(),
+    });
+    let transfers = 0;
+    port.result = (command) => {
+      if (command.type !== 'transfer') return { ok: true };
+      transfers++;
+      return transfers === 1 ? { ok: false, error: 'busy' } : { ok: true };
+    };
+    port.push(welcome(store, staleOld));
+    await settle();
+    expect(port.commands.map((entry) => entry.command.type)).toEqual(['pause', 'transfer']);
+
+    // A later state retries; the pause already succeeded, so only the transfer repeats.
+    port.push({ type: 'state', session: { ...staleOld, revision: 2, playing: false } });
+    await settle();
+    expect(port.commands.map((entry) => entry.command.type)).toEqual([
+      'pause',
+      'transfer',
+      'transfer',
+    ]);
+
+    // Adopted: the same old target no longer triggers another attempt.
+    port.push({ type: 'state', session: { ...staleOld, revision: 3, playing: false } });
+    await settle();
+    expect(port.commands).toHaveLength(3);
+
+    // Sign-out then sign-in starts adoption fresh: the pause runs again.
+    auth.status.set('signedOut');
+    await settle();
+    auth.status.set('signedIn');
+    await settle();
+    port.commands.length = 0;
+    transfers = 1;
+    port.push(welcome(store, { ...staleOld, revision: 4, playing: true }));
+    await settle();
+    expect(port.commands.map((entry) => entry.command.type)).toEqual(['pause', 'transfer']);
+  });
+
+  it('aborts the transfer when the target moved during the pause', async () => {
+    const { store, port } = await setup();
+    port.result = (command) => {
+      if (command.type === 'pause') {
+        port.push(welcome(store, session({ target: remoteTarget(), playing: false })));
+      }
+      return { ok: true };
+    };
+    port.push(
+      welcome(
+        store,
+        session({
+          target: { kind: 'device', clientId: 'old-client', deviceId: 'device-1' },
+          targetStale: true,
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          updatedAt: Date.now(),
+        }),
+      ),
+    );
+    await settle();
+
+    expect(port.commands.map((entry) => entry.command.type)).toEqual(['pause']);
   });
 
   it('refuses a phone local entry before any network call (no file port)', async () => {

@@ -78,8 +78,19 @@ npm run android:release:install
 Release builds need `apps/app/android/keystore.properties` and your own keystore outside the repo;
 see [RELEASE_SIGNING.md](apps/app/android/RELEASE_SIGNING.md). For a local performance build only,
 `./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. The
-signed v1.0.0 APK is built and staged but not published; uninstall a debug-signed build before
-switching signatures.
+signed v1.0.0 APK is built and staged but not published.
+
+**Updating without losing your downloads.** Downloads and library data live in app-specific storage
+(internal, or the external app folder if you chose it), and uninstalling the app deletes both. Android
+only updates in place when the new APK is signed with the same key as the installed one.
+
+- Update with `npm run android:release:install` (or `adb install -r <apk>`). Do not uninstall first.
+- Use one signing key for every install on a phone. Do not mix debug builds (`npm run android`,
+  `-PallowDebugSigning`) with release builds.
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE` means the keys differ. Install an APK signed with the same
+  key as the app already on the phone to keep your data; uninstalling to get past the error deletes it.
+- If you use an account, sign in to sync so your library (not the downloaded audio) can be restored
+  after a forced reinstall. Songs must be downloaded again.
 
 ### Run on iPhone
 

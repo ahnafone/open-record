@@ -1171,6 +1171,26 @@ describe('stale device targets', () => {
     expect(stateOf().revision).toBe(staleRevision + 1);
   });
 
+  it('keeps the stored position when a stale target is paused, with no extrapolation', async () => {
+    join('u', 'a');
+    await setQueue(['song'], 0);
+    await transferToDevice('a');
+    expect(stateOf().playing).toBe(true);
+
+    now += 90_000;
+    service.sweep(now);
+    expect(stateOf().targetStale).toBe(true);
+
+    // Long silence since the last anchor; a fresh requester pauses the stale target.
+    now += 10 * 60_000;
+    join('u', 'c');
+    const paused = await service.command('u', 'c', { type: 'pause' });
+    expect(paused.ok).toBe(true);
+    expect(stateOf().playing).toBe(false);
+    // The stale mark stored the 90 s anchor; the 10 minutes of silence must not add to it.
+    expect(stateOf().positionSec).toBe(90);
+  });
+
   it('never pauses before 30 minutes, then pauses/clamps/clears the target', async () => {
     join('u', 'a');
     await setQueue(['song'], 0);

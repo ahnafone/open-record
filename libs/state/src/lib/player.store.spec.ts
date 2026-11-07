@@ -138,6 +138,7 @@ function fakeSession() {
       ) => Promise<readonly string[] | null>
     >(async (tracks) => tracks.map((_, i) => `entry:${i}`)),
     report: vi.fn(),
+    reportSeek: vi.fn(),
   };
 }
 
@@ -372,7 +373,7 @@ describe('PlayerStore', () => {
 
     await player.seek(12);
     expect(engine.seek).toHaveBeenCalledWith(12);
-    expect(session.report).toHaveBeenLastCalledWith('tick');
+    expect(session.reportSeek).toHaveBeenCalledTimes(1);
 
     await player.playAt(1);
     expect(engine.playAt).toHaveBeenCalledWith(1);
