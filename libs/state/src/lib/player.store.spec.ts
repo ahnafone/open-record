@@ -419,6 +419,7 @@ describe('PlayerStore', () => {
     expect(engine.setQueue).toHaveBeenCalledWith([queue[1], queue[0]], {
       startIndex: 0,
       autoplay: false,
+      history: 'before-start',
     });
     // The local queue is live rather than blocked by the failed session.
     expect(player.queue()).toEqual([queue[1], queue[0]]);
@@ -462,6 +463,7 @@ describe('PlayerStore', () => {
     expect(engine.setQueue.mock.calls[0]?.[1]).toEqual({
       startIndex: 0,
       autoplay: true,
+      history: 'before-start',
     });
 
     await player.playTracks(tracks, 30);
@@ -469,7 +471,11 @@ describe('PlayerStore', () => {
     expect(windowed).toHaveLength(71);
     expect(windowed?.[0]?.id).toBe('fake:10');
     expect(windowed?.[20]?.id).toBe('fake:30');
-    expect(opts).toEqual({ startIndex: 20, autoplay: true });
+    expect(opts).toEqual({
+      startIndex: 20,
+      autoplay: true,
+      history: 'before-start',
+    });
   });
 
   it('keeps 100 upcoming tracks for a playlist queue', async () => {
@@ -535,6 +541,74 @@ describe('PlayerStore', () => {
     if (enqueue?.type !== 'enqueue') return;
     expect(enqueue.tracks).toHaveLength(10);
     expect(enqueue.next).toBe(false);
+  });
+
+  it('puts tracks back when the enqueue was refused, so the next top-up sends them', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    session.available.set(true);
+    const tracks = manyTracks(200);
+    session.startSession.mockImplementation(async (built) =>
+      built.map((_, i) => `entry:${i}`),
+    );
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const enqueues = () =>
+      session.command.mock.calls
+        .map(([command]) => command)
+        .filter((command) => command.type === 'enqueue');
+
+    await player.playTracks(tracks, 0);
+    const built = session.startSession.mock.calls[0]?.[0] ?? [];
+    session.ownsPlayback.set(true);
+    session.remoteEntries.set(
+      built.map((track, i) => ({ entryId: `entry:${i}`, track })),
+    );
+    session.remoteCursor.set(10);
+
+    // The first enqueue never reaches the server: nothing was applied.
+    session.command.mockResolvedValueOnce({ ok: false, error: 'offline' });
+    TestBed.tick();
+    await flush();
+    const first = enqueues()[0];
+    expect(first?.type === 'enqueue' && first.tracks).toHaveLength(10);
+
+    // The next top-up re-sends the same tracks first, not the ones after them.
+    session.remoteCursor.set(11);
+    TestBed.tick();
+    await flush();
+    const second = enqueues()[1];
+    if (first?.type !== 'enqueue' || second?.type !== 'enqueue') {
+      throw new Error('expected two enqueue commands');
+    }
+    expect(second.tracks.slice(0, 10).map((t) => t.id)).toEqual(
+      first.tracks.map((t) => t.id),
+    );
+  });
+
+  it('ignores a superseded playTracks that finishes its engine load late', async () => {
+    const engine = fakeEngine();
+    const session = fakeSession();
+    configure(engine, session);
+    const player = TestBed.inject(PlayerStore);
+
+    // The first load stalls until the test lets it finish.
+    let finishFirst!: () => void;
+    const firstLoad = new Promise<void>((resolve) => (finishFirst = resolve));
+    engine.setQueue.mockImplementationOnce(async () => {
+      await firstLoad;
+    });
+
+    const first = player.playTracks(queue, 0);
+    const second = player.playTracks(manyTracks(120), 0);
+    await second;
+    finishFirst();
+    await first;
+
+    // The newer play's window (120 tracks, 51 built) must survive: the stale
+    // play's 2-track window would leave nothing to top up.
+    expect(player['queueSource']()?.window.remaining).toBe(69);
   });
 
   it('records a recently-played start once per load while playing, never while mirroring', async () => {
@@ -727,6 +801,7 @@ describe('PlayerStore', () => {
     expect(engine.setQueue).toHaveBeenCalledWith([next, queue[1]], {
       startIndex: 0,
       autoplay: true,
+      history: 'before-start',
     });
     expect(session.command).not.toHaveBeenCalled();
   });

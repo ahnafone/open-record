@@ -56,8 +56,12 @@ export async function buildApp(
     trustProxy: config.trustProxy,
   });
 
-  // Order matters: CORS answers preflights and rate limiting throttles before
-  // the auth hook runs, so token guessing is rate limited too.
+  // Order matters: CORS answers preflights. The auth hook is an instance
+  // onRequest hook, and the rate limiter is added as a route-level onRequest
+  // hook, so auth runs first and a verified user (or the static token) is known
+  // when the limiter keys the request. Requests with a missing or invalid
+  // bearer are refused by auth before the limiter runs; registerAuth counts
+  // those per IP to stop token guessing.
   await app.register(cors, {
     origin: config.corsOrigin,
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],

@@ -540,7 +540,9 @@ export class DownloadSources {
 
   protected play(track: Track, list: readonly Track[]): void {
     this.library.remember([track]);
-    void this.player.playTrack(track, list);
+    this.player.playTrack(track, list).catch(() => {
+      this.toast.show(`Could not play “${track.title}”.`);
+    });
   }
 
   /** Bookmark (save offline) or un-bookmark; OfflineStore reports progress. */

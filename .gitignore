@@ -83,3 +83,12 @@ apps/server/data
 apps/server/cookies.txt
 # Any exported jar, wherever it is kept
 cookies.txt
+
+# Preventive: mobile/cloud credentials and service configs (never commit)
+google-services.json
+GoogleService-Info.plist
+*.p12
+*.pem
+*.p8
+*.mobileprovision
+supabase/.temp/

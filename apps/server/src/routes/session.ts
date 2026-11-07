@@ -15,7 +15,8 @@ import {
 } from '@open-record/models';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { requireAccount } from '../plugins/auth';
+import { requireAccount, unverifiedExpiry } from '../plugins/auth';
+import { clientKey } from '../services/client-ip';
 import type { SessionConnection } from '../services/session';
 import type { RouteOptions } from './index';
 
@@ -117,26 +118,6 @@ function parseFrame(data: unknown): Record<string, unknown> | null {
   }
 }
 
-/**
- * Reads `exp` from a JWT payload WITHOUT verifying it. Used only to tell an
- * expired credential (4401: refresh and reconnect) from a refused one (4403)
- * after `verifyToken` has already rejected the token. Never authenticates.
- */
-function unverifiedExpiry(value: string): number | undefined {
-  const parts = value.split('.');
-  if (parts.length !== 3) return undefined;
-  try {
-    const payload: unknown = JSON.parse(
-      Buffer.from(parts[1] ?? '', 'base64url').toString('utf8'),
-    );
-    if (!isRecord(payload)) return undefined;
-    const exp = payload['exp'];
-    return typeof exp === 'number' && Number.isFinite(exp) ? exp : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Route rate-limit key: `userId:clientId` from the device header (§1.7). */
 function sessionRateLimitKey(request: FastifyRequest): string {
   const raw = request.headers['x-device-id'];
@@ -225,7 +206,7 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
 
   const ipFor = (request: FastifyRequest): string => {
     try {
-      return request.ip || 'unknown';
+      return clientKey(request.ip || 'unknown');
     } catch {
       return 'unknown';
     }
@@ -366,6 +347,9 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
           return;
         }
         const verified = await verifyToken(hello.token);
+        // The socket may have closed while the token was checked; the close
+        // handler already cleaned up, so nothing may be joined or timed now.
+        if (closed) return;
         if (!verified || verified.kind === 'static' || !verified.userId) {
           // The verifier rejects expired tokens as null; peeking at the
           // (untrusted) payload still lets the client distinguish "refresh and
@@ -417,6 +401,9 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
           }
           return;
         }
+        // The welcome send can close the socket; cleanup has already left the
+        // room and released the auth slot, so no timers may start after it.
+        if (closed) return;
 
         if (verified.exp !== undefined) {
           const delayMs = verified.exp * 1000 - Date.now();

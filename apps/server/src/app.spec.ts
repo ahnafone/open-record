@@ -6,6 +6,7 @@ import { SignJWT } from 'jose';
 import { buildApp } from './app';
 import { loadConfig } from './config';
 import { requireAccount } from './plugins/auth';
+import { castRoutes } from './routes/cast';
 
 const TOKEN = 'test-token-0123456789abcdef';
 
@@ -212,5 +213,92 @@ describe('web app (WEB_DIR)', () => {
     expect((await app.inject({ method: 'GET', url: '/health' })).json()).toEqual({ status: 'ok' });
     const appConfig = await app.inject({ method: 'GET', url: '/app-config', headers: html });
     expect(appConfig.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null });
+  });
+});
+
+describe('cast routes with the relay disabled', () => {
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    const config = loadConfig({ OPEN_RECORD_TOKEN: TOKEN });
+    app = await buildApp(config, { cast: false, routes: [castRoutes] });
+  });
+
+  afterAll(() => app.close());
+
+  it('requires auth before answering 503', async () => {
+    const anonymous = await app.inject({ method: 'GET', url: '/cast/relay/anything' });
+    expect(anonymous.statusCode).toBe(401);
+
+    const authed = await app.inject({
+      method: 'GET',
+      url: '/cast/relay/anything',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(authed.statusCode).toBe(503);
+    expect(authed.json()).toEqual({ error: 'cast-disabled' });
+  });
+});
+
+describe('failed sign-in limit', () => {
+  const SECRET = 'super-secret-jwt-token-with-at-least-32-characters';
+  let app: FastifyInstance;
+
+  const expiredJwt = () =>
+    new SignJWT({ role: 'authenticated' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setSubject('user-1')
+      .setAudience('authenticated')
+      .setIssuedAt(Math.floor(Date.now() / 1000) - 7200)
+      .setExpirationTime(Math.floor(Date.now() / 1000) - 3600)
+      .sign(new TextEncoder().encode(SECRET));
+
+  beforeAll(async () => {
+    const config = loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_JWT_SECRET: SECRET });
+    app = await buildApp(config, {
+      cast: false,
+      routes: [
+        async (a) => {
+          a.get('/private', async () => ({ secret: true }));
+        },
+      ],
+    });
+  });
+
+  afterAll(() => app.close());
+
+  it('does not count missing headers or expired JWTs toward the budget', async () => {
+    const expired = `Bearer ${await expiredJwt()}`;
+    for (let i = 0; i < 35; i++) {
+      expect((await app.inject({ method: 'GET', url: '/private', headers: { authorization: expired } })).statusCode).toBe(401);
+      expect((await app.inject({ method: 'GET', url: '/private' })).statusCode).toBe(401);
+    }
+  });
+
+  it('answers 429 with Retry-After once one IP exceeds its bad-token budget, and valid tokens still work', async () => {
+    const bad = { method: 'GET' as const, url: '/private', headers: { authorization: 'Bearer guess' } };
+    for (let i = 0; i < 30; i++) {
+      expect((await app.inject(bad)).statusCode).toBe(401);
+    }
+    const limited = await app.inject(bad);
+    expect(limited.statusCode).toBe(429);
+    expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+    expect(limited.json()).toEqual({ error: 'too-many-requests' });
+
+    // Expired JWTs and missing headers are still refused with 401, never 429.
+    const expired = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: `Bearer ${await expiredJwt()}` },
+    });
+    expect(expired.statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/private' })).statusCode).toBe(401);
+
+    const valid = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(valid.statusCode).toBe(200);
   });
 });

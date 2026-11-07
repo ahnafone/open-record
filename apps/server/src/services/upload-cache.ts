@@ -41,7 +41,7 @@ const UPLOAD_FILE_PATTERN = new RegExp(
 /** Thrown for a bad user id, extension or other malformed upload; maps to HTTP 400. */
 export class InvalidUploadError extends Error {}
 
-/** Thrown when an upload exceeds `maxUploadBytes`; maps to HTTP 413. */
+/** Thrown when an upload exceeds `min(maxUploadBytes, capBytes)`; maps to HTTP 413. */
 export class UploadTooLargeError extends Error {}
 
 /** Thrown when the per-user cap is `0` (uploads disabled); maps to HTTP 503. */
@@ -120,7 +120,8 @@ export class UploadCache {
     const meter = new Transform({
       transform: (chunk: Buffer, _encoding, callback) => {
         sizeBytes += chunk.length;
-        if (sizeBytes > this.maxUploadBytes) {
+        // An upload larger than the per-user cap could never stay cached: refuse it up front.
+        if (sizeBytes > Math.min(this.maxUploadBytes, this.capBytes)) {
           callback(new UploadTooLargeError('upload exceeds the size limit'));
           return;
         }
@@ -190,15 +191,19 @@ export class UploadCache {
     return { freedBytes, retainedBytes };
   }
 
-  /** Evicts least-recently-used non-live files until usage is within the cap. */
-  async evict(userId: string): Promise<number> {
+  /**
+   * Evicts least-recently-used non-live files until usage is within the cap.
+   * `keep` (the upload just stored) is never evicted, so its id can still be
+   * returned to the caller.
+   */
+  async evict(userId: string, keep?: string): Promise<number> {
     const files = await this.files(userId);
     let total = files.reduce((sum, file) => sum + file.sizeBytes, 0);
     if (total <= this.capBytes) return 0;
 
     const live = this.liveUploads();
     const removable = files
-      .filter((file) => !live.has(file.uploadId))
+      .filter((file) => !live.has(file.uploadId) && file.uploadId !== keep)
       .sort((a, b) => a.mtimeMs - b.mtimeMs || a.uploadId.localeCompare(b.uploadId));
 
     let freedBytes = 0;

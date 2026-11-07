@@ -54,6 +54,30 @@ const QUIET_COMMAND_FAILURES: ReadonlySet<string> = new Set([
   'unknown-client',
 ]);
 
+/**
+ * Failures where the server may have applied the command even though this
+ * client got no clean answer: the ack timed out, a newer send replaced the
+ * pending one, or a 2xx body could not be read.
+ */
+const AMBIGUOUS_COMMAND_FAILURES: ReadonlySet<string> = new Set([
+  'timeout',
+  'superseded',
+  'invalid-response',
+]);
+
+/**
+ * True when a failed command may still have been applied, so its effect is
+ * unknown and the caller must not assume it was dropped. Everything else is a
+ * definite non-application: `offline`/`unavailable` (never sent), `unauthorized`,
+ * `refused`, and the server's named refusals (`entry-not-found`,
+ * `queue-too-large`, `unknown-client`, ...). An unnamed HTTP failure (`http-N`)
+ * is ambiguous too, since a 5xx can come after the server applied the command.
+ */
+export function isAmbiguousCommandFailure(error: string | undefined): boolean {
+  if (error === undefined) return true;
+  return AMBIGUOUS_COMMAND_FAILURES.has(error) || error.startsWith('http-');
+}
+
 /** Internal: a newer transfer aborted this upload batch; never shown as an error. */
 const CAST_UPLOAD_ABORTED = { ok: false, error: 'aborted' } as const;
 
@@ -499,13 +523,15 @@ export class SessionStore {
     }
 
     // The server keeps its repeat mode across setQueue, so set it explicitly
-    // before any transfer. A failure aborts before playback moves, so the user
-    // can retry from a consistent session.
+    // before any transfer. A failure aborts before playback moves. A null
+    // result makes the caller play locally, so the queue just sent must not
+    // stay on the server too (it may already autoplay on the current target).
     const repeat = await this.command({
       type: 'setRepeat',
       repeat: opts.repeat,
     });
     if (!repeat.ok) {
+      await this.discardQueue();
       this.recordRefusal(repeat.error ?? 'Could not set the repeat mode.');
       return null;
     }
@@ -529,11 +555,28 @@ export class SessionStore {
         },
       });
       if (!transfer.ok) {
+        await this.discardQueue();
         this.recordRefusal(transfer.error ?? 'Could not transfer playback.');
         return null;
       }
     }
     return entries.map((entry) => entry.entryId);
+  }
+
+  /**
+   * Undo the `setQueue` that `startSession` just sent after a later step
+   * failed. Only that queue is removed: an empty `setQueue` keeps the current
+   * target. `clear` is not used because it also drops a device target, which
+   * may have been set before this call. Best effort; the caller plays locally.
+   */
+  private async discardQueue(): Promise<void> {
+    await this.command({
+      type: 'setQueue',
+      order: [],
+      cursor: -1,
+      autoplay: false,
+      shuffle: false,
+    });
   }
 
   /** Report an observation to the server. Target only; throttled. */

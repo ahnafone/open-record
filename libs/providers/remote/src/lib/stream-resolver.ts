@@ -271,21 +271,32 @@ export class RemoteStreamResolver {
       if (opts.signal?.aborted) throw new AbortedError();
       throw new NetworkError('Could not fetch the audio.', { cause: err });
     }
-    if (!res.ok) throw new HttpError(res.status, `Could not fetch the audio (HTTP ${res.status}).`);
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new HttpError(res.status, `Could not fetch the audio (HTTP ${res.status}).`);
+    }
     const total = Number(res.headers.get('content-length'));
     const parts: BlobPart[] = [];
     let received = 0;
     const reader = res.body?.getReader();
-    while (reader) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (opts.signal?.aborted) {
-        await reader.cancel().catch(() => undefined);
-        throw new AbortedError();
+    try {
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (opts.signal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw new AbortedError();
+        }
+        parts.push(value);
+        received += value.byteLength;
+        if (total > 0) opts.onProgress?.(Math.min(1, received / total));
       }
-      parts.push(value);
-      received += value.byteLength;
-      if (total > 0) opts.onProgress?.(Math.min(1, received / total));
+    } catch (err) {
+      // A mid-body failure is a fetch failure, not a raw TypeError the UI cannot name.
+      if (err instanceof AbortedError) throw err;
+      if (opts.signal?.aborted) throw new AbortedError();
+      await reader?.cancel().catch(() => undefined);
+      throw new NetworkError('Could not fetch the audio.', { cause: err });
     }
     const type = mimeType ?? res.headers.get('content-type')?.split(';')[0]?.trim();
     const blob = new Blob(parts, { type: type || undefined });

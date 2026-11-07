@@ -25,7 +25,7 @@ import {
   type QueueKind,
   type QueueWindow,
 } from './queue-window';
-import { SessionStore } from './session.store';
+import { SessionStore, isAmbiguousCommandFailure } from './session.store';
 import { toSessionTrack } from './session-track';
 
 /** localStorage key for the per-device volume and mute (a convenience, not synced). */
@@ -211,6 +211,12 @@ export class PlayerStore {
   private readonly fallbackNotice = signal<string | null>(null);
   /** The bounded queue this client started, or null while none is active. */
   private readonly queueSource = signal<QueueSource | null>(null);
+  /**
+   * Bumped by each queue-replacing action (play, clear). An async action only
+   * assigns `queueSource` while its generation is still the latest, so a
+   * superseded play cannot leave its window behind.
+   */
+  private queueGeneration = 0;
   /** A top-up is in flight: concurrent effect runs must not enqueue twice. */
   private toppingUp = false;
   /** `loadSeq` of the last load considered for Recently Played. */
@@ -330,6 +336,7 @@ export class PlayerStore {
     startIndex = 0,
     opts: PlayOptions = {},
   ): Promise<void> {
+    const generation = ++this.queueGeneration;
     this.queueSource.set(null);
     this.fallbackNotice.set(null);
     const kind: QueueKind = opts.queue ?? 'auto';
@@ -355,6 +362,10 @@ export class PlayerStore {
         repeat: this.repeat(),
         autoplay,
       });
+      // A newer play started while the session call was in flight. Stop here:
+      // this superseded play must not set the source, fall back to the engine,
+      // or write the engine over the newer queue.
+      if (generation !== this.queueGeneration) return;
       if (ids) {
         this.queueSource.set({ window: built.window, kind, createdIds: new Set(ids) });
         this.fallbackNotice.set(null);
@@ -372,8 +383,11 @@ export class PlayerStore {
     await this.engine.setQueue(built.tracks, {
       startIndex: built.cursor,
       autoplay,
+      history: 'before-start',
     });
-    this.queueSource.set({ window: built.window, kind, createdIds: new Set() });
+    if (generation === this.queueGeneration) {
+      this.queueSource.set({ window: built.window, kind, createdIds: new Set() });
+    }
   }
 
   /** Play a playlist from the top (or `startIndex`). No-op for empty playlists. */
@@ -598,6 +612,7 @@ export class PlayerStore {
   }
 
   async clear(): Promise<void> {
+    this.queueGeneration++;
     this.queueSource.set(null);
     if (this.session.ownsPlayback()) {
       await this.session.command({ type: 'clear' });
@@ -614,6 +629,8 @@ export class PlayerStore {
    */
   async removeTracks(trackIds: Iterable<string>): Promise<void> {
     const gone = new Set(trackIds);
+    // Unplayed pool entries too, or topUp would enqueue them again.
+    this.queueSource()?.window.remove(gone);
     if (this.session.ownsPlayback()) {
       const entries = this.session
         .remoteEntries()
@@ -649,6 +666,7 @@ export class PlayerStore {
     await this.engine.setQueue(remaining, {
       startIndex,
       autoplay: kept && wasPlaying,
+      history: 'before-start',
     });
     this.restorePlayNext(playNextIds);
     if (kept && position > 0) await this.engine.seek(position);
@@ -671,6 +689,8 @@ export class PlayerStore {
     opts: { playCurrent?: boolean } = {},
   ): Promise<boolean> {
     if (oldId === next.id) return false;
+    // Unplayed pool entries too, or topUp would enqueue the old record again.
+    this.queueSource()?.window.replace(oldId, next);
     const playCurrent = opts.playCurrent === true;
     if (this.session.ownsPlayback()) {
       const entries = this.session.remoteEntries();
@@ -732,6 +752,7 @@ export class PlayerStore {
       {
         startIndex: Math.max(0, this.engine.currentIndex()),
         autoplay: playCurrent,
+        history: 'before-start',
       },
     );
     this.restorePlayNext(playNextIds);
@@ -768,16 +789,27 @@ export class PlayerStore {
   private async topUp(): Promise<void> {
     const source = this.queueSource();
     if (!source || this.toppingUp) return;
+    const generation = this.queueGeneration;
     this.toppingUp = true;
     try {
-      if (this.session.ownsPlayback()) await this.topUpSession(source);
-      else this.topUpLocal(source);
+      if (this.session.ownsPlayback()) {
+        await this.topUpSession(source, generation);
+      } else {
+        this.topUpLocal(source);
+      }
     } finally {
       this.toppingUp = false;
     }
   }
 
-  private async topUpSession(source: QueueSource): Promise<void> {
+  private async topUpSession(
+    source: QueueSource,
+    generation: number,
+  ): Promise<void> {
+    // A newer play or restore replaced the queue (or its source) while this
+    // top-up awaited. Its window no longer describes the queue.
+    const superseded = () =>
+      generation !== this.queueGeneration || this.queueSource() !== source;
     const entries = this.session.remoteEntries();
     const cursor = this.session.remoteCursor();
     if (!entries.length || cursor < 0) return;
@@ -792,12 +824,18 @@ export class PlayerStore {
       // Sequential, before the cursor, so ids and indices stay aligned.
       for (const entry of entries.slice(0, excess)) {
         await this.session.command({ type: 'remove', entryId: entry.entryId });
+        if (superseded()) return;
       }
     }
     const upcoming = entries.length - 1 - cursor;
-    if (upcoming >= source.window.limit) return;
-    const add = source.window.take(source.window.limit - upcoming);
-    if (!add.length) return;
+    if (upcoming >= source.window.limit || superseded()) return;
+    // Reserve, don't consume: a refused enqueue must not lose these tracks.
+    const reserved = source.window.reserve(source.window.limit - upcoming);
+    const add = reserved.tracks;
+    if (!add.length) {
+      reserved.commit();
+      return;
+    }
     this.library.remember(add);
     const tracks = add.map((track) => toSessionTrack(track, newEntryId()));
     const result = await this.session.command({
@@ -805,16 +843,36 @@ export class PlayerStore {
       tracks,
       next: false,
     });
-    if (result.ok) {
+    // A timeout or unavailable result may still have been applied by the
+    // server, so those tracks count as sent (releasing them would duplicate
+    // them on the next top-up). Only an explicit refusal puts them back.
+    const applied = result.ok || isAmbiguousCommandFailure(result.error);
+    if (superseded()) {
+      // The enqueue landed on a queue that was replaced meanwhile. Take the
+      // tracks back out of it, best effort. Removing an absent id is a no-op.
+      // Not awaited: the removes address entry ids (not positions) and nothing
+      // else waits on them, so `toppingUp` is not held for up to 50 round trips.
+      if (applied) {
+        void Promise.allSettled(
+          tracks.map((track) =>
+            this.session.command({ type: 'remove', entryId: track.entryId }),
+          ),
+        );
+      }
+      return;
+    }
+    if (applied) {
+      reserved.commit();
       for (const track of tracks) source.createdIds.add(track.entryId);
+    } else {
+      reserved.release();
     }
   }
 
   private topUpLocal(source: QueueSource): void {
-    const cursor = this.engine.currentIndex();
-    const queue = this.engine.queue();
-    if (cursor < 0 || !queue.length) return;
-    const upcoming = queue.length - 1 - cursor;
+    if (this.engine.currentIndex() < 0) return;
+    // Order-based: a shuffled queue's upcoming count is not `length - 1 - cursor`.
+    const upcoming = this.engine.upcoming().length;
     if (upcoming < source.window.limit) {
       const add = source.window.take(source.window.limit - upcoming);
       if (add.length) {
@@ -885,13 +943,20 @@ export class PlayerStore {
 
   private async doRestore(): Promise<void> {
     try {
+      const started = this.queueGeneration;
       const [saved] = await Promise.all([
         this.storage.queueState.get(),
         this.library.ready(),
       ]);
-      // Ignore a saved queue if the user already started something or a
-      // session already owns playback (the session queue wins).
-      if (saved && !this.engine.queue().length && !this.session.ownsPlayback()) {
+      // Ignore a saved queue if the user started or cleared something while it
+      // loaded, the engine already has a queue, or a session owns playback
+      // (the session queue wins).
+      if (
+        saved &&
+        started === this.queueGeneration &&
+        !this.engine.queue().length &&
+        !this.session.ownsPlayback()
+      ) {
         await this.apply(saved);
       }
     } catch {
@@ -904,6 +969,7 @@ export class PlayerStore {
 
   private async apply(saved: QueueState): Promise<void> {
     this.queueSource.set(null);
+    const queueGen = this.queueGeneration;
     const currentId = saved.trackIds[saved.index];
     const tracks = this.library.resolveIds(saved.trackIds);
     if (!tracks.length) return;
@@ -917,7 +983,11 @@ export class PlayerStore {
     // still resolving, the generation moves past that and the old saved
     // position must not seek over the new play.
     const generation = this.engine.loadSeq();
-    await this.engine.setQueue(tracks, { startIndex: index, autoplay: false });
+    await this.engine.setQueue(tracks, {
+      startIndex: index,
+      autoplay: false,
+      history: 'before-start',
+    });
     this.restorePlayNext(saved.playNextIds);
     const sameLoad = this.engine.loadSeq() === generation + 1;
     if (
@@ -927,7 +997,9 @@ export class PlayerStore {
       this.engine.status() === 'paused'
     )
       await this.engine.seek(position);
-    this.queueSource.set(this.restoreSource(saved));
+    if (queueGen === this.queueGeneration) {
+      this.queueSource.set(this.restoreSource(saved));
+    }
   }
 
   /** Rebuild the unplayed pool from a snapshot; no source if any id is gone. */

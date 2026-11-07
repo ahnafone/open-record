@@ -49,6 +49,7 @@ export const searchRoutes: FastifyPluginAsync<RouteOptions> = async (app, { conf
           properties: { url: { type: 'string', minLength: 1, maxLength: 4096 } },
         },
       },
+      config: { rateLimit },
     },
     async (request, reply) => {
       try {

@@ -67,18 +67,73 @@ class IdbUpgradeTarget implements MigrationTarget {
   }
 }
 
+/**
+ * Thrown when the database was upgraded to a newer schema version (by another
+ * tab or a newer build) than this build knows. Recovery needs a reload, so
+ * reopening keeps failing with this error until then.
+ */
+export class StorageUpgradedError extends Error {
+  constructor() {
+    super('Storage was upgraded in another tab — reload to continue');
+    this.name = 'StorageUpgradedError';
+  }
+}
+
+/**
+ * Holds one live connection at a time. `versionchange` fires for two cases:
+ * - the database was deleted: the next operation reopens and recreates it;
+ * - another tab upgraded it to a higher version: reopening with this build's
+ *   version fails with `VersionError`, surfaced as `StorageUpgradedError`.
+ * Concurrent operations share a single reopen, and a failed reopen is not
+ * cached, so the next call retries.
+ */
 class IndexedDbBackend implements StorageBackend {
-  constructor(private readonly db: IDBPDatabase) {}
+  private current?: IDBPDatabase;
+  private reopening?: Promise<IDBPDatabase>;
+  private closed = false;
+
+  constructor(
+    private readonly connect: () => Promise<IDBPDatabase>,
+    initial: IDBPDatabase,
+  ) {
+    this.adopt(initial);
+  }
+
+  private adopt(db: IDBPDatabase): void {
+    this.current = db;
+    db.addEventListener('versionchange', () => {
+      db.close();
+      if (this.current === db) this.current = undefined;
+    });
+  }
+
+  private async db(): Promise<IDBPDatabase> {
+    if (this.closed) throw new Error('IndexedDB backend is closed');
+    if (this.current) return this.current;
+    this.reopening ??= this.connect()
+      .then((db) => {
+        if (this.closed) {
+          db.close();
+          throw new Error('IndexedDB backend is closed');
+        }
+        this.adopt(db);
+        return db;
+      })
+      .finally(() => {
+        this.reopening = undefined;
+      });
+    return this.reopening;
+  }
 
   async get<T>(
     collection: CollectionName,
     key: string,
   ): Promise<T | undefined> {
-    return (await this.db.get(collection, key)) as T | undefined;
+    return (await (await this.db()).get(collection, key)) as T | undefined;
   }
 
   async getAll<T>(collection: CollectionName): Promise<T[]> {
-    return (await this.db.getAll(collection)) as T[];
+    return (await (await this.db()).getAll(collection)) as T[];
   }
 
   async put<T>(
@@ -86,7 +141,7 @@ class IndexedDbBackend implements StorageBackend {
     key: string,
     value: T,
   ): Promise<void> {
-    await this.db.put(collection, value, key);
+    await (await this.db()).put(collection, value, key);
   }
 
   async putMany<T>(
@@ -94,21 +149,24 @@ class IndexedDbBackend implements StorageBackend {
     entries: readonly (readonly [string, T])[],
   ): Promise<void> {
     if (!entries.length) return;
-    const tx = this.db.transaction(collection, 'readwrite');
+    const tx = (await this.db()).transaction(collection, 'readwrite');
     for (const [key, value] of entries) void tx.store.put(value, key);
     await tx.done;
   }
 
   async delete(collection: CollectionName, key: string): Promise<void> {
-    await this.db.delete(collection, key);
+    await (await this.db()).delete(collection, key);
   }
 
   async clear(collection: CollectionName): Promise<void> {
-    await this.db.clear(collection);
+    await (await this.db()).clear(collection);
   }
 
   async close(): Promise<void> {
-    this.db.close();
+    this.closed = true;
+    const db = this.current;
+    this.current = undefined;
+    db?.close();
   }
 }
 
@@ -117,25 +175,29 @@ export async function openIndexedDbBackend(
   migrations: readonly Migration[] = MIGRATIONS,
 ): Promise<StorageBackend> {
   validateMigrations(migrations);
-  let migrationError: unknown;
-  let db: IDBPDatabase;
-  try {
-    db = await openDB(name, Math.max(1, latestVersion(migrations)), {
-      upgrade(upgradeDb, oldVersion, _newVersion, tx) {
-        const target = new IdbUpgradeTarget(upgradeDb, tx, oldVersion);
-        runMigrations(target, migrations).catch((err) => {
-          migrationError = err;
-          tx.abort();
-        });
-      },
-    });
-  } catch (err) {
-    // A failed migration aborts the upgrade; surface the real cause.
-    throw migrationError ?? err;
-  }
-  // Another tab upgraded the schema: let it proceed, reopen on next launch.
-  db.addEventListener('versionchange', () => db.close());
-  return new IndexedDbBackend(db);
+  const connect = async (): Promise<IDBPDatabase> => {
+    let migrationError: unknown;
+    try {
+      return await openDB(name, Math.max(1, latestVersion(migrations)), {
+        upgrade(upgradeDb, oldVersion, _newVersion, tx) {
+          const target = new IdbUpgradeTarget(upgradeDb, tx, oldVersion);
+          runMigrations(target, migrations).catch((err) => {
+            migrationError = err;
+            tx.abort();
+          });
+        },
+      });
+    } catch (err) {
+      // A failed migration aborts the upgrade; surface the real cause.
+      if (migrationError) throw migrationError;
+      // DOMException (browsers) and fake-indexeddb both carry `name`.
+      if ((err as { name?: unknown } | null)?.name === 'VersionError') {
+        throw new StorageUpgradedError();
+      }
+      throw err;
+    }
+  };
+  return new IndexedDbBackend(connect, await connect());
 }
 
 /** `StoragePort` backed by IndexedDB (web). */

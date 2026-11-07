@@ -361,9 +361,23 @@ export function configureResolveLimits(
   limiter = createLimiter({ max, maxQueue, waitMs: QUEUE_WAIT_MS });
 }
 
-/** Runs yt-dlp under the global concurrency cap (503 when the queue is full). */
-export function runYtDlpJson(args: string[]): Promise<YtDlpInfo> {
-  return limiter.run(() => execYtDlpJson(args));
+/**
+ * A run the caller aborted through its signal. Not a YtDlpError: it is not a
+ * yt-dlp failure or timeout, and callers must not map it to a client status.
+ */
+export class YtDlpAbortedError extends Error {
+  constructor() {
+    super('yt-dlp run was aborted');
+    this.name = 'AbortError';
+  }
+}
+
+/**
+ * Runs yt-dlp under the global concurrency cap (503 when the queue is full).
+ * An aborted `signal` kills the child process and frees its slot.
+ */
+export function runYtDlpJson(args: string[], signal?: AbortSignal): Promise<YtDlpInfo> {
+  return limiter.run(() => execYtDlpJson(args, signal));
 }
 
 /** Prefix of the per-run temp directory holding the cookie copy. */
@@ -727,8 +741,14 @@ const NO_CLEANUP = (): void => undefined;
 function execOnce(
   args: string[],
   cleanup: () => void = NO_CLEANUP,
+  signal?: AbortSignal,
 ): Promise<YtDlpInfo> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      cleanup();
+      reject(new YtDlpAbortedError());
+      return;
+    }
     try {
       execFile(
         YTDLP_BIN,
@@ -738,10 +758,14 @@ function execOnce(
           killSignal: 'SIGKILL',
           maxBuffer: INFO_MAX_BUFFER,
           windowsHide: true,
+          ...(signal ? { signal } : {}),
         },
         (err, stdout, stderr) => {
           cleanup();
           if (err) {
+            // Checked before `killed`: an abort kills the child, which would
+            // otherwise read as a yt-dlp timeout.
+            if (signal?.aborted) return reject(new YtDlpAbortedError());
             const code = (err as NodeJS.ErrnoException).code;
             if (code === 'ENOENT')
               return reject(
@@ -775,11 +799,11 @@ function execOnce(
  * attempts run inside the caller's limiter slot, so the pair never waits for a
  * second slot or reorders the queue.
  */
-async function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
+async function execYtDlpJson(args: string[], signal?: AbortSignal): Promise<YtDlpInfo> {
   try {
-    return await execOnce(args);
+    return await execOnce(args, NO_CLEANUP, signal);
   } catch (err) {
-    if (!(err instanceof YtDlpError)) throw err;
+    if (!(err instanceof YtDlpError) || signal?.aborted) throw err;
     const message = err.message;
     // Not something a session can fix: keep yt-dlp's wording, and do not touch
     // the cookies file at all (an unrelated error must not warn about it).
@@ -806,6 +830,7 @@ async function execYtDlpJson(args: string[]): Promise<YtDlpInfo> {
       return await execOnce(
         [...copy.args, ...COOKIE_RETRY_ARGS, ...args],
         copy.cleanup,
+        signal,
       );
     } catch (retryErr) {
       if (!(retryErr instanceof YtDlpError)) throw retryErr;
@@ -955,11 +980,16 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
 
   let next = 0;
   let expired = false;
+  // Aborted once the budget is spent: kills in-flight lookups and frees their slots.
+  const abort = new AbortController();
   const worker = async (): Promise<void> => {
     while (!expired && next < todo.length) {
       const r = todo[next++];
       try {
-        const info = await runYtDlpJson(['-J', '--no-playlist', '--', r.url]);
+        const info = await runYtDlpJson(
+          ['-J', '--no-playlist', '--', r.url],
+          abort.signal,
+        );
         const full = toSearchResult(
           {
             ...info,
@@ -992,6 +1022,7 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
   await Promise.race([Promise.all(workers), budget]);
   clearTimeout(timer);
   expired = true;
+  abort.abort();
 }
 
 /** Metadata for one already-validated URL (no download). */
@@ -1109,14 +1140,17 @@ export function toStreamResponse(info: YtDlpInfo): StreamResponse {
   return response;
 }
 
-/** Waits used while a freshly minted googlevideo link warms up. */
-const STREAM_WARMUP_DELAYS_MS = [2_000, 3_000, 5_000];
+/** Total time `resolveStream` may spend warming a fresh link (it holds the request). */
+const STREAM_WARMUP_BUDGET_MS = 5_000;
+/** Pause between warm-up probes while a fresh googlevideo link answers 403/404. */
+const STREAM_WARMUP_RETRY_DELAY_MS = 600;
 
 /**
- * Ask the media host for the first bytes until it serves them. A fresh
- * googlevideo link can answer 403 for several seconds; returning it cold makes
- * the browser's first play fail with an unsupported-media error. Failures are
- * ignored: the link is still returned, and the client can retry.
+ * Probes the media host for the first bytes, retrying every ~600 ms within
+ * `STREAM_WARMUP_BUDGET_MS`. A fresh googlevideo link can answer 403 for a few
+ * seconds; returning it cold makes the browser's first play fail with an
+ * unsupported-media error. The budget is bounded, so a link may still be cold
+ * when returned: failures are ignored and the client retries the play.
  */
 async function warmStreamLink(response: StreamResponse): Promise<void> {
   let target: URL;
@@ -1128,12 +1162,15 @@ async function warmStreamLink(response: StreamResponse): Promise<void> {
   if (!target.hostname.endsWith('.googlevideo.com')) return;
   target.searchParams.set('range', '0-1023');
   const headers: Record<string, string> = { ...response.httpHeaders };
-  for (let attempt = 0; ; attempt++) {
+  const deadline = Date.now() + STREAM_WARMUP_BUDGET_MS;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
     try {
       const res = await fetch(target, {
         headers,
         cache: 'no-store',
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(remaining),
       });
       await res.body?.cancel().catch(() => undefined);
       if (res.ok || res.status === 206) return;
@@ -1141,10 +1178,9 @@ async function warmStreamLink(response: StreamResponse): Promise<void> {
     } catch {
       // Network hiccup or timeout: try again while the link may still warm.
     }
-    if (attempt >= STREAM_WARMUP_DELAYS_MS.length) return;
-    await new Promise((resolve) =>
-      setTimeout(resolve, STREAM_WARMUP_DELAYS_MS[attempt]),
-    );
+    const wait = Math.min(STREAM_WARMUP_RETRY_DELAY_MS, deadline - Date.now());
+    if (wait <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, wait));
   }
 }
 

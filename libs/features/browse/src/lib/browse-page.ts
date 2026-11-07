@@ -12,6 +12,7 @@ import {
   OrEmptyState,
   OrIcon,
   OrSpinner,
+  OrToast,
 } from '@open-record/ui';
 import { OrBinRail } from './bin-rail';
 import { OrListeningBooth } from './listening-booth';
@@ -150,6 +151,7 @@ export class BrowsePage {
   protected readonly library = inject(LibraryStore);
   protected readonly player = inject(PlayerStore);
   private readonly router = inject(Router);
+  private readonly toast = inject(OrToast);
 
   protected readonly status = this.library.status;
 
@@ -179,27 +181,39 @@ export class BrowsePage {
 
   protected playRecord(track: Track, bin: readonly Track[]): void {
     if (this.player.isCurrent(track.id)) {
-      void this.player.togglePlay();
+      this.togglePlayback();
       return;
     }
-    void this.player.playTrack(track, bin);
+    this.startTrack(track, bin);
   }
 
   protected playFeatured(): void {
     if (this.player.current()) {
-      void this.player.togglePlay();
+      this.togglePlayback();
       return;
     }
     const track = this.featured();
-    if (track) void this.player.playTrack(track, this.library.tracks());
+    if (track) this.startTrack(track, this.library.tracks());
   }
 
   protected openPlayer(): void {
     const track = this.featured();
     if (!this.player.current() && track) {
-      void this.player.playTrack(track, this.library.tracks());
+      this.startTrack(track, this.library.tracks());
     }
     void this.router.navigateByUrl('/now-playing');
+  }
+
+  private togglePlayback(): void {
+    this.player.togglePlay().catch(() => {
+      this.toast.show('Could not change playback. Try again.');
+    });
+  }
+
+  private startTrack(track: Track, context: readonly Track[]): void {
+    this.player.playTrack(track, context).catch(() => {
+      this.toast.show(`Could not play “${track.title}”.`);
+    });
   }
 
   protected retry(): void {

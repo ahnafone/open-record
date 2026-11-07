@@ -107,6 +107,24 @@ export function artistSimilarity(a: string, b: string): number {
   return Math.max(dice(a, b), dice(pa, pb), contained ? 0.9 : 0);
 }
 
+/** Words that appear in upload noise ("Official Video", "Lyric Video", "HD"). */
+const NOISE_TOKENS = new Set([
+  'official', 'music', 'video', 'audio', 'lyric', 'lyrics', 'visualizer', 'visualiser',
+  'mv', 'hd', 'hq', '4k', '1080p', '720p', 'explicit',
+]);
+
+/**
+ * True when `s` is only upload-noise words and is clearly noise: two or more
+ * such words ("Lyric Video", "Music Video (HD)") or the word "official". A lone
+ * "Video", "Lyrics", "Audio", "Music" or "Explicit" stays a possible title
+ * ("Sia - Music" is a song), so "Artist - Video" still splits.
+ */
+function isNoiseOnly(s: string): boolean {
+  const tokens = fold(s).split(' ').filter(Boolean);
+  if (!tokens.length || !tokens.every((t) => NOISE_TOKENS.has(t))) return false;
+  return tokens.length >= 2 || tokens.includes('official');
+}
+
 /**
  * Splits a YouTube-style "Artist - Title" upload title. If the left side
  * resembles the given artist (or no artist is known), returns both parts;
@@ -116,6 +134,8 @@ export function splitArtistTitle(title: string, artist?: string): { title: strin
   const m = /^(.+?)\s+[-–—]\s+(.+)$/.exec(title);
   if (!m) return { title, artist };
   const [, left, right] = m;
+  // "Midnight City - Official Video": the right side is upload noise, not a title.
+  if (isNoiseOnly(right)) return { title, artist };
   if (!artist) return { title: right, artist: left };
   const na = normalizeArtist(artist);
   if (artistSimilarity(normalizeArtist(left), na) >= 0.7) return { title: right, artist };

@@ -8,7 +8,8 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import type { SupabaseAuthConfig } from '../config';
-import { tokenKey } from '../services/stream-cache';
+import { clientKey } from '../services/client-ip';
+import { createFixedWindow } from '../services/fixed-window';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
@@ -112,17 +113,52 @@ export async function verifyToken(
 }
 
 /**
- * Rate-limit key for per-client limits: the Supabase user when signed in, a
- * hash of the presented credential (the static token) when one was sent, and
- * otherwise the client IP so public routes are still keyed.
+ * Rate-limit key for per-client limits: the Supabase user when signed in, and
+ * otherwise the client (IP) so public routes and the static token are keyed by
+ * address. Keying unauthenticated requests on the presented header would let a
+ * client mint a new bucket per header value.
  */
-export function rateLimitKey(
-  request: Pick<FastifyRequest, 'userId' | 'headers' | 'ip'>,
-): string {
+export function rateLimitKey(request: Pick<FastifyRequest, 'userId' | 'ip'>): string {
   if (request.userId) return `user:${request.userId}`;
-  if (request.headers.authorization) return tokenKey(request.headers.authorization);
-  return `ip:${request.ip}`;
+  return `ip:${clientKey(request.ip)}`;
 }
+
+/**
+ * Reads `exp` (unix seconds) from a JWT payload WITHOUT verifying it. Used only
+ * after a token has already failed verification, to tell an expired credential
+ * (the client refreshes and retries) from a refused one. Never authenticates.
+ */
+export function unverifiedExpiry(value: string): number | undefined {
+  const parts = value.split('.');
+  if (parts.length !== 3) return undefined;
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8'));
+    if (typeof payload !== 'object' || payload === null) return undefined;
+    const exp = (payload as Record<string, unknown>)['exp'];
+    return typeof exp === 'number' && Number.isFinite(exp) ? exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True for a JWT-shaped credential whose expiry has passed. Such a request is a
+ * normal refresh (the client gets 401 and re-signs in), so it does not count
+ * toward the failed-auth budget. The exemption can only lower the cost of
+ * guessing a Supabase signature, which is not feasible; a random static token
+ * with no dots can never match a JWT-shaped guess.
+ */
+function isExpiredJwt(value: string): boolean {
+  if (!JWT_SHAPE.test(value)) return false;
+  const exp = unverifiedExpiry(value);
+  return exp !== undefined && exp <= Math.floor(Date.now() / 1000);
+}
+
+/** Failed bearer checks per client per minute before the client gets 429. */
+const AUTH_FAILURES_MAX = 30;
+const AUTH_FAILURES_WINDOW_MS = 60_000;
+/** Hard cap on clients tracked by the failed-auth counter. */
+const AUTH_FAILURE_KEYS_MAX = 10_000;
 
 /**
  * Pre-handler guard for account-only routes (`/session/*`, `/cast/uploads*`):
@@ -145,10 +181,22 @@ export async function requireAccount(
  * `verify` is pre-bound by `buildApp`: it accepts the static token (legacy
  * single-user mode) and Supabase access tokens. A verified user id is exposed
  * as `request.userId`, and a JWT's expiry as `request.userExp`.
+ *
+ * Brute-force guard: a refused request on a non-public route that presented a
+ * bearer value counts against its client (IP). Requests with no Authorization
+ * header and JWTs that failed only because they expired are refused with `401`
+ * but not counted, since clients send those during normal refresh. Past the
+ * budget a counted client gets `429` with `Retry-After`. Verification runs
+ * first, so a valid token is never refused or counted.
  */
 export function registerAuth(app: FastifyInstance, verify: VerifyToken): void {
   app.decorateRequest('userId', null);
   app.decorateRequest('userExp', null);
+  const failedAuth = createFixedWindow({
+    max: AUTH_FAILURES_MAX,
+    windowMs: AUTH_FAILURES_WINDOW_MS,
+    maxKeys: AUTH_FAILURE_KEYS_MAX,
+  });
   app.addHook('onRequest', async (request, reply) => {
     if (request.routeOptions.config?.public) return;
 
@@ -160,6 +208,13 @@ export function registerAuth(app: FastifyInstance, verify: VerifyToken): void {
       request.userId = verified.userId;
       request.userExp = verified.exp ?? null;
       return;
+    }
+    if (presented && !isExpiredJwt(presented)) {
+      const retryAfter = failedAuth(clientKey(request.ip));
+      if (retryAfter > 0) {
+        reply.header('Retry-After', String(retryAfter));
+        return reply.code(429).send({ error: 'too-many-requests' });
+      }
     }
     reply.header('WWW-Authenticate', 'Bearer');
     return reply.code(401).send({ error: 'unauthorized' });

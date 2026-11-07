@@ -57,8 +57,37 @@ export function urlFromRemoteTrackId(trackId: string): string | null {
 /** Artist shown when neither the server nor a metadata lookup knows it. */
 export const UNKNOWN_ARTIST = 'Unknown artist';
 
-/** Upper bound on waiting for artist lookups so search stays responsive. */
+/**
+ * Longest a single `withArtist` call waits for its artist, counted from the
+ * call (time queued behind other lookups included). Past it the track shows
+ * "Unknown artist" for now; the lookup keeps running and caches its answer.
+ */
 const ARTIST_LOOKUP_TIMEOUT_MS = 4000;
+/** Artist lookups in flight at once (iTunes/Deezer are rate limited). */
+const ARTIST_LOOKUP_CONCURRENCY = 2;
+
+/** Runs at most `max` tasks at once; the rest wait in FIFO order. */
+function createLimiter(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  const pump = () => {
+    while (active < max && queue.length) queue.shift()?.();
+  };
+  return <T>(task: () => Promise<T>) =>
+    new Promise<T>((resolve, reject) => {
+      queue.push(() => {
+        active++;
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            active--;
+            pump();
+          });
+      });
+      pump();
+    });
+}
 
 /**
  * Artist for a track the server returned without one (e.g. via an iTunes/Deezer
@@ -158,6 +187,7 @@ export class RemoteProvider {
   private readonly links: (key: string, signal?: AbortSignal) => Promise<StreamLink>;
   /** Looked-up artists per track id (`undefined` = no confident match). */
   private readonly artists = new Map<string, Promise<string | undefined>>();
+  private readonly limitArtistLookup = createLimiter(ARTIST_LOOKUP_CONCURRENCY);
 
   constructor(private readonly options: RemoteProviderOptions = {}) {
     this.transport = options.transport ?? createDefaultTransport();
@@ -262,22 +292,33 @@ export class RemoteProvider {
     const track = toRemoteTrack(result);
     const lookup = this.options.lookupArtist;
     if (result.artist || !lookup || !track.title) return track;
-    let pending = this.artists.get(track.id);
-    if (!pending) {
-      pending = Promise.resolve()
-        .then(() => lookup({ title: track.title, durationSec: track.durationSec }))
-        .then((a) => a?.trim() || undefined)
-        .catch(() => {
-          this.artists.delete(track.id); // retry on a later search
-          return undefined;
-        });
-      this.artists.set(track.id, pending);
-    }
+    // One deadline for this call, queue time included. A lookup that misses it
+    // keeps running and fills the cache for a later search.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<undefined>((r) => (timer = setTimeout(() => r(undefined), ARTIST_LOOKUP_TIMEOUT_MS)));
-    const artist = await Promise.race([pending, timeout]);
-    clearTimeout(timer);
-    return artist ? { ...track, artist } : track;
+    const deadline = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ARTIST_LOOKUP_TIMEOUT_MS);
+    });
+    try {
+      const pending = this.artists.get(track.id) ?? this.startArtistLookup(track, lookup);
+      const artist = await Promise.race([pending, deadline]);
+      return artist ? { ...track, artist } : track;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Queues the lookup and caches it per track id. A failure removes the entry so a later search retries. */
+  private startArtistLookup(track: Track, lookup: ArtistLookup): Promise<string | undefined> {
+    const pending: Promise<string | undefined> = this.limitArtistLookup(() =>
+      lookup({ title: track.title, durationSec: track.durationSec }),
+    )
+      .then((a) => a?.trim() || undefined)
+      .catch(() => {
+        if (this.artists.get(track.id) === pending) this.artists.delete(track.id);
+        return undefined;
+      });
+    this.artists.set(track.id, pending);
+    return pending;
   }
 
   /**

@@ -1,4 +1,4 @@
-import { AuthError, RemoteClient, RemoteProvider, type HttpTransport } from '../index';
+import { AuthError, NetworkError, RemoteClient, RemoteProvider, createFetchTransport, type HttpTransport } from '../index';
 
 function fakeTransport(status: number, data: unknown): HttpTransport & { urls: string[]; auth: (string | undefined)[] } {
   const urls: string[] = [];
@@ -60,6 +60,18 @@ describe('remote provider', () => {
     expect(tracks.map((t) => t.artist)).toEqual(['Nina Simone', 'Unknown artist']);
     // Hits are cached per track id; failures are retried.
     expect(lookupArtist).toHaveBeenCalledTimes(3);
+  });
+
+  it('maps a body-read timeout to NetworkError, not a bare AbortError (so imports do not read it as a cancel)', async () => {
+    const stalledFetch = (async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      },
+    })) as unknown as typeof fetch;
+    const transport = createFetchTransport(stalledFetch);
+    await expect(transport.request({ method: 'GET', url: 'https://music.example/search', headers: {} })).rejects.toBeInstanceOf(NetworkError);
   });
 
   it('turns 401 into a typed AuthError', async () => {

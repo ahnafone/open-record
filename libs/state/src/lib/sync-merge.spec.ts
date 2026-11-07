@@ -1,6 +1,7 @@
 import type { Track } from '@open-record/models';
 import {
   contentHash,
+  fromSyncTrack,
   mergeRecords,
   stampLocal,
   toSyncTrack,
@@ -70,5 +71,26 @@ describe('account sync merge', () => {
     expect(synced['artUrl']).toBeUndefined();
     expect(synced['spotifyId']).toBe('sp1');
     expect(synced['sourceUrl']).toBe('https://youtu.be/abc');
+  });
+
+  it('keeps only http(s) links and bundled catalog art from cloud records', () => {
+    const base = { id: 'remote:abc', providerId: 'remote', title: 'T', artist: 'A' };
+    const hostile = fromSyncTrack({
+      ...base,
+      artUrl: 'javascript:alert(1)',
+      sourceUrl: 'file:///data/user/0/secret.m4a',
+      sourceSite: 'youtube',
+    });
+    expect(hostile.artUrl).toBeUndefined();
+    expect(hostile.source).toBeUndefined();
+
+    const ok = fromSyncTrack({
+      ...base,
+      artUrl: 'catalog/art/sandman.jpg',
+      sourceUrl: 'https://youtu.be/abc',
+      sourceSite: 'youtube',
+    });
+    expect(ok.artUrl).toBe('catalog/art/sandman.jpg');
+    expect(ok.source?.url).toBe('https://youtu.be/abc');
   });
 });

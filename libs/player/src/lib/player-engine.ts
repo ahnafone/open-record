@@ -97,6 +97,12 @@ export interface SetQueueOptions {
   startIndex?: number;
   /** Start playing once loaded. Default true. */
   autoplay?: boolean;
+  /**
+   * `'before-start'`: entries before `startIndex` are history, already played,
+   * so `dropPlayed` can trim them and shuffle keeps them in place. Default:
+   * only the start entry counts as played.
+   */
+  history?: 'before-start';
 }
 
 /** Seconds into a track after which "previous" restarts it instead. */
@@ -211,6 +217,12 @@ export class PlayerEngine {
   private attempts = 0;
   /** Pending backoff timer for a retry, cleared by pause/navigation/clear. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Queue indices that have actually been current. Only these are history;
+   * entries merely sitting before the cursor (a jump into the queue) are not.
+   * Kept in step with every queue index change.
+   */
+  private played = new Set<number>();
   /** Whether the user wants sound once the current load finishes. */
   private playIntent = false;
   /** Load token that already reported a failure (avoid double handling). */
@@ -287,11 +299,17 @@ export class PlayerEngine {
     );
     this._queue.set([...tracks]);
     this._playNext.set([]);
+    this.played = new Set();
     if (!tracks.length) {
       await this.clear();
       return;
     }
     this.rebuildOrder(start);
+    this.played.add(start);
+    const cursor = this._cursor();
+    if (opts.history === 'before-start' && cursor > 0) {
+      for (const i of this._order().slice(0, cursor)) this.played.add(i);
+    }
     await this.loadCurrent(opts.autoplay ?? true);
   }
 
@@ -327,6 +345,7 @@ export class PlayerEngine {
     const added = tracks.map((_, k) => at + k);
     this._queue.update((q) => [...q.slice(0, at), ...tracks, ...q.slice(at)]);
     this._order.update((o) => [...o.map(shift), ...added]);
+    this.played = new Set([...this.played].map(shift));
     this._playNext.set([...pending.map(shift), ...added]);
     this.placePending();
     this.refreshNeighbours();
@@ -368,6 +387,9 @@ export class PlayerEngine {
     this._playNext.update((p) =>
       p.filter((i) => i !== queueIndex).map(shift),
     );
+    this.played = new Set(
+      [...this.played].filter((i) => i !== queueIndex).map(shift),
+    );
     if (pos >= 0 && pos < this._cursor()) this._cursor.update((c) => c - 1);
     this.refreshNeighbours();
     return true;
@@ -384,6 +406,13 @@ export class PlayerEngine {
     const queue = this._queue();
     if (!queue.some((t) => t.id === oldId)) return false;
     this._queue.set(queue.map((t) => (t.id === oldId ? next : t)));
+    // The replacement has not played: its upcoming slots are no longer played.
+    // History slots (before the cursor) keep their marks; they did play.
+    const cursor = this._cursor();
+    const history = new Set(cursor > 0 ? this._order().slice(0, cursor) : []);
+    queue.forEach((t, i) => {
+      if (t.id === oldId && !history.has(i)) this.played.delete(i);
+    });
     this.refreshNeighbours();
     return true;
   }
@@ -394,12 +423,30 @@ export class PlayerEngine {
    */
   dropPlayed(keep: number): void {
     const cursor = this._cursor();
-    if (keep < 0 || cursor <= keep) return;
-    const n = cursor - keep;
-    const shift = (i: number) => i - n;
-    this._queue.update((q) => q.slice(n));
-    this._order.update((o) => o.filter((i) => i >= n).map(shift));
-    this._playNext.update((p) => p.filter((i) => i >= n).map(shift));
+    if (keep < 0 || cursor < 0) return;
+    const order = this._order();
+    // History is the played entries before the cursor, oldest first. Entries
+    // never played (a jump into the queue) are not history and stay put.
+    const history = order
+      .slice(0, cursor)
+      .filter((i) => this.played.has(i));
+    if (history.length <= keep) return;
+    const dropped = new Set(history.slice(0, history.length - keep));
+    const n = dropped.size;
+    // Old queue index -> new queue index, for the tracks that survive.
+    const remap = new Map<number, number>();
+    this._queue().forEach((_, i) => {
+      if (!dropped.has(i)) remap.set(i, remap.size);
+    });
+    const renumber = (i: number) => remap.get(i) ?? -1;
+    this._queue.update((q) => q.filter((_, i) => !dropped.has(i)));
+    this._order.set(order.filter((i) => !dropped.has(i)).map(renumber));
+    this._playNext.update((p) =>
+      p.filter((i) => !dropped.has(i)).map(renumber),
+    );
+    this.played = new Set(
+      [...this.played].filter((i) => !dropped.has(i)).map(renumber),
+    );
     this._cursor.set(cursor - n);
     this.refreshNeighbours();
   }
@@ -425,6 +472,7 @@ export class PlayerEngine {
     this._order.set([]);
     this._cursor.set(-1);
     this._playNext.set([]);
+    this.played = new Set();
     this._status.set('idle');
     this._position.set(0);
     this._duration.set(0);
@@ -480,6 +528,8 @@ export class PlayerEngine {
     this._order.set(order.map((_, i) => i));
     this._cursor.set(index);
     this._playNext.set([]);
+    // The replaced queue has no history: only the track now current counts.
+    this.played = new Set([index]);
 
     if (sameMedia) {
       if (opts.positionSec !== undefined) {
@@ -614,14 +664,22 @@ export class PlayerEngine {
 
   // ---- Modes ------------------------------------------------------------
 
-  /** Shuffle keeps the current track first and the rest in a stable order. */
+  /**
+   * Enabling shuffle reorders only what is still to play: the played prefix
+   * and the current track keep their place, so back-navigation survives.
+   * Disabling resumes the natural order with the cursor on the current track.
+   */
   setShuffle(on: boolean): void {
     if (on === this._shuffle()) return;
     this._shuffle.set(on);
     const current = this.currentIndex();
-    this.rebuildOrder(current < 0 ? 0 : current);
-    if (current < 0) this._cursor.set(-1);
-    else this.placePending();
+    if (on) {
+      this.shuffleUpcoming();
+    } else {
+      this.rebuildOrder(current < 0 ? 0 : current);
+      if (current < 0) this._cursor.set(-1);
+    }
+    this.placePending();
     this.refreshNeighbours();
   }
 
@@ -702,6 +760,7 @@ export class PlayerEngine {
   private moveTo(cursor: number): void {
     this._cursor.set(cursor);
     const at = this._order()[cursor];
+    this.played.add(at);
     if (this._playNext().includes(at)) {
       this._playNext.update((p) => p.filter((i) => i !== at));
     }
@@ -733,6 +792,34 @@ export class PlayerEngine {
     const rest = this.shuffled(all.filter((i) => i !== currentQueueIndex));
     this._order.set([currentQueueIndex, ...rest]);
     this._cursor.set(0);
+  }
+
+  /**
+   * Shuffle everything not yet played. Played history before the cursor keeps
+   * its order, then the current track; pending "Play next" items follow it, in
+   * the order added. Unplayed entries before the cursor join the shuffle pool.
+   */
+  private shuffleUpcoming(): void {
+    const cursor = this._cursor();
+    if (cursor < 0) return;
+    const order = this._order();
+    const current = order[cursor];
+    const pending = new Set(this._playNext());
+    const history = order
+      .slice(0, cursor)
+      .filter((i) => this.played.has(i));
+    const first = order.slice(cursor + 1).filter((i) => pending.has(i));
+    const taken = new Set([...history, current, ...first]);
+    const rest = this._queue()
+      .map((_, i) => i)
+      .filter((i) => !taken.has(i));
+    this._order.set([
+      ...history,
+      current,
+      ...first,
+      ...this.shuffled(rest),
+    ]);
+    this._cursor.set(history.length);
   }
 
   /** Fisher-Yates with the injected random source. */

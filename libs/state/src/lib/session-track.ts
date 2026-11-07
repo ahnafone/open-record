@@ -1,5 +1,6 @@
 import type { SessionTrack, Track } from '@open-record/models';
 import { LOCAL_PROVIDER_ID } from './library.store';
+import { remoteArtUrl, remoteHttpUrl } from './remote-url';
 
 /** Platforms the session device list knows about (cast rows are server-made). */
 export type SessionPlatform = 'android' | 'ios' | 'web';
@@ -68,11 +69,16 @@ export function fromSessionTrack(entry: SessionTrack): Track {
   };
   if (entry.album !== undefined) track.album = entry.album;
   if (entry.durationSec !== undefined) track.durationSec = entry.durationSec;
-  if (entry.artUrl !== undefined) track.artUrl = entry.artUrl;
-  if (entry.source) {
+  // Untrusted wire data: unsafe URLs are dropped, never loaded or stored.
+  const artUrl = remoteArtUrl(entry.artUrl);
+  if (artUrl !== undefined) track.artUrl = artUrl;
+  // A source whose page link is not http(s) is dropped whole: it has no
+  // usable link, so it cannot be resolved.
+  const sourceUrl = remoteHttpUrl(entry.source?.url);
+  if (entry.source && sourceUrl !== undefined) {
     track.source = {
       site: entry.source.site,
-      url: entry.source.url,
+      url: sourceUrl,
     };
     if (entry.source.id !== undefined) track.source.id = entry.source.id;
   }

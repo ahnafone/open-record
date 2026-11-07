@@ -79,6 +79,10 @@ function friendly(error: { message?: string; name?: string; status?: number }): 
 export class SupabaseAuth extends AuthPort {
   private client: SupabaseClient | null = null;
   private clientFor: string | null = null;
+  /** The client being created for a project id; replaced or cleared by a newer request or a drop. */
+  private building: { id: string; promise: Promise<SupabaseClient | null> } | null = null;
+  /** Project id of the most recent `ensureClient` (null when none); lets a build notice it was overtaken. */
+  private requestedId: string | null = null;
   private listeners = new Set<(user: AuthUser | null) => void>();
   private recoveryListeners = new Set<() => void>();
   /** A reset link was opened before anyone listened (replayed on subscribe). */
@@ -305,40 +309,81 @@ export class SupabaseAuth extends AuthPort {
   }
 
   private async ensureClient(): Promise<SupabaseClient | null> {
+    // The one project read per call (a server read may be a network fetch).
     const project = await this.activeProject();
     if (!project) {
-      await this.dropClient();
+      this.requestedId = null;
+      this.dropClient();
       return null;
     }
     const id = `${project.url}\n${project.anonKey}`;
+    this.requestedId = id;
     if (this.client && this.clientFor === id) return this.client;
-    await this.dropClient();
+    // Concurrent callers for the same project share one in-flight build. A
+    // request for a different project replaces it; the replaced build installs nothing.
+    let attempt = this.building;
+    if (attempt?.id !== id) {
+      const next = { id } as { id: string; promise: Promise<SupabaseClient | null> };
+      next.promise = this.buildClient(next, project);
+      this.building = next;
+      attempt = next;
+    }
+    const client = await attempt.promise;
+    // Superseded while loading (another project won, or the client was dropped): ask again.
+    return client ?? this.ensureClient();
+  }
 
-    const { createClient } = await import('@supabase/supabase-js');
-    // A reset link lands with recovery tokens in the URL; the library verifies
-    // them, signs the user in and only then emits PASSWORD_RECOVERY (after this
-    // listener is attached). Never trust a bare `type=recovery` in the URL: on a
-    // signed-in device it would unlock "set password" without the current one.
-    // An event fired before the store listens is replayed by `onRecovery`.
-    const client = createClient(project.url, project.anonKey, {
-      auth: {
-        storage: sessionStorage,
-        persistSession: true,
-        autoRefreshToken: true,
-        // Web: pick up the session from email confirmation / reset links.
-        // Native has no URL to read until deep links are added.
-        detectSessionInUrl: !Capacitor.isNativePlatform(),
-      },
-    });
-    const { data } = client.auth.onAuthStateChange((event, session) => {
-      if (event === 'PASSWORD_RECOVERY') this.notifyRecovery();
-      const user = toUser(session);
-      for (const listener of this.listeners) listener(user);
-    });
-    this.stopListening = () => data.subscription.unsubscribe();
-    this.client = client;
-    this.clientFor = id;
-    return client;
+  /**
+   * Creates and installs the client for `attempt` (the project `ensureClient`
+   * just read; no second server read), or returns null when the attempt is
+   * superseded. Staleness is a cheap in-memory check: this build must still be
+   * the current one and the latest request must still be for its project. The
+   * checks and the install run with no await between them, so a stale build
+   * never installs or replaces a client. A failure clears the attempt, so the
+   * next call retries instead of replaying it.
+   */
+  private async buildClient(attempt: { id: string }, project: AuthProjectConfig): Promise<SupabaseClient | null> {
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      if (this.building !== attempt) return null;
+      if (this.requestedId !== attempt.id) {
+        // A newer request wants another project (or none): this build is stale.
+        this.building = null;
+        return null;
+      }
+
+      // Tear down the old client before the new one exists: two GoTrueClients must
+      // never share the session storage key during init.
+      this.teardownClient();
+      // A reset link lands with recovery tokens in the URL; the library verifies
+      // them, signs the user in and only then emits PASSWORD_RECOVERY (after this
+      // listener is attached). Never trust a bare `type=recovery` in the URL: on a
+      // signed-in device it would unlock "set password" without the current one.
+      // An event fired before the store listens is replayed by `onRecovery`.
+      const client = createClient(project.url, project.anonKey, {
+        auth: {
+          storage: sessionStorage,
+          persistSession: true,
+          autoRefreshToken: true,
+          // Web: pick up the session from email confirmation / reset links.
+          // Native has no URL to read until deep links are added.
+          detectSessionInUrl: !Capacitor.isNativePlatform(),
+        },
+      });
+      this.client = client;
+      this.clientFor = attempt.id;
+      this.building = null;
+      const { data } = client.auth.onAuthStateChange((event, session) => {
+        if (event === 'PASSWORD_RECOVERY') this.notifyRecovery();
+        const user = toUser(session);
+        for (const listener of this.listeners) listener(user);
+      });
+      this.stopListening = () => data.subscription.unsubscribe();
+      return client;
+    } catch (error) {
+      if (this.building === attempt) this.building = null;
+      throw error;
+    }
   }
 
   private notifyRecovery(): void {
@@ -346,7 +391,13 @@ export class SupabaseAuth extends AuthPort {
     for (const listener of this.recoveryListeners) listener();
   }
 
-  private async dropClient(): Promise<void> {
+  /** Forget the active client and any build still in flight (its result is ignored). */
+  private dropClient(): void {
+    this.building = null;
+    this.teardownClient();
+  }
+
+  private teardownClient(): void {
     const client = this.client;
     this.stopListening?.();
     this.stopListening = undefined;

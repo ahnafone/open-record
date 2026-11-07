@@ -999,23 +999,31 @@ describe('SessionStore', () => {
     expect(store.error()).toBeNull();
   });
 
-  it('aborts before transfer when setRepeat fails', async () => {
+  it('aborts before transfer and rolls back the queue when setRepeat fails', async () => {
     const { store, port } = await setup();
     port.result = (command) =>
       command.type === 'setRepeat'
         ? { ok: false, error: 'repeat-denied' }
         : { ok: true };
 
-    await store.startSession([catalogTrack('catalog:a')], 0, {
+    const ids = await store.startSession([catalogTrack('catalog:a')], 0, {
       shuffle: false,
       repeat: 'one',
       autoplay: true,
     });
 
+    expect(ids).toBeNull();
     expect(port.commands.map((entry) => entry.command.type)).toEqual([
       'setQueue',
       'setRepeat',
+      'setQueue',
     ]);
+    // The rollback empties only the queue; it must not clear the target.
+    expect(port.commands.at(-1)?.command).toMatchObject({
+      type: 'setQueue',
+      order: [],
+      cursor: -1,
+    });
     expect(store.error()).toBe('repeat-denied');
     expect(
       port.commands.some((entry) => entry.command.type === 'transfer'),

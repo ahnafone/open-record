@@ -64,7 +64,15 @@ export function createFetchTransport(fetchImpl: typeof fetch = (...args) => fetc
         res.headers.forEach((value, key) => (resHeaders[key.toLowerCase()] = value));
         let data: unknown;
         if (req.method !== 'HEAD') {
-          const text = await res.text();
+          // The body read can also time out (our timer aborts it) or fail mid-stream.
+          // Map those like a fetch failure so callers never see a bare AbortError.
+          let text: string;
+          try {
+            text = await res.text();
+          } catch (err) {
+            if (req.signal?.aborted) throw new AbortedError();
+            throw new NetworkError('Could not reach the download server.', { cause: err });
+          }
           data = text;
           if (text && /json/i.test(resHeaders['content-type'] ?? '')) {
             try {

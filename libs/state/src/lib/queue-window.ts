@@ -53,6 +53,25 @@ interface WindowEntry {
  * origin of each entry is remembered so shuffle can be turned off without
  * losing the natural order. Framework-free: no Angular dependency.
  */
+/** Tracks drawn by `reserve`, held until the caller commits or releases them. */
+export interface QueueReservation {
+  /** The drawn tracks, as they were when drawn. */
+  readonly tracks: Track[];
+  /** Keep the draw: the tracks are consumed for good. */
+  commit(): void;
+  /**
+   * Put the draw back into the pool. Entries removed or replaced while the
+   * draw was held are not restored (replacements are restored as the new
+   * track). Ignored after `commit` or a previous `release`.
+   */
+  release(): void;
+}
+
+/** Entries of one open reservation, kept current by `remove` and `replace`. */
+interface OpenReservation {
+  entries: WindowEntry[];
+}
+
 export class QueueWindow {
   /** Tracks the window keeps ahead of the queue. */
   readonly limit: number;
@@ -60,6 +79,7 @@ export class QueueWindow {
   private entries: WindowEntry[];
   private shuffledOn: boolean;
   private readonly random: () => number;
+  private readonly open = new Set<OpenReservation>();
 
   /** `pool` is the unplayed tracks, in play order. */
   constructor(pool: readonly Track[], options: QueueWindowOptions) {
@@ -84,8 +104,20 @@ export class QueueWindow {
    * `[]` once exhausted.
    */
   take(count: number): Track[] {
+    const draw = this.reserve(count);
+    draw.commit();
+    return draw.tracks;
+  }
+
+  /**
+   * Like `take`, but the draw can be undone until committed: `release` puts
+   * the tracks back in the pool, in their source order when shuffle is off.
+   * Use it only when the queue command that was meant to consume them was
+   * explicitly refused.
+   */
+  reserve(count: number): QueueReservation {
     const n = Math.min(Math.max(0, Math.floor(count)), this.entries.length);
-    const taken: Track[] = [];
+    const taken: WindowEntry[] = [];
     for (let i = 0; i < n; i++) {
       const at = this.shuffledOn
         ? Math.min(
@@ -94,9 +126,38 @@ export class QueueWindow {
           )
         : 0;
       const [entry] = this.entries.splice(at, 1);
-      if (entry) taken.push(entry.track);
+      if (entry) taken.push(entry);
     }
-    return taken;
+    const hold: OpenReservation = { entries: taken };
+    this.open.add(hold);
+    return {
+      tracks: taken.map((entry) => entry.track),
+      commit: () => {
+        this.open.delete(hold);
+      },
+      release: () => {
+        if (!this.open.delete(hold)) return;
+        this.entries.push(...hold.entries);
+        if (!this.shuffledOn) {
+          this.entries.sort((a, b) => a.origin - b.origin);
+        }
+      },
+    };
+  }
+
+  /** Drop every pool entry whose track id is in `ids` (e.g. a deleted track). */
+  remove(ids: ReadonlySet<string>): void {
+    const keep = (entry: WindowEntry) => !ids.has(entry.track.id);
+    this.entries = this.entries.filter(keep);
+    for (const hold of this.open) hold.entries = hold.entries.filter(keep);
+  }
+
+  /** Swap every pool entry of `oldId` for `next`, keeping its place. */
+  replace(oldId: string, next: Track): void {
+    const swap = (entry: WindowEntry): WindowEntry =>
+      entry.track.id === oldId ? { track: next, origin: entry.origin } : entry;
+    this.entries = this.entries.map(swap);
+    for (const hold of this.open) hold.entries = hold.entries.map(swap);
   }
 
   /**

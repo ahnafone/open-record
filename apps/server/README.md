@@ -153,19 +153,19 @@ is already set.
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
 | `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit sets it explicitly. |
-| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list. Behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list. Behind a proxy (Caddy, a tunnel) set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
 | `LOG_LEVEL`         | `info`       | pino level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`). Relay URLs in request logs are redacted. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
-| `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
+| `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search`, `/resolve` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
 | `SESSION_ENABLED`   | `true`       | Share one playback session between signed-in devices and Cast speakers. Needs a Supabase account: the static token is refused (`403`) on `/session/*` and `/cast/uploads*`. |
 | `SESSION_IDLE_TIMEOUT_MIN` | `120` | Minutes without contact from any device before a session is dropped from memory. |
 | `SESSION_TARGET_STALE_MIN` | `30`  | Minutes the playing device may stay silent before the server pauses and clears the target. |
 | `CAST_ENABLED`      | `true`       | Discover Google Cast speakers over mDNS and relay audio to them. Inert unless sessions and `CAST_MEDIA_BASE_URL` are available. |
 | `CAST_MEDIA_BASE_URL` | (unset)    | URL the speaker uses to reach this server, e.g. `http://10.0.0.5:8787`. Casting stays off when unset. |
 | `CAST_RELAY_TTL_SEC` | `900`       | Lifetime of a relay token in seconds (60-86400), slid while the speaker keeps playing; the hard cap is 24 hours. |
-| `CAST_CACHE_MB`     | `2048`       | Per-account cap for uploaded PC imports; `0` disables uploads. Least-recently-used files are evicted, never the one the speaker is playing. |
-| `CAST_UPLOAD_MAX_MB` | `200`       | Largest accepted upload from the PC browser (1-4096). |
+| `CAST_CACHE_MB`     | `2048`       | Per-account cap for uploaded PC imports; `0` disables uploads. Least-recently-used files are evicted, never the one the speaker is playing. A cap below `CAST_UPLOAD_MAX_MB` also caps a single upload: the effective limit is the smaller of the two. |
+| `CAST_UPLOAD_MAX_MB` | `200`       | Largest accepted upload from the PC browser (1-4096). Effective limit is `min(this, CAST_CACHE_MB)`. |
 | `FFMPEG_PATH`       | `ffmpeg`     | ffmpeg binary used to transcode sources Cast cannot play (WebM/Ogg). A missing binary only affects those sources, which answer `503`. |
 | `SUPABASE_JWT_SECRET` | (unset) | Optional. Also accept signed-in users' Supabase access tokens (HS256, shared-secret projects; at least 32 characters). Local stack: "JWT secret" from `supabase status`. |
 | `SUPABASE_URL`      | (unset)      | Optional. Verifies asymmetric (ES256/RS256) Supabase tokens via `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, and is served at `GET /app-config` when `SUPABASE_ANON_KEY` is set. Must be `http(s)`. |
@@ -240,9 +240,16 @@ cookies), so the server bounds how many run at once:
   for a slot for at most 20 seconds. A call that cannot get in answers
   `503 Service Unavailable` with `Retry-After: 5`; the app shows "server busy".
 - **Timeout.** A yt-dlp run is killed after 45 seconds and answers `504`.
-- **Rate limit.** `/search` and `/stream` allow `RESOLVE_RATE_LIMIT_MAX` requests
-  per minute per client (`429` beyond that); the client is the Supabase user when signed in, otherwise the static token, on top of the general
-  `RATE_LIMIT_MAX` per IP.
+- **Rate limit.** `/search`, `/resolve` and `/stream` allow `RESOLVE_RATE_LIMIT_MAX`
+  requests per minute per client (`429` beyond that); the client is the Supabase user when signed in, otherwise the IP, on top of the general
+  `RATE_LIMIT_MAX` per client (user, or IP for the static token and public routes).
+- **Failed sign-ins.** A client IP that sends more than 30 invalid bearer tokens
+  within a minute gets `429` with `Retry-After` until the window resets. Requests with
+  no `Authorization` header, and expired Supabase JWTs (a normal refresh), are still
+  refused with `401` but are not counted. Valid tokens are checked first and are never
+  refused or counted, so a signed-in user behind the same IP keeps working. IPv6
+  clients are counted per /64 prefix; IPv4-mapped addresses count as IPv4. Behind a
+  proxy, set `TRUST_PROXY` or all clients share the proxy's address.
 - **Link cache.** `/stream` results are cached in memory for `STREAM_CACHE_TTL`
   seconds, keyed by the URL and requested quality, and dropped a minute before the link's `expiresAt`.
   Identical requests that arrive while one is being resolved share that single
@@ -364,8 +371,9 @@ default. Start it with `--host 127.0.0.1` for a tunnel (the systemd unit sets
 `HOST=0.0.0.0`, so it needs no change).
 
 Set `PUBLIC_URL` to the HTTPS URL behind either so the banner and QR code show
-it. Behind a same-host tunnel or Caddy, use `TRUST_PROXY=127.0.0.1` so only the
-loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only safe
+it. Behind a same-host tunnel or Caddy, `TRUST_PROXY` must be set (per-client
+limits otherwise see only the proxy's address); use `TRUST_PROXY=127.0.0.1` so only
+the loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only safe
 when 8787 is bound to loopback and nothing else can reach it; never use `true`
 while 8787 is reachable from the LAN, or clients can spoof their address. Scan
 the QR code (or enter the URL) in the app under Settings, Stream server.
@@ -486,7 +494,7 @@ src/
   services/        non-HTTP logic used by routes
     ytdlp.ts       yt-dlp runner, search targets, result and stream mapping
     resolve-limiter.ts  concurrency cap and bounded wait queue
-    stream-cache.ts     TTL link cache, in-flight de-duplication, token rate-limit key
+    stream-cache.ts     TTL link cache, in-flight de-duplication
     url-guard.ts   URL validation / SSRF guard
     playlist.ts    playlist and song link allow-list, flat-playlist and single-song mapping
     enrich.ts      catalogue lookups, scoring, merge and LRU cache

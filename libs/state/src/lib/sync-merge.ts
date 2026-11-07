@@ -1,5 +1,6 @@
 import type { Track } from '@open-record/models';
 import type { SyncImportSession, SyncPlaylist, SyncTrack } from './ports';
+import { remoteArtUrl, remoteHttpUrl } from './remote-url';
 
 /**
  * Pure account-sync logic (no Angular, no I/O): local change detection,
@@ -185,6 +186,10 @@ export function toSyncTrack(t: Track): SyncTrack {
   return out;
 }
 
+/**
+ * Cloud data is untrusted: art and page links are kept only in the schemes the
+ * app produces (see `remote-url.ts`); anything else is dropped.
+ */
 export function fromSyncTrack(s: SyncTrack): Track {
   const t: Track = {
     id: s.id,
@@ -196,13 +201,15 @@ export function fromSyncTrack(s: SyncTrack): Track {
   if (s.year !== undefined) t.year = s.year;
   if (s.genre) t.genre = s.genre;
   if (s.durationSec !== undefined) t.durationSec = s.durationSec;
-  if (s.artUrl) t.artUrl = s.artUrl;
+  const artUrl = remoteArtUrl(s.artUrl);
+  if (artUrl !== undefined) t.artUrl = artUrl;
   if (s.isrc) t.isrc = s.isrc;
   if (s.spotifyId) t.external = { spotifyId: s.spotifyId };
-  if (s.sourceUrl)
+  const sourceUrl = remoteHttpUrl(s.sourceUrl);
+  if (sourceUrl !== undefined)
     t.source = {
       site: s.sourceSite ?? '',
-      url: s.sourceUrl,
+      url: sourceUrl,
       ...(s.sourceId ? { id: s.sourceId } : {}),
     };
   return t;

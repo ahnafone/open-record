@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 /** Stop caching a link this long before its own `expiresAt`. */
 const EXPIRY_MARGIN_MS = 60_000;
 
@@ -59,9 +57,3 @@ export function createResolveCache<T extends CacheableStream>(options: ResolveCa
   };
 }
 
-/** Rate-limit key: a hash of the presented Authorization header (never the raw token). */
-export function tokenKey(authorization: string | undefined): string {
-  return createHash('sha256')
-    .update(authorization ?? '', 'utf8')
-    .digest('base64url');
-}

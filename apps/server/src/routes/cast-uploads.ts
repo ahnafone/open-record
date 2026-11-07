@@ -190,7 +190,7 @@ export const castUploadRoutes: FastifyPluginAsync<RouteOptions> = async (app, op
     try {
       const stored = await uploads.store(userId, sizeGuarded(part.file), ext);
       // Enforce the per-user cap only after the new file is in place.
-      await uploads.evict(userId);
+      await uploads.evict(userId, stored.uploadId);
       return reply.code(200).send({
         uploadId: stored.uploadId,
         sizeBytes: stored.sizeBytes,

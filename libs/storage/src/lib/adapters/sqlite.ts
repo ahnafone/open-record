@@ -44,7 +44,24 @@ function table(name: CollectionName): string {
  * The schema version lives in the single-row `schema_version` table.
  */
 export class SqliteBackend implements StorageBackend, MigrationTarget {
+  /**
+   * Tail of the operation queue. The connection is shared, and an open
+   * transaction is connection-wide: a statement (or another transaction) that
+   * starts while one is open would commit or roll back the wrong work. Every
+   * public operation therefore runs one at a time.
+   *
+   * Migration context methods are NOT locked: they run inside `apply`, which
+   * already holds the lock, and locking them again would deadlock.
+   */
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly conn: SqlConnection) {}
+
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn);
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
 
   private async rows(collection: CollectionName): Promise<Row[]> {
     const res = await this.conn.query(
@@ -53,79 +70,86 @@ export class SqliteBackend implements StorageBackend, MigrationTarget {
     return (res.values ?? []) as Row[];
   }
 
-  async get<T>(
-    collection: CollectionName,
-    key: string,
-  ): Promise<T | undefined> {
-    const res = await this.conn.query(
-      `SELECT value FROM ${table(collection)} WHERE key = ?`,
-      [key],
-    );
-    const row = res.values?.[0] as Pick<Row, 'value'> | undefined;
-    return row ? (JSON.parse(row.value) as T) : undefined;
+  get<T>(collection: CollectionName, key: string): Promise<T | undefined> {
+    return this.exclusive(async () => {
+      const res = await this.conn.query(
+        `SELECT value FROM ${table(collection)} WHERE key = ?`,
+        [key],
+      );
+      const row = res.values?.[0] as Pick<Row, 'value'> | undefined;
+      return row ? (JSON.parse(row.value) as T) : undefined;
+    });
   }
 
-  async getAll<T>(collection: CollectionName): Promise<T[]> {
-    return (await this.rows(collection)).map((r) => JSON.parse(r.value) as T);
-  }
-
-  async put<T>(
-    collection: CollectionName,
-    key: string,
-    value: T,
-  ): Promise<void> {
-    await this.conn.run(
-      `INSERT INTO ${table(collection)} (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      [key, JSON.stringify(value)],
+  getAll<T>(collection: CollectionName): Promise<T[]> {
+    return this.exclusive(async () =>
+      (await this.rows(collection)).map((r) => JSON.parse(r.value) as T),
     );
   }
 
-  async putMany<T>(
+  put<T>(collection: CollectionName, key: string, value: T): Promise<void> {
+    return this.exclusive(async () => {
+      await this.conn.run(
+        `INSERT INTO ${table(collection)} (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        [key, JSON.stringify(value)],
+      );
+    });
+  }
+
+  putMany<T>(
     collection: CollectionName,
     entries: readonly (readonly [string, T])[],
   ): Promise<void> {
-    if (!entries.length) return;
-    const sql = `INSERT INTO ${table(collection)} (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
-    await this.conn.beginTransaction();
-    try {
-      for (const [key, value] of entries)
-        await this.conn.run(sql, [key, JSON.stringify(value)], false);
-      await this.conn.commitTransaction();
-    } catch (err) {
-      await this.conn.rollbackTransaction();
-      throw err;
-    }
+    if (!entries.length) return Promise.resolve();
+    return this.exclusive(async () => {
+      const sql = `INSERT INTO ${table(collection)} (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+      await this.conn.beginTransaction();
+      try {
+        for (const [key, value] of entries)
+          await this.conn.run(sql, [key, JSON.stringify(value)], false);
+        await this.conn.commitTransaction();
+      } catch (err) {
+        await this.conn.rollbackTransaction();
+        throw err;
+      }
+    });
   }
 
-  async delete(collection: CollectionName, key: string): Promise<void> {
-    await this.conn.run(`DELETE FROM ${table(collection)} WHERE key = ?`, [
-      key,
-    ]);
+  delete(collection: CollectionName, key: string): Promise<void> {
+    return this.exclusive(async () => {
+      await this.conn.run(`DELETE FROM ${table(collection)} WHERE key = ?`, [
+        key,
+      ]);
+    });
   }
 
-  async clear(collection: CollectionName): Promise<void> {
-    await this.conn.run(`DELETE FROM ${table(collection)}`);
+  clear(collection: CollectionName): Promise<void> {
+    return this.exclusive(async () => {
+      await this.conn.run(`DELETE FROM ${table(collection)}`);
+    });
   }
 
-  async close(): Promise<void> {
-    await this.conn.close();
+  close(): Promise<void> {
+    return this.exclusive(() => this.conn.close());
   }
 
   // MigrationTarget
-  async readVersion(): Promise<number> {
-    await this.conn.execute(
-      `CREATE TABLE IF NOT EXISTS schema_version (
-         id INTEGER PRIMARY KEY CHECK (id = 1),
-         version INTEGER NOT NULL
-       )`,
-    );
-    const res = await this.conn.query(
-      'SELECT version FROM schema_version WHERE id = 1',
-    );
-    const row = res.values?.[0] as { version: number } | undefined;
-    return row?.version ?? 0;
+  readVersion(): Promise<number> {
+    return this.exclusive(async () => {
+      await this.conn.execute(
+        `CREATE TABLE IF NOT EXISTS schema_version (
+           id INTEGER PRIMARY KEY CHECK (id = 1),
+           version INTEGER NOT NULL
+         )`,
+      );
+      const res = await this.conn.query(
+        'SELECT version FROM schema_version WHERE id = 1',
+      );
+      const row = res.values?.[0] as { version: number } | undefined;
+      return row?.version ?? 0;
+    });
   }
 
   context(): MigrationContext {
@@ -161,21 +185,23 @@ export class SqliteBackend implements StorageBackend, MigrationTarget {
     };
   }
 
-  async apply(migration: Migration, ctx: MigrationContext): Promise<void> {
-    await this.conn.beginTransaction();
-    try {
-      await migration.up(ctx);
-      await this.conn.run(
-        `INSERT INTO schema_version (id, version) VALUES (1, ?)
-         ON CONFLICT(id) DO UPDATE SET version = excluded.version`,
-        [migration.version],
-        false,
-      );
-      await this.conn.commitTransaction();
-    } catch (err) {
-      await this.conn.rollbackTransaction();
-      throw err;
-    }
+  apply(migration: Migration, ctx: MigrationContext): Promise<void> {
+    return this.exclusive(async () => {
+      await this.conn.beginTransaction();
+      try {
+        await migration.up(ctx);
+        await this.conn.run(
+          `INSERT INTO schema_version (id, version) VALUES (1, ?)
+           ON CONFLICT(id) DO UPDATE SET version = excluded.version`,
+          [migration.version],
+          false,
+        );
+        await this.conn.commitTransaction();
+      } catch (err) {
+        await this.conn.rollbackTransaction();
+        throw err;
+      }
+    });
   }
 }
 

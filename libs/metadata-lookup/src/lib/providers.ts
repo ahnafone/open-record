@@ -7,11 +7,14 @@ export interface MetadataFetchInit {
   redirect?: 'error' | 'follow' | 'manual';
 }
 
-/** Injected HTTP client. Must resolve to a response-like object (`ok`, `status`, `text()`). */
+/**
+ * Injected HTTP client. Must resolve to a response-like object (`ok`, `status`, `text()`).
+ * `headers.get` is optional; when present, a declared Content-Length is checked before the body is read.
+ */
 export type MetadataFetch = (
   url: string,
   init?: MetadataFetchInit,
-) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+) => Promise<{ ok: boolean; status: number; headers?: { get(name: string): string | null }; text(): Promise<string> }>;
 
 export const USER_AGENT = 'OpenRecordServer/1.0 (self-hosted personal music library tagger)';
 const TIMEOUT_MS = 6000;
@@ -21,6 +24,16 @@ type Json = Record<string, unknown>;
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+/**
+ * Artwork URL as https. Cleartext http is upgraded (the app runs https/webviews,
+ * where mixed content is blocked); anything else is dropped.
+ */
+const httpUrl = (v: unknown): string | undefined => {
+  const s = str(v);
+  if (!s) return undefined;
+  if (/^https:\/\//i.test(s)) return s;
+  return /^http:\/\//i.test(s) ? 'https://' + s.slice('http://'.length) : undefined;
+};
 
 async function getJson(fetchFn: MetadataFetch, url: string): Promise<Json> {
   const res = await fetchFn(url, {
@@ -29,6 +42,8 @@ async function getJson(fetchFn: MetadataFetch, url: string): Promise<Json> {
     redirect: 'error',
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
+  const declared = Number(res.headers?.get('content-length'));
+  if (declared > MAX_JSON_BYTES) throw new Error('response too large');
   const text = await res.text();
   if (text.length > MAX_JSON_BYTES) throw new Error('response too large');
   const body: unknown = JSON.parse(text);
@@ -55,7 +70,7 @@ export function parseItunes(body: Json): MetadataMatch[] {
     if (!title || !artist) continue;
     const year = Number.parseInt(str(r['releaseDate'])?.slice(0, 4) ?? '', 10);
     const ms = num(r['trackTimeMillis']);
-    const art = str(r['artworkUrl100']);
+    const art = httpUrl(r['artworkUrl100']);
     out.push({
       title,
       artist,
@@ -84,7 +99,7 @@ export function parseDeezer(body: Json): MetadataMatch[] {
       title,
       artist,
       album: str(albumObj['title']),
-      artworkUrl: str(albumObj['cover_xl']),
+      artworkUrl: httpUrl(albumObj['cover_xl']),
       durationSec: num(r['duration']),
       source: 'deezer',
     });

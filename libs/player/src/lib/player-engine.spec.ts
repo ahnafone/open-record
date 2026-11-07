@@ -208,6 +208,7 @@ describe('PlayerEngine', () => {
     player.setShuffle(true);
 
     expect(ids()).toBe('c');
+    // a and b were never played, so they are still in the shuffle pool.
     const order = player.upcoming().map((t) => t.id);
     expect([...order].sort()).toEqual(['a', 'b', 'd', 'e']);
 
@@ -219,6 +220,21 @@ describe('PlayerEngine', () => {
     // Turning shuffle off resumes the original order from the current track.
     player.setShuffle(false);
     expect(player.currentIndex()).toBe(tracks.findIndex((t) => t.id === ids()));
+  });
+
+  it('shuffle keeps played history before the current track', async () => {
+    const { player, ids } = setup();
+    await player.setQueue(tracks, { startIndex: 0 });
+    await player.next();
+    await player.next(); // a and b played; now c
+    player.setShuffle(true);
+
+    expect(ids()).toBe('c');
+    expect([...player.upcoming().map((t) => t.id)].sort()).toEqual(['d', 'e']);
+    await player.previous();
+    expect(ids()).toBe('b');
+    await player.previous();
+    expect(ids()).toBe('a');
   });
 
   it('plays "play next" items first, in the order added, then resumes', async () => {
@@ -1209,7 +1225,8 @@ describe('PlayerEngine', () => {
   describe('dropPlayed', () => {
     it('drops older played entries and shifts the cursor without reloading', async () => {
       const { player, fake } = setup();
-      await player.setQueue(tracks, { startIndex: 4 }); // e
+      await player.setQueue(tracks, { startIndex: 0 });
+      for (let i = 0; i < 4; i++) await player.next(); // a..d played; now e
       player.playNext([track('x')]);
       fake.listener?.onTime(30);
       const loads = fake.loaded.length;
@@ -1238,6 +1255,60 @@ describe('PlayerEngine', () => {
       expect(player.queue().map((t) => t.id)).toEqual(['c', 'd', 'e', 'x']);
       expect(player.currentIndex()).toBe(2);
       expect(player.playNextIndices()).toEqual([3]);
+    });
+
+    it('never drops tracks that were jumped over, only played history', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks, { startIndex: 2 }); // c; a and b unplayed
+      await player.next();
+      await player.next(); // now e; c and d played
+      player.dropPlayed(1);
+      expect(player.queue().map((t) => t.id)).toEqual(['a', 'b', 'd', 'e']);
+      expect(player.current()?.id).toBe('e');
+    });
+
+    it('under shuffle drops only played tracks and keeps the current one', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks, { startIndex: 0 });
+      player.setShuffle(true);
+      const played = [player.current()?.id ?? ''];
+      for (let i = 0; i < 3; i++) {
+        await player.next();
+        played.push(player.current()?.id ?? '');
+      }
+      // The last entry is current; the first two are older than `keep`.
+      const current = player.current()?.id;
+      const upcoming = player.upcoming().map((t) => t.id);
+
+      player.dropPlayed(1);
+
+      expect(player.current()?.id).toBe(current);
+      expect(player.upcoming().map((t) => t.id)).toEqual(upcoming);
+      expect(player.queue().map((t) => t.id)).toEqual(
+        tracks.map((t) => t.id).filter((id) => !played.slice(0, 2).includes(id)),
+      );
+      // The kept history is still reachable.
+      await player.previous();
+      expect(player.current()?.id).toBe(played[2]);
+    });
+
+    it('bounds seeded history across dropPlayed when the queue starts mid-list', async () => {
+      const { player } = setup();
+      const many = Array.from({ length: 40 }, (_, i) => track(`t${i}`));
+      await player.setQueue(many, { startIndex: 30, history: 'before-start' });
+
+      // The 30 entries before the cursor are history: keep 20, drop 10.
+      player.dropPlayed(20);
+      expect(player.queue().length).toBe(30);
+      expect(player.currentIndex()).toBe(20);
+      expect(player.current()?.id).toBe('t30');
+
+      // Advancing adds history; dropping again keeps it bounded at 20.
+      for (let i = 0; i < 5; i++) await player.next();
+      player.dropPlayed(20);
+      expect(player.queue().length).toBe(25);
+      expect(player.currentIndex()).toBe(20);
+      expect(player.current()?.id).toBe('t35');
     });
   });
 

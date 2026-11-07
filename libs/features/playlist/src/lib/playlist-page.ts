@@ -63,6 +63,8 @@ type SortKey = TrackSortKey;
 /** A record row with its static (per playlist load) display values. */
 interface Row {
   track: Track;
+  /** Index in `tracks()` (playlist order), not the displayed (sorted) position. */
+  index: number;
   /** Playlist index + id: stable across sorting, unique with duplicates. */
   key: string;
   duration: string;
@@ -630,7 +632,7 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
                     icon="more"
                     [attr.data-options]="t.id"
                     [label]="'Options for ' + t.title"
-                    (click)="openOptions(t, $event)"
+                    (click)="openOptions(t, row.index, $event)"
                   />
                 </div>
               </div>
@@ -892,6 +894,27 @@ export class PlaylistPage {
       .map((e) => e.track);
   });
 
+  /**
+   * Each `tracks()` entry's position in the playlist's raw `trackIds` (-1 when
+   * unknown). Repeated ids map occurrence by occurrence, so each row gets its own slot.
+   */
+  private readonly playlistPositions = computed<readonly number[]>(() => {
+    const pl = this.playlist();
+    if (!pl || this.isCurated()) return [];
+    const slots = new Map<string, number[]>();
+    pl.trackIds.forEach((id, raw) => {
+      const list = slots.get(id);
+      if (list) list.push(raw);
+      else slots.set(id, [raw]);
+    });
+    const seen = new Map<string, number>();
+    return this.tracks().map((t) => {
+      const n = seen.get(t.id) ?? 0;
+      seen.set(t.id, n + 1);
+      return slots.get(t.id)?.[n] ?? -1;
+    });
+  });
+
   /** Curated entries older than the week window ("Show older" reveals them). */
   protected readonly olderCount = computed(() => {
     if (!this.isCurated()) return 0;
@@ -951,6 +974,7 @@ export class PlaylistPage {
       const at = curated ? curatedAt.get(track.id) : addedAt?.[track.id];
       return {
         track,
+        index: i,
         key: `${i}:${track.id}`,
         duration: formatDuration(track.durationSec),
         source: sourceLabel(track.source?.site),
@@ -1003,9 +1027,12 @@ export class PlaylistPage {
   protected readonly optionsFor = signal<Track | null>(null);
   /** The ⋯ button that opened the options modal (for focus return). */
   private readonly optionsOrigin = signal<HTMLElement | null>(null);
+  /** `tracks()` index of the row whose options are open (its own row, even with duplicate ids). */
+  private readonly optionsAt = signal(-1);
   protected readonly optionIndex = computed(() => {
     const t = this.optionsFor();
-    return t ? this.tracks().findIndex((x) => x.id === t.id) : -1;
+    const i = this.optionsAt();
+    return t && this.tracks()[i]?.id === t.id ? i : -1;
   });
 
   protected playLabel(track: Track, current: boolean): string {
@@ -1049,8 +1076,13 @@ export class PlaylistPage {
 
   /** Number cell: toggle the current record, otherwise play from that row. */
   protected numClick(index: number, current: boolean): void {
-    if (current) void this.player.togglePlay();
-    else void this.playFrom(index);
+    if (current) {
+      this.player.togglePlay().catch(() => {
+        this.toast.show('Could not change playback. Try again.');
+      });
+    } else {
+      void this.playFrom(index);
+    }
   }
 
   protected async toggleSaved(track: Track, saved: boolean): Promise<void> {
@@ -1081,9 +1113,10 @@ export class PlaylistPage {
   }
 
   /** Open the row's options modal, remembering the button for focus. */
-  protected openOptions(track: Track, event: Event): void {
+  protected openOptions(track: Track, index: number, event: Event): void {
     const host = event.currentTarget as HTMLElement;
     this.optionsOrigin.set(host.querySelector<HTMLElement>('button') ?? host);
+    this.optionsAt.set(index);
     this.optionsFor.set(track);
   }
 
@@ -1118,9 +1151,11 @@ export class PlaylistPage {
     const neighbour = tracks[i + dir];
     this.optionsFor.set(null);
     if (!pl || !track || i < 0 || !neighbour) return;
-    // moveTrack works on raw ids (which may include unresolved ones).
-    const from = pl.trackIds.indexOf(track.id);
-    const to = pl.trackIds.indexOf(neighbour.id);
+    // moveTrack works on raw trackIds positions (which may include unresolved ids).
+    const positions = this.playlistPositions();
+    const from = positions[i] ?? -1;
+    const to = positions[i + dir] ?? -1;
+    if (from < 0 || to < 0) return;
     try {
       await this.playlists.moveTrack(pl.id, from, to);
       this.toast.show('Record moved');
@@ -1132,10 +1167,14 @@ export class PlaylistPage {
   protected async removeTrack(): Promise<void> {
     const track = this.optionsFor();
     const i = this.optionIndex();
+    // Screen position of the row before it goes: focus lands on the row that takes its place.
+    const shown = this.rows().findIndex((r) => r.index === i);
+    // Remove only this row's entry: a duplicate of the same record elsewhere stays.
+    const position = this.playlistPositions()[i] ?? -1;
     this.optionsFor.set(null);
-    if (!track) return;
+    if (!track || position < 0) return;
     try {
-      await this.playlists.removeTrack(this.id(), track.id);
+      await this.playlists.removeTrackAt(this.id(), position);
       this.toast.show(`Removed “${track.title}”`);
       // The row (and its options button) is gone; move focus somewhere sane.
       afterNextRender(
@@ -1143,7 +1182,7 @@ export class PlaylistPage {
           const root = this.host.nativeElement;
           const options = root.querySelectorAll<HTMLElement>('[data-options] button');
           const target =
-            options[Math.min(i, options.length - 1)] ??
+            options[Math.min(shown, options.length - 1)] ??
             root.querySelector<HTMLElement>('[data-add-records] button');
           target?.focus();
         },

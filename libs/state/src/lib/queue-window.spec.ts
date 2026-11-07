@@ -159,6 +159,27 @@ describe('queue window', () => {
     expect(window.ids()).toEqual(natural);
   });
 
+  it('releases a refused draw back in order, skipping tracks removed while held', () => {
+    const window = new QueueWindow(pool, { limit: 50, shuffle: false });
+
+    const draw = window.reserve(3);
+    expect(ids(draw.tracks)).toEqual(['p0', 'p1', 'p2']);
+    expect(window.remaining).toBe(7);
+
+    // Removed while held: not put back. Replaced while held: the replacement is.
+    window.remove(new Set(['p1']));
+    window.replace('p2', track('q2'));
+    draw.release();
+    draw.release(); // a second release is a no-op
+    expect(window.ids()).toEqual(['p0', 'q2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']);
+
+    // A committed draw is consumed for good: release does nothing.
+    const kept = window.reserve(1);
+    kept.commit();
+    kept.release();
+    expect(window.remaining).toBe(8);
+  });
+
   it('restores a window from ids and rejects one with a missing track', () => {
     const byId = new Map(context.map((t) => [t.id, t]));
     const resolve = (id: string) => byId.get(id);

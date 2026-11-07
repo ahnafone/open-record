@@ -6,6 +6,8 @@ import type { MetadataMatch, MetadataQuery } from './types';
 
 const HIT_TTL_MS = 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 60 * 60 * 1000;
+/** Any answer given while a provider failed: retry soon instead of remembering it for hours. */
+const PARTIAL_TTL_MS = 60 * 1000;
 const cache = new TtlLru<MetadataMatch | null>(500);
 const inflight = new Map<string, Promise<MetadataMatch | null>>();
 
@@ -51,7 +53,11 @@ export async function lookupMetadata(q: MetadataQuery, fetchFn: MetadataFetch): 
       throw new Error('metadata providers unavailable');
     }
     const match = pickBest(query, candidates);
-    cache.set(key, match, match ? HIT_TTL_MS : MISS_TTL_MS);
+    // A provider failed (429, timeout), so this answer may be incomplete (a
+    // missing match, or a match that the failed provider would have beaten):
+    // keep it only briefly and let the next lookup retry.
+    const partial = results.some((r) => r.status === 'rejected');
+    cache.set(key, match, partial ? PARTIAL_TTL_MS : match ? HIT_TTL_MS : MISS_TTL_MS);
     return match;
   })();
 

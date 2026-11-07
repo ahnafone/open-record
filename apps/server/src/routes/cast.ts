@@ -8,6 +8,8 @@ import { pipeline } from 'node:stream';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { MediaRelay, RelayEntry } from '../services/media-relay';
 import { catalogAudioPath } from '../services/media-plan';
+import { clientKey } from '../services/client-ip';
+import { createFixedWindow } from '../services/fixed-window';
 import { createResolveCache, type ResolveCache } from '../services/stream-cache';
 import {
   createTranscoder,
@@ -47,6 +49,8 @@ const RELAY_RATE_LIMIT_MAX = 300;
 /** Token guesses from one IP per minute, checked in the handler (validity is unknown earlier). */
 const INVALID_TOKEN_MAX = 30;
 const INVALID_TOKEN_WINDOW_MS = 60_000;
+/** Hard cap on IPs tracked by the invalid-token counter (bounds memory under a spray). */
+const MAX_INVALID_TOKEN_IPS = 10_000;
 
 /** Redirects followed for a resolved media URL; every hop is re-validated. */
 const MAX_REDIRECTS = 3;
@@ -91,30 +95,6 @@ interface TranscodeDeps {
   transcode: TranscodeFactory;
   hasFfmpeg: FfmpegProbe;
   ffmpegPath: string;
-}
-
-/**
- * Per-IP fixed-window counter for invalid relay tokens. Only reached after
- * `relay.verify` rejected a token, so a valid streaming request never consumes
- * the budget. Returns false once this IP has guessed 30 times in a minute.
- */
-function createInvalidTokenLimiter(
-  max = INVALID_TOKEN_MAX,
-  windowMs = INVALID_TOKEN_WINDOW_MS,
-  now: () => number = Date.now,
-): (ip: string) => boolean {
-  const buckets = new Map<string, { count: number; resetAt: number }>();
-  return (ip) => {
-    const at = now();
-    const bucket = buckets.get(ip);
-    if (!bucket || bucket.resetAt <= at) {
-      buckets.set(ip, { count: 1, resetAt: at + windowMs });
-      return true;
-    }
-    if (bucket.count >= max) return false;
-    bucket.count += 1;
-    return true;
-  };
 }
 
 /** True when `path` is inside `root` (both already resolved). */
@@ -511,13 +491,19 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
   const { config, relay } = options;
 
   if (!relay) {
-    app.get('/cast/*', { config: { public: true } }, async (_request, reply) =>
+    // Not public: the global auth hook answers unauthenticated callers with 401
+    // first, and only then does this stub answer 503 `cast-disabled`.
+    app.get('/cast/*', async (_request, reply) =>
       reply.code(503).send({ error: 'cast-disabled' }),
     );
     return;
   }
 
-  const invalidToken = createInvalidTokenLimiter();
+  const invalidToken = createFixedWindow({
+    max: INVALID_TOKEN_MAX,
+    windowMs: INVALID_TOKEN_WINDOW_MS,
+    maxKeys: MAX_INVALID_TOKEN_IPS,
+  });
   const resolveCache = createResolveCache<StreamResponse>({
     ttlMs: config.streamCacheTtl * 1000,
     resolve: options.resolveStream ?? resolveStream,
@@ -537,7 +523,7 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
         rateLimit: {
           max: RELAY_RATE_LIMIT_MAX,
           timeWindow: '1 minute',
-          keyGenerator: (request: FastifyRequest) => request.ip,
+          keyGenerator: (request: FastifyRequest) => clientKey(request.ip),
         },
       },
       logLevel: 'silent',
@@ -560,7 +546,7 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
       const entry = relay.verify(request.params.token);
       if (!entry) {
         // Never echo the token: an invalid guess gets the same 404 as an expired one.
-        if (!invalidToken(request.ip)) {
+        if (invalidToken(clientKey(request.ip)) > 0) {
           return reply.code(429).send({ error: 'too-many-requests' });
         }
         return reply.code(404).send({ error: 'not-found' });

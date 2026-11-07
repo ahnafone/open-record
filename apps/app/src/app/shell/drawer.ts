@@ -137,9 +137,20 @@ export class OrDrawer {
 
   protected onDocumentKeydown(event: KeyboardEvent): void {
     if (event.key !== 'Escape' || !this.open()) return;
+    // A modal open on top owns Escape: it closes first, and the drawer stays open.
+    // `defaultPrevented` covers the modal's listener having run before this one.
+    if (event.defaultPrevented || this.modalOpen()) return;
     event.preventDefault();
     event.stopPropagation();
     this.open.set(false);
+  }
+
+  /** Another `aria-modal` dialog (not this drawer's panel) is in the document. */
+  private modalOpen(): boolean {
+    const panel = this.panel()?.nativeElement;
+    return Array.from(this.document.querySelectorAll<HTMLElement>('[aria-modal="true"]')).some(
+      (el) => el !== panel,
+    );
   }
 
   protected onDocumentFocusin(event: FocusEvent): void {

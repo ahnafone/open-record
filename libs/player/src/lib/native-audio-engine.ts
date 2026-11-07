@@ -220,13 +220,21 @@ export class NativeAudioEngine implements AudioEngine {
   }
 
   private init(): Promise<void> {
-    this.ready ??= (async () => {
-      await this.plugin.setOptions({ verbose: false });
-      await this.plugin.initialize();
-      this.handle = await this.plugin.addListener('status', ({ status }) =>
-        this.onStatus(status),
-      );
-    })();
+    if (!this.ready) {
+      const attempt: Promise<void> = (async () => {
+        await this.plugin.setOptions({ verbose: false });
+        await this.plugin.initialize();
+        this.handle = await this.plugin.addListener('status', ({ status }) =>
+          this.onStatus(status),
+        );
+      })().catch((err: unknown) => {
+        // Forget this failed attempt so a later load retries. A newer init
+        // (after destroy) may have replaced it; leave that one alone.
+        if (this.ready === attempt) this.ready = null;
+        throw err;
+      });
+      this.ready = attempt;
+    }
     return this.ready;
   }
 

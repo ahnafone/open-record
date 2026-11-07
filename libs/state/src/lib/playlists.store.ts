@@ -196,11 +196,20 @@ export class PlaylistsStore {
     }
   }
 
+  /** Remove every occurrence of a track id. */
   removeTrack(id: string, trackId: string): Promise<Playlist> {
     return this.mutate(id, (p) => ({
       ...p,
       trackIds: p.trackIds.filter((t) => t !== trackId),
     }));
+  }
+
+  /** Remove only the entry at a raw `trackIds` index (other occurrences of the id stay). */
+  removeTrackAt(id: string, index: number): Promise<Playlist> {
+    return this.mutate(id, (p) => {
+      if (index < 0 || index >= p.trackIds.length) return p;
+      return { ...p, trackIds: p.trackIds.filter((_, i) => i !== index) };
+    });
   }
 
   /** Move a track from one position to another. */

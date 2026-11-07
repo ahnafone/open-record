@@ -397,8 +397,11 @@ export class RemoteClient {
   }
 }
 
+/** Longest Retry-After wait trusted from the server; a bogus huge value must not stall the UI. */
+const MAX_RETRY_AFTER_SEC = 300;
+
 function retryAfterSec(raw: string | undefined): number | undefined {
   const sec = Number(raw);
-  return Number.isFinite(sec) && sec >= 0 ? sec : undefined;
+  return Number.isFinite(sec) && sec >= 0 ? Math.min(sec, MAX_RETRY_AFTER_SEC) : undefined;
 }
 

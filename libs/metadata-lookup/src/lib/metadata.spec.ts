@@ -1,5 +1,5 @@
 import { lookupMetadata } from './lookup';
-import { normalizeArtist, normalizeTitle } from './normalize';
+import { normalizeArtist, normalizeTitle, splitArtistTitle } from './normalize';
 import { pickBest } from './score';
 import type { MetadataFetch } from './providers';
 import type { MetadataMatch } from './types';
@@ -18,6 +18,20 @@ describe('metadata matching', () => {
     expect(normalizeTitle('Get Lucky ft. Pharrell Williams')).toBe('get lucky');
     expect(normalizeArtist('M83 - Topic')).toBe('m83');
     expect(normalizeArtist('M83VEVO')).toBe('m83');
+  });
+
+  it('does not treat upload noise after a dash as the song title', () => {
+    expect(splitArtistTitle('Midnight City - Official Video')).toEqual({ title: 'Midnight City - Official Video', artist: undefined });
+    expect(splitArtistTitle('M83 - Midnight City')).toEqual({ title: 'Midnight City', artist: 'M83' });
+    expect(normalizeTitle(splitArtistTitle('Midnight City - Official Video').title)).toBe('midnight city');
+  });
+
+  it('still splits when the right side is a plausible title that happens to be a noise word', () => {
+    expect(splitArtistTitle('Sia - Music')).toEqual({ title: 'Music', artist: 'Sia' });
+    expect(splitArtistTitle('Artist - Video')).toEqual({ title: 'Video', artist: 'Artist' });
+    expect(splitArtistTitle('Artist - Lyrics')).toEqual({ title: 'Lyrics', artist: 'Artist' });
+    expect(splitArtistTitle('Artist - Audio')).toEqual({ title: 'Audio', artist: 'Artist' });
+    expect(splitArtistTitle('Artist - Explicit')).toEqual({ title: 'Explicit', artist: 'Artist' });
   });
 
   it('picks the right candidate from a messy upload title', () => {

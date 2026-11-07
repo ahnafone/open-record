@@ -25,9 +25,11 @@ export const metadataFetch: MetadataFetch = async (url, init) => {
     readTimeout: NATIVE_TIMEOUT_MS,
   });
   const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? null);
+  const headers = Object.fromEntries(Object.entries(res.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
   return {
     ok: res.status >= 200 && res.status < 300,
     status: res.status,
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
     text: async () => body,
   };
 };

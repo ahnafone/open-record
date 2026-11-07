@@ -36,9 +36,12 @@ function toHiragana(ch: string): string {
 function romanizeKana(chars: string[], i: number): { text: string; next: number } | null {
   const h = toHiragana(chars[i]);
   if (h === 'っ') {
-    // Sokuon doubles the next consonant ("kk", "tch").
-    const rest = romanizeKana(chars, i + 1);
-    if (!rest || !/^[a-z]/.test(rest.text) || /^[aiueon]/.test(rest.text)) return { text: '', next: i + 1 };
+    // Sokuon doubles the next consonant ("kk", "tch"). A run of sokuon is
+    // skipped in a loop (not recursion) so a long run cannot overflow the stack.
+    let j = i + 1;
+    while (j < chars.length && toHiragana(chars[j]) === 'っ') j++;
+    const rest = j < chars.length ? romanizeKana(chars, j) : null;
+    if (!rest || !/^[a-z]/.test(rest.text) || /^[aiueon]/.test(rest.text)) return { text: '', next: j };
     const lead = rest.text.startsWith('ch') ? 't' : rest.text[0];
     return { text: lead + rest.text, next: rest.next };
   }

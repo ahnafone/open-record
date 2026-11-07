@@ -34,7 +34,10 @@ export type {
 } from './lib/storage-port';
 export { DocumentStorage } from './lib/document-storage';
 export { InMemoryBackend, createInMemoryStorage } from './lib/adapters/memory';
-export { createIndexedDbStorage } from './lib/adapters/indexeddb';
+export {
+  StorageUpgradedError,
+  createIndexedDbStorage,
+} from './lib/adapters/indexeddb';
 export { SqliteBackend, createSqliteStorage } from './lib/adapters/sqlite';
 export type { SqlConnection } from './lib/adapters/sqlite';
 export { createPlatformStorage, provideStorage } from './lib/provide-storage';
