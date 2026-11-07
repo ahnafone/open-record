@@ -17,6 +17,18 @@ import { SettingsStore } from './settings.store';
 /** Saves that download at once. */
 export const OFFLINE_CONCURRENCY = 2;
 
+/** A save with no progress for this long is abandoned (retryable failure) so its slot frees up. */
+export const SAVE_STALL_MS = 3 * 60_000;
+
+/**
+ * How long a retry waits for an abandoned (stalled) attempt of the same track to
+ * finish before it gives up and fails (retryable), instead of running alongside it.
+ */
+export const SETTLE_MAX_MS = 90_000;
+
+/** Failure text of a save abandoned as stalled (by the stall guard or the download watchdog). */
+export const STALLED_MESSAGE = 'The download stalled. It will be retried.';
+
 /** Wait when the server is busy / rate limited without a Retry-After hint. */
 export const BUSY_WAIT_MS = 20_000;
 /** Longest wait after a busy / rate-limited reply, whatever the hint says. */
@@ -78,6 +90,17 @@ export class OfflineStore {
   /** Why the last save of a track failed this session (see `failureKind`). */
   private readonly failKinds = new Map<string, 'systemic' | 'track'>();
 
+  /** Abandoned (stalled) attempts that may still be running, by track; settles once their file is removed. */
+  private readonly orphans = new Map<string, Promise<void>>();
+  /** Abandons the running attempt of each track as stalled (see `abandonStalled`). Returns false when it could not. */
+  private readonly stallHooks = new Map<string, () => boolean>();
+  /** Epoch ms of the last progress tick of each running save that has reported one. */
+  private readonly lastTick = new Map<string, number>();
+  /** Progress ticks received from running saves since launch (a monotonic activity count). */
+  private progressTicks = 0;
+  /** Saves that finished (were stored as saved) since launch. */
+  private savesFinished = 0;
+
   /**
    * Epoch ms until which no save starts because the server said it is busy or
    * rate limited (HTTP 503/429), or null. Saves that hit it stay queued.
@@ -125,6 +148,45 @@ export class OfflineStore {
     for (const id of this._jobs().keys())
       if (ids.has(id)) sum += progress.get(id) ?? 0;
     return sum;
+  }
+
+  /**
+   * Whether a running save has reported progress. Only such saves can be
+   * judged silent: saves without a content length never tick.
+   */
+  hasLiveProgress(): boolean {
+    const progress = this._progress();
+    for (const id of this._jobs().keys()) if (progress.has(id)) return true;
+    return false;
+  }
+
+  /** Progress ticks received so far: changes whenever a running save moves. */
+  progressCount(): number {
+    return this.progressTicks;
+  }
+
+  /** Saves finished since launch: only this moves the download watchdog's restart cap. */
+  finishedCount(): number {
+    return this.savesFinished;
+  }
+
+  /**
+   * Abandon the running saves that have reported progress and been silent for
+   * at least `silentForMs`, the same way the stall guard does: a retryable
+   * failure, and the orphan protection keeps a retry from sharing the old
+   * attempt's file. Saves that never ticked (no content length) are left alone,
+   * since silence cannot be judged for them. Returns the abandoned track ids.
+   * Used by the download watchdog.
+   */
+  abandonStalled(silentForMs: number): string[] {
+    const now = Date.now();
+    const abandoned: string[] = [];
+    for (const [trackId, abandonAttempt] of [...this.stallHooks]) {
+      const last = this.lastTick.get(trackId);
+      if (last === undefined || now - last < silentForMs) continue;
+      if (abandonAttempt()) abandoned.push(trackId);
+    }
+    return abandoned;
   }
 
   /** Reactive: the failure text when `status` is `failed`. */
@@ -328,22 +390,67 @@ export class OfflineStore {
     this.running.set(trackId, abort);
     this.setJob(trackId, 'saving');
     let sourceFile: string | undefined;
+    // A save whose progress stops (e.g. a socket that went silent in Doze) must
+    // not hold its slot forever: abandon it as a retryable failure. Armed only by
+    // progress ticks (none come without a content length, which the native
+    // socket timeouts cover instead), so slow-but-moving downloads are not cut.
+    let stalled = false;
+    // Set once the attempt has settled (won or lost): late ticks must not re-arm the timer.
+    let settled = false;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let abandon: (err: Error) => void = () => undefined;
+    const stallGuard = new Promise<never>((_, reject) => (abandon = reject));
+    // Nobody awaits the guard until the native attempt starts (a watchdog abandon can come earlier).
+    stallGuard.catch(() => undefined);
+    // Abandon this attempt as stalled. Also called by the download watchdog.
+    const abandonAttempt = (): boolean => {
+      if (settled || this.running.get(trackId) !== abort) return false; // done, cancelled or forgotten
+      stalled = true;
+      abort.abort();
+      abandon(new Error('The download stalled.'));
+      return true;
+    };
+    const armStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(abandonAttempt, SAVE_STALL_MS);
+    };
+    this.stallHooks.set(trackId, abandonAttempt);
+    let attempt: Promise<{ sourceFile: string; sizeBytes: number }> | undefined;
     try {
       const record = this.library.storedRecord(trackId);
       const url = record?.track.source?.url;
       if (!record || !url) throw new Error('This track has no download link.');
 
       await this.settings.ready();
-      const out = await resolver.saveToDevice(url, {
+      const orphanDone = await this.settle(trackId);
+      if (abort.signal.aborted) {
+        // Abandoned by the watchdog while waiting: nothing was started, so fail it here.
+        if (stalled) await this.failStalled(trackId);
+        return; // cancelled while waiting
+      }
+      if (!orphanDone) {
+        // The abandoned attempt is still running: never share its file. Fail retryably.
+        this.failKinds.set(trackId, 'systemic');
+        await this.fail(trackId, 'The previous download is still closing. It will be retried.');
+        return;
+      }
+      attempt = resolver.saveToDevice(url, {
         id: trackId,
         signal: abort.signal,
         quality: this.settings.downloadQuality(),
         location: this.downloadLocation(),
         onProgress: (fraction) => {
-          if (this.running.get(trackId) === abort)
+          if (!settled && this.running.get(trackId) === abort) {
+            this.progressTicks += 1;
+            this.lastTick.set(trackId, Date.now());
+            armStallTimer();
             this.setProgress(trackId, clamp(fraction));
+          }
         },
       });
+      const out = await Promise.race([attempt, stallGuard]);
+      settled = true;
+      clearTimeout(stallTimer);
       sourceFile = out.sourceFile;
       if (abort.signal.aborted) {
         await this.removeFile(trackId, sourceFile);
@@ -361,9 +468,31 @@ export class OfflineStore {
         importedAt: current.importedAt,
         status: 'saved',
       });
+      this.savesFinished += 1;
       this.clearJob(trackId);
       void this.enrich(trackId);
     } catch (err) {
+      settled = true;
+      clearTimeout(stallTimer);
+      if (stalled) {
+        if (attempt) {
+          // Abandoned by the stall guard or watchdog. The native attempt may still finish later:
+          // its file is removed once it settles, and the next try waits for that
+          // (see `settle`), so it can never clobber or be clobbered by a retry.
+          // The entry removes itself once the attempt really settles (never on a settle timeout).
+          const orphan: Promise<void> = attempt
+            .then(
+              (out) => this.removeFile(trackId, out.sourceFile),
+              () => undefined,
+            )
+            .finally(() => {
+              if (this.orphans.get(trackId) === orphan) this.orphans.delete(trackId);
+            });
+          this.orphans.set(trackId, orphan);
+        }
+        await this.failStalled(trackId);
+        return;
+      }
       if (abort.signal.aborted) {
         if (sourceFile) await this.removeFile(trackId, sourceFile);
         return; // cancel() or forget() already decided the outcome
@@ -382,12 +511,41 @@ export class OfflineStore {
         await this.fail(trackId, remoteErrorMessage(err));
       } else await this.fail(trackId, 'Cancelled.');
     } finally {
+      clearTimeout(stallTimer);
+      if (this.stallHooks.get(trackId) === abandonAttempt) {
+        this.stallHooks.delete(trackId);
+        this.lastTick.delete(trackId);
+      }
       if (this.running.get(trackId) === abort) {
         this.running.delete(trackId);
         this.clearJob(trackId);
       }
       this.pump();
     }
+  }
+
+  /** Fail an abandoned attempt as retryable. Systemic: repeated stalls usually mean the network is gone, so the auto-download run can pause. */
+  private async failStalled(trackId: string): Promise<void> {
+    this.failKinds.set(trackId, 'systemic');
+    await this.fail(trackId, STALLED_MESSAGE);
+  }
+
+  /**
+   * Wait (up to `SETTLE_MAX_MS`) for an abandoned attempt of this track to finish,
+   * so a retry never shares its file. Resolves false on timeout: the caller must
+   * not start a native attempt. The orphan entry stays until the attempt really
+   * settles (it removes itself then), so later retries keep waiting.
+   */
+  private async settle(trackId: string): Promise<boolean> {
+    const orphan = this.orphans.get(trackId);
+    if (!orphan) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), SETTLE_MAX_MS);
+    });
+    const done = await Promise.race([orphan.then(() => true), timedOut]);
+    clearTimeout(timer);
+    return done;
   }
 
   /** Hold every new save until the server's Retry-After (capped) has passed. */

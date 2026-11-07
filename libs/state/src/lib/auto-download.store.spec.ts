@@ -3,6 +3,7 @@ import {
   AutoDownloadBreaker,
   MAX_SYSTEMIC_STREAK,
   autoDownloadAllowed,
+  isDownloadSessionActive,
   nextAutoDownload,
   type AutoDownloadInfo,
 } from './auto-download.store';
@@ -60,6 +61,31 @@ describe('auto-download gating', () => {
     expect(breaker.retryDelayMs()).toBeGreaterThan(0);
     breaker.reset();
     expect(breaker.paused).toBe(false);
+  });
+});
+
+describe('download progress session', () => {
+  it('stays active from one auto-save to the next and ends with the run', () => {
+    // Song 1 queued and saving.
+    expect(
+      isDownloadSessionActive({ downloading: 1, runActive: true, runTrackInSet: true, pending: 1 }),
+    ).toBe(true);
+    // Song 1 saved, song 2 not queued yet: the gap that used to hide the bar.
+    expect(
+      isDownloadSessionActive({ downloading: 0, runActive: true, runTrackInSet: true, pending: 1 }),
+    ).toBe(true);
+    // Song 2 queued.
+    expect(
+      isDownloadSessionActive({ downloading: 1, runActive: true, runTrackInSet: true, pending: 0 }),
+    ).toBe(true);
+    // Run finished, nothing queued: hides.
+    expect(
+      isDownloadSessionActive({ downloading: 0, runActive: false, runTrackInSet: false, pending: 0 }),
+    ).toBe(false);
+    // Run paused with tracks left: hides.
+    expect(
+      isDownloadSessionActive({ downloading: 0, runActive: false, runTrackInSet: false, pending: 3 }),
+    ).toBe(false);
   });
 });
 

@@ -1,4 +1,5 @@
 import {
+  DOCUMENT,
   DestroyRef,
   Injectable,
   computed,
@@ -12,12 +13,18 @@ import type { Track } from '@open-record/models';
 import { LibraryStore } from './library.store';
 import {
   OfflineStore,
+  STALLED_MESSAGE,
   WAITING_FOR_WIFI,
   isSavable,
   type OfflineStatus,
 } from './offline.store';
 import { PlaylistsStore } from './playlists.store';
 import { BackgroundWorkHold } from './background-work';
+import {
+  DownloadWatchdog,
+  WATCHDOG_STALL_MS,
+  WATCHDOG_STALLED_REASON,
+} from './download-watchdog';
 import {
   BackgroundWorkPort,
   NetworkStatusPort,
@@ -96,6 +103,11 @@ export class AutoDownloadBreaker {
     return Math.min(MAX_PAUSE_RETRY_MS, PAUSE_RETRY_MS * 2 ** (this.pauses - 1));
   }
 
+  /** Pause for `reason` with no retry scheduled (the download watchdog gave up). */
+  pauseFor(reason: string): void {
+    this.reason = reason;
+  }
+
   /** Clear the streaks and the pause (the retry backoff is kept). */
   reset(): void {
     this.systemic = 0;
@@ -139,6 +151,24 @@ export function nextAutoDownload(
   return undefined;
 }
 
+/**
+ * Whether a download progress bar for a set of tracks stays up. True while
+ * anything in the set is queued or saving, and also between two auto-saves of
+ * one run: the finished song is already saved and the next is not queued yet.
+ * `runTrackInSet` is whether the run's current track is in the set; `pending`
+ * counts wanted tracks in the set that the run has yet to attempt. False once
+ * the run has ended or paused.
+ */
+export function isDownloadSessionActive(input: {
+  downloading: number;
+  runActive: boolean;
+  runTrackInSet: boolean;
+  pending: number;
+}): boolean {
+  if (input.downloading > 0) return true;
+  return input.runActive && (input.runTrackInSet || input.pending > 0);
+}
+
 /** Live download state for a set of tracks (see `AutoDownloadStore.progressFor`). */
 export interface DownloadProgress {
   /** Tracks that are, or can be, kept on the device. */
@@ -150,7 +180,10 @@ export interface DownloadProgress {
   failed: number;
   /** 0-1: saved plus the partial progress of running saves, over `total`. */
   fraction: number;
-  /** Something is downloading (show the progress; hide when false). */
+  /**
+   * A download session is running for the set (see `DownloadCounts.active`):
+   * show the progress; hide when false.
+   */
   active: boolean;
 }
 
@@ -160,6 +193,13 @@ export interface DownloadCounts {
   saved: number;
   downloading: number;
   failed: number;
+  /**
+   * A download session is running for the set: something is queued or saving,
+   * or an auto-download run is in progress with tracks in the set left to go.
+   * Stays true between one song and the next, so a progress bar keyed on it
+   * does not unmount mid-session.
+   */
+  active: boolean;
   /** `ids` as a set. */
   set: ReadonlySet<string>;
 }
@@ -194,6 +234,8 @@ export class AutoDownloadStore {
   /** An `ensureSaved` call is still writing its record. */
   private readonly _starting = signal(false);
   private readonly attempted = new Set<string>();
+  /** Bumped on every change to `attempted`, so reads of it stay reactive. */
+  private readonly _attempts = signal(0);
   /** The auto-save in progress (queued or saving in OfflineStore). */
   private active: string | null = null;
   /**
@@ -207,8 +249,23 @@ export class AutoDownloadStore {
   private readonly _pauseReason = signal<string | null>(null);
   /** Bumped to re-run the download loop after a reset. */
   private readonly _kick = signal(0);
+  /** The current pause came from stalled saves (the watchdog may lift it). */
+  private readonly _stallPaused = signal(false);
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe?: () => void;
+  /** Keeps the foreground hold in step with `downloadsLeft`. */
+  private hold: BackgroundWorkHold | undefined;
+  /**
+   * Notices downloads that stopped moving (screen off, throttled JS) and
+   * restarts them. Only runs while downloads are wanted.
+   */
+  private readonly watchdog = new DownloadWatchdog({
+    wanted: () => this.stallWatchWanted(),
+    marker: () => this.progressMarker(),
+    completed: () => this.offline.finishedCount(),
+    restart: () => this.restartStalled(),
+    giveUp: () => this.giveUpStalled(),
+  });
 
   /** Why auto-download is paused (e.g. server unreachable), or null while it runs. */
   readonly pauseReason = this._pauseReason.asReadonly();
@@ -240,7 +297,7 @@ export class AutoDownloadStore {
    * have no stored copy are left out.
    */
   progressFor(ids: readonly string[]): DownloadProgress {
-    const { total, saved, downloading, failed, set } = this.countsFor(ids);
+    const { total, saved, downloading, failed, active, set } = this.countsFor(ids);
     // Only this part follows progress ticks, and it is O(live saves).
     const partial = downloading ? this.offline.liveProgressOf(set) : 0;
     return {
@@ -249,7 +306,7 @@ export class AutoDownloadStore {
       downloading,
       failed,
       fraction: total ? Math.min(1, (saved + partial) / total) : 0,
-      active: downloading > 0,
+      active,
     };
   }
 
@@ -269,23 +326,36 @@ export class AutoDownloadStore {
     let counts = this.counts.get(ids);
     if (!counts) {
       counts = computed(() => {
+        // `attempted` is read through this version so 'pending' follows it.
+        this._attempts();
         const set = new Set(ids);
+        // Read only while a run is going: the wanted tracks it still has to attempt.
+        const runId = this._activeId();
+        const wanted = runId !== null ? new Set(this.wanted()) : null;
         let total = 0;
         let saved = 0;
         let downloading = 0;
         let failed = 0;
+        let pending = 0;
         for (const id of set) {
           const status = this.offline.status(id);
           if (status === undefined) {
             const track = this.library.track(id);
             if (!track || !isSavable(track)) continue;
+            if (wanted?.has(id) && !this.attempted.has(id)) pending += 1;
           }
           total += 1;
           if (status === 'saved') saved += 1;
           else if (status === 'failed') failed += 1;
           else if (status === 'queued' || status === 'saving') downloading += 1;
         }
-        return { total, saved, downloading, failed, set };
+        const active = isDownloadSessionActive({
+          downloading,
+          runActive: runId !== null,
+          runTrackInSet: runId !== null && set.has(runId),
+          pending,
+        });
+        return { total, saved, downloading, failed, active, set };
       });
       this.counts.set(ids, counts);
     }
@@ -335,19 +405,45 @@ export class AutoDownloadStore {
 
   /**
    * Try failed tracks again and lift a pause (Settings "Retry failed
-   * downloads"; also run when a switch turns on or the network changes).
+   * downloads", and a switch turned on). A user retry re-arms the download
+   * watchdog: its restart cap starts fresh.
    */
   retryFailed(): void {
+    this.watchdog.rearm();
+    this.resume();
+  }
+
+  /**
+   * Try failed tracks again and lift the pause, without resetting the
+   * watchdog's restart cap (network change, retry timer, watchdog restart).
+   */
+  private resume(): void {
     for (const id of [...this.attempted]) {
       if (id === this.active) continue;
       if (isRetryableFailure(this.offline.status(id), this.offline.error(id)))
-        this.attempted.delete(id);
+        this.forgetAttempt(id);
     }
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.breaker.reset();
     this._pauseReason.set(null);
+    this._stallPaused.set(false);
+    this.watchdog.reenable();
     this._kick.update((n) => n + 1);
+  }
+
+  /** Let a track be tried again by the run. */
+  private forgetAttempt(trackId: string): void {
+    this.attempted.delete(trackId);
+    this._attempts.update((n) => n + 1);
+  }
+
+  /**
+   * The app came back to the foreground (Capacitor `resume`, or the page
+   * becoming visible): judge download progress soon, and restart if it stalled.
+   */
+  onResume(): void {
+    this.watchdog.resumed();
   }
 
   /** Auto-downloads are on somewhere but paused by the connection. */
@@ -373,14 +469,16 @@ export class AutoDownloadStore {
           if (!allowed) untracked(() => this.offline.defer(active));
           else return;
         }
-        if (!allowed) this.attempted.delete(active);
+        if (!allowed) this.forgetAttempt(active);
         else if (status === 'saved') this.breaker.record('saved');
         else if (status === 'failed') {
           const error = this.offline.error(active);
           if (isRetryableFailure(status, error)) {
             const kind = this.offline.failureKind(active) ?? 'track';
-            if (this.breaker.record(kind, error))
+            if (this.breaker.record(kind, error)) {
+              this._stallPaused.set(error === STALLED_MESSAGE);
               untracked(() => this.onPaused());
+            }
           }
         }
         this.active = null;
@@ -417,17 +515,77 @@ export class AutoDownloadStore {
     // Keep downloading with the screen off (Android foreground service):
     // held while anything downloads, released when idle or paused.
     const backgroundWork = this.backgroundWork;
-    let hold: BackgroundWorkHold | undefined;
     if (backgroundWork) {
-      hold = new BackgroundWorkHold(backgroundWork);
-      effect(() => hold?.sync(this.downloadsLeft()));
+      this.hold = new BackgroundWorkHold(backgroundWork);
+      effect(() => this.hold?.sync(this.downloadsLeft()));
     }
+
+    // The watchdog runs only while downloads are wanted (see `stallWatchWanted`).
+    effect(() => {
+      const wanted = this.stallWatchWanted();
+      untracked(() => (wanted ? this.watchdog.start() : this.watchdog.stop()));
+    });
+
+    // Foreground again (the page became visible): judge progress soon.
+    const doc = inject(DOCUMENT);
+    const onVisible = () => {
+      if (doc.visibilityState === 'visible') this.onResume();
+    };
+    doc.addEventListener('visibilitychange', onVisible);
 
     inject(DestroyRef).onDestroy(() => {
       clearTimeout(this.retryTimer);
+      this.watchdog.stop();
+      doc.removeEventListener('visibilitychange', onVisible);
       this.unsubscribe?.();
-      hold?.sync(0);
+      this.hold?.sync(0);
     });
+  }
+
+  /**
+   * Whether the download watchdog should run: downloads are wanted and the
+   * connection allows them now, not busy-backed-off, and the run is either
+   * working or paused by stalled saves (the watchdog's own pause).
+   */
+  private stallWatchWanted(): boolean {
+    return (
+      this._started() &&
+      this.wanted().length > 0 &&
+      this.allowed() &&
+      this.offline.busyUntil() === null &&
+      (this.downloadsLeft() > 0 || this._stallPaused())
+    );
+  }
+
+  /**
+   * Activity marker for the watchdog: the saved count and the progress ticks
+   * received. Null when no running save has reported progress (nothing to judge).
+   */
+  private progressMarker(): string | null {
+    if (!this.offline.hasLiveProgress()) return null;
+    return `${this.progress().saved}/${this.offline.progressCount()}`;
+  }
+
+  /** Watchdog restart: abort the silent saves, lift the pause, kick the run, re-assert the hold. */
+  private restartStalled(): void {
+    // Only saves that reported progress and went silent are abandoned.
+    const abandoned = this.offline.abandonStalled(WATCHDOG_STALL_MS);
+    // Abandoned tracks are retried, not treated as attempted (their failure lands later).
+    for (const id of abandoned) this.forgetAttempt(id);
+    this.resume();
+    // Stop then start: the native foreground service is re-asserted even if JS thought it was held.
+    this.hold?.sync(0);
+    this.hold?.sync(this.downloadsLeft());
+  }
+
+  /** Watchdog gave up after repeated restarts without progress: stop, abandon the silent saves, and say so. */
+  private giveUpStalled(): void {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.breaker.pauseFor(WATCHDOG_STALLED_REASON);
+    this._stallPaused.set(true);
+    this._pauseReason.set(WATCHDOG_STALLED_REASON);
+    this.offline.abandonStalled(WATCHDOG_STALL_MS);
   }
 
   /** Start watching the connection and the wanted tracks. Safe to call twice. */
@@ -443,7 +601,7 @@ export class AutoDownloadStore {
           s.connected &&
           (!before.connected || before.connectionType !== s.connectionType)
         )
-          this.retryFailed();
+          untracked(() => this.resume());
       });
       try {
         this._network.set(await this.network.current());
@@ -465,7 +623,7 @@ export class AutoDownloadStore {
     const delay = this.breaker.retryDelayMs();
     clearTimeout(this.retryTimer);
     this.retryTimer =
-      delay === null ? undefined : setTimeout(() => this.retryFailed(), delay);
+      delay === null ? undefined : setTimeout(() => this.resume(), delay);
   }
 
   private begin(trackId: string): void {
@@ -473,6 +631,7 @@ export class AutoDownloadStore {
       this.library.storedRecord(trackId)?.track ?? this.library.track(trackId);
     if (!track) return;
     this.attempted.add(trackId);
+    this._attempts.update((n) => n + 1);
     this.active = trackId;
     this._activeId.set(trackId);
     this._starting.set(true);

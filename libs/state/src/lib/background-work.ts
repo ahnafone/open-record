@@ -17,7 +17,7 @@ export class BackgroundWorkHold {
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly port: BackgroundWorkPort,
+    private readonly port: Pick<BackgroundWorkPort, 'start' | 'update' | 'stop'>,
     private readonly title = 'Open Record',
   ) {}
 

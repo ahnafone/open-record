@@ -13,6 +13,7 @@ import { Router, RouterLink } from '@angular/router';
 import type { Playlist, Track } from '@open-record/models';
 import {
   AutoDownloadStore,
+  BatteryExemptionStore,
   LibraryStore,
   PlayerStore,
   PlaylistsStore,
@@ -35,6 +36,7 @@ import {
   OrFilterField,
   OrIcon,
   OrLoadMore,
+  OrDialog,
   OrModal,
   OrSectionHead,
   OrSwitch,
@@ -570,13 +572,16 @@ export class LibraryPage {
   protected readonly player = inject(PlayerStore);
   protected readonly settings = inject(SettingsStore);
   protected readonly autoDownload = inject(AutoDownloadStore);
+  private readonly batteryExemption = inject(BatteryExemptionStore);
+  private readonly dialog = inject(OrDialog);
   /**
-   * Download counts for saved records; null when nothing is downloading.
+   * Download counts for saved records; null when no download session is
+   * running. Stays set between songs, so the bar does not remount mid-run.
    * Status-only, so progress ticks do not re-check the whole list.
    */
   protected readonly libraryProgress = computed(() => {
     const c = this.autoDownload.countsFor(this.library.savedIds());
-    return c.downloading ? c : null;
+    return c.active ? c : null;
   });
   /** Live 0-1 fraction, read only by the progress bar. */
   protected readonly libraryFraction = computed(
@@ -725,12 +730,30 @@ export class LibraryPage {
     return `${n} record${n === 1 ? '' : 's'}`;
   }
 
+  /** The battery prompt (and its system dialog) is open: a second switch-on must not stack another. */
+  private batteryPromptOpen = false;
+
   protected async setAutoDownload(on: boolean): Promise<void> {
     try {
+      // Persist first: the switch never waits on the battery prompt or system dialog.
       await this.settings.setAutoDownload({ library: on });
     } catch {
       this.toast.show('Could not change auto-download. Try again.');
+      return;
     }
+    if (on) this.offerBatteryExemption();
+  }
+
+  /** Fire-and-forget: the battery prompt runs after the switch is saved and never throws. */
+  private offerBatteryExemption(): void {
+    if (this.batteryPromptOpen) return;
+    this.batteryPromptOpen = true;
+    void this.batteryExemption
+      .offerOnSwitchOn((o) => this.dialog.confirm(o))
+      .catch(() => undefined)
+      .finally(() => {
+        this.batteryPromptOpen = false;
+      });
   }
 
   protected play(track: Track, context: readonly Track[]): void {

@@ -437,6 +437,20 @@ export abstract class BackgroundWorkPort {
   abstract update(options: { text: string }): Promise<void>;
   /** Release the hold and remove the notification. */
   abstract stop(): Promise<void>;
+  /**
+   * Whether Android exempts the app from battery optimization (Doze otherwise
+   * cuts its network with the screen off). Null when the platform cannot say.
+   */
+  isIgnoringBatteryOptimizations(): Promise<boolean | null> {
+    return Promise.resolve(null);
+  }
+  /**
+   * Open the system "don't optimize" dialog for the app; resolves with the
+   * exemption once it closes. Null when the platform has no such dialog.
+   */
+  requestIgnoreBatteryOptimizations(): Promise<boolean | null> {
+    return Promise.resolve(null);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ import { filter, map, take } from 'rxjs';
 import { Capacitor } from '@capacitor/core';
 import {
   AuthStore,
+  AutoDownloadStore,
   LibraryStore,
   PlayerStore,
   PlaylistsStore,
@@ -113,6 +114,7 @@ export class App {
   private readonly auth = inject(AuthStore);
   private readonly toast = inject(OrToast);
   private readonly sourceFix = inject(SourceFixService);
+  private readonly autoDownload = inject(AutoDownloadStore);
 
   /** Last surfaced local playback failure, so one error toasts once. */
   private lastPlaybackError = '';
@@ -274,6 +276,12 @@ export class App {
         CapApp.addListener('backButton', () => this.onHardwareBack(CapApp)),
       );
       this.destroyRef.onDestroy(() => void handle.then((h) => h.remove()));
+
+      // Back in the foreground: downloads that stalled while the screen was off restart.
+      const resumeHandle = import('@capacitor/app').then(({ App: CapApp }) =>
+        CapApp.addListener('resume', () => this.autoDownload.onResume()),
+      );
+      this.destroyRef.onDestroy(() => void resumeHandle.then((h) => h.remove()));
     }
 
     effect(() => {

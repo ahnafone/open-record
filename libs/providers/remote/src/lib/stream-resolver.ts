@@ -7,6 +7,10 @@ import { AbortedError, HttpError, NetworkError, RemoteConfigError } from './erro
 /** Folder (in the app data directory) that holds saved audio; same as the local provider's. */
 export const SAVED_DIR = 'imported';
 
+/** Native download: give up on a connection that sends nothing for this long (Android only). */
+const NATIVE_DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000;
+const NATIVE_DOWNLOAD_READ_TIMEOUT_MS = 60_000;
+
 export interface StreamMeta {
   title: string;
   artist: string;
@@ -240,7 +244,18 @@ export class RemoteStreamResolver {
     try {
       // downloadFile does not create the folder on Android (ENOENT), whatever `recursive` says.
       await Filesystem.mkdir({ path: SAVED_DIR, directory, recursive: true }).catch(() => undefined);
-      await Filesystem.downloadFile({ url, headers, path, directory, recursive: true, progress: !!opts.onProgress });
+      // Timeouts (native, not in the TS type): a socket that goes silent with the
+      // screen off (Doze) errors out and frees the save slot instead of hanging forever.
+      await Filesystem.downloadFile({
+        url,
+        headers,
+        path,
+        directory,
+        recursive: true,
+        progress: !!opts.onProgress,
+        connectTimeout: NATIVE_DOWNLOAD_CONNECT_TIMEOUT_MS,
+        readTimeout: NATIVE_DOWNLOAD_READ_TIMEOUT_MS,
+      } as Parameters<typeof Filesystem.downloadFile>[0]);
     } catch (err) {
       await this.removeNative(path, directory);
       throw downloadError(err);

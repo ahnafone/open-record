@@ -10,6 +10,8 @@ interface BackgroundWorkPlugin {
   start(options: { title: string; text: string }): Promise<void>;
   update(options: { text: string }): Promise<void>;
   stop(): Promise<void>;
+  isIgnoringBatteryOptimizations(): Promise<{ ignoring: boolean }>;
+  requestIgnoreBatteryOptimizations(): Promise<{ ignoring: boolean }>;
 }
 
 /** `NotificationPermissionPlugin.java`: POST_NOTIFICATIONS on Android 13+. */
@@ -49,6 +51,25 @@ class AndroidBackgroundWork extends BackgroundWorkPort {
       await this.native.start(options);
     } catch {
       // Android refused (e.g. started from the background): downloads still run while open.
+    }
+  }
+
+  override async isIgnoringBatteryOptimizations(): Promise<boolean | null> {
+    try {
+      const { ignoring } = await this.native.isIgnoringBatteryOptimizations();
+      return ignoring;
+    } catch {
+      // Unavailable on this build: treat as unknown.
+      return null;
+    }
+  }
+
+  override async requestIgnoreBatteryOptimizations(): Promise<boolean | null> {
+    try {
+      const { ignoring } = await this.native.requestIgnoreBatteryOptimizations();
+      return ignoring;
+    } catch {
+      return null;
     }
   }
 

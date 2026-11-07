@@ -1,12 +1,19 @@
 package app.openrecord;
 
 import android.app.NotificationManager;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
+import android.os.PowerManager;
+import android.provider.Settings;
+import androidx.activity.result.ActivityResult;
 import androidx.core.content.ContextCompat;
+import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 /**
@@ -74,6 +81,48 @@ public class BackgroundWorkPlugin extends Plugin {
             }
         }
         call.resolve();
+    }
+
+    /** `{ ignoring }`: the app is exempt from battery optimization (Doze cuts its network otherwise). */
+    @PluginMethod
+    public void isIgnoringBatteryOptimizations(PluginCall call) {
+        call.resolve(batteryResult(isExempt()));
+    }
+
+    /**
+     * Opens the system "Don't optimize" dialog for this app (no new UI). Resolves
+     * with `{ ignoring }` once the dialog closes; the JS side asks only once.
+     */
+    @PluginMethod
+    public void requestIgnoreBatteryOptimizations(PluginCall call) {
+        if (isExempt()) {
+            call.resolve(batteryResult(true));
+            return;
+        }
+        Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:" + getContext().getPackageName()));
+        try {
+            startActivityForResult(call, intent, "onBatteryOptimizationResult");
+        } catch (ActivityNotFoundException e) {
+            call.resolve(batteryResult(false));
+        }
+    }
+
+    @ActivityCallback
+    private void onBatteryOptimizationResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        call.resolve(batteryResult(isExempt()));
+    }
+
+    private boolean isExempt() {
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+    }
+
+    private static JSObject batteryResult(boolean ignoring) {
+        JSObject result = new JSObject();
+        result.put("ignoring", ignoring);
+        return result;
     }
 
     @PluginMethod

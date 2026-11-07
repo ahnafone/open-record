@@ -24,5 +24,6 @@ export * from './lib/curated.store';
 export * from './lib/preview-player.service';
 export * from './lib/import-sessions.store';
 export * from './lib/background-work';
+export * from './lib/battery-exemption.store';
 export * from './lib/track-art';
 export * from './lib/queue-window';

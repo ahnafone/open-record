@@ -79,6 +79,8 @@ export const SETTINGS_KEYS = {
   deviceName: 'deviceName',
   /** `{ session, cast }` switches (no migration: new key, absent = both on). */
   sessionPrefs: 'sessionPrefs',
+  /** Epoch ms of the last "Not now" to the battery-optimization prompt (no migration: absent = never declined). */
+  batteryPromptDeclinedAt: 'batteryPromptDeclinedAt',
 } as const;
 
 /** Removed setting (online metadata lookups); only migrations reference it. */

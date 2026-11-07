@@ -144,7 +144,12 @@ interface UpNextRow {
         <or-seek-row [disabled]="controlsBlocked()" />
       }
 
-      <div class="status" aria-live="polite">
+      <!-- Stays in the DOM (aria-live) but takes no space while empty. -->
+      <div
+        class="status"
+        [class.is-empty]="!statusShown()"
+        aria-live="polite"
+      >
         @if (player.isLoading() && player.retrying()) {
           <span class="status-text"
             ><or-spinner [size]="18" />Reconnecting…</span
@@ -444,8 +449,16 @@ interface UpNextRow {
       flex-wrap: wrap;
       align-items: center;
       gap: var(--spacing-xs) var(--spacing-sm);
+      /* 44px touch height only while a message (and its buttons) shows. */
       min-block-size: var(--spacing-touch);
       margin: var(--spacing-xxs) 0;
+    }
+    /* Phone only: desktop keeps its reserved status line. */
+    @media (max-width: 899px) {
+      .status.is-empty {
+        min-block-size: 0;
+        margin: 0;
+      }
     }
     .status-text,
     .status-bad {
@@ -640,6 +653,20 @@ export class NowPlayingPage {
 
   protected readonly reconnecting = computed(
     () => this.session.connection() === 'retrying',
+  );
+
+  /**
+   * Whether the status line has a message to show. Mirrors the branches of the
+   * `.status` template so the empty line can collapse (no reserved gap).
+   */
+  protected readonly statusShown = computed(
+    () =>
+      this.player.isLoading() ||
+      !!this.player.error() ||
+      this.reconnecting() ||
+      this.staleTarget() ||
+      this.session.needsGesture() ||
+      this.session.mirroring(),
   );
 
   /** A terminal local playback failure for the current record. */

@@ -345,7 +345,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       (checkedChange)="setMobileData($event)"
     />
     @if (autoDownload.countsFor(autoDownload.wanted()); as p) {
-      @if (p.downloading) {
+      @if (p.active) {
         <or-download-progress
           label="Auto-download progress"
           [saved]="p.saved"
