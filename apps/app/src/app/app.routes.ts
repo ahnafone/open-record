@@ -1,6 +1,7 @@
 import { EnvironmentInjector, inject, runInInjectionContext } from '@angular/core';
 import { type CanActivateFn, Route, Router, type UrlTree } from '@angular/router';
 import { AuthStore } from '@open-record/state';
+import { requireWebAccount } from './web-account.guard';
 
 /** Lazy wrapper: the admin lib (and its guard) load only when /admin is visited. */
 const adminGuard: CanActivateFn = async (route, state) => {
@@ -57,6 +58,7 @@ export const appRoutes: Route[] = [
     path: 'library',
     title: 'Library · Open Record',
     data: { screen: 'library', root: true } satisfies ScreenData,
+    canActivate: [requireWebAccount],
     loadComponent: () =>
       import('@open-record/features/library').then((m) => m.LibraryPage),
   },
@@ -68,6 +70,7 @@ export const appRoutes: Route[] = [
       root: false,
       title: 'Playlist',
     } satisfies ScreenData,
+    canActivate: [requireWebAccount],
     loadComponent: () =>
       import('@open-record/features/playlist').then((m) => m.PlaylistPage),
   },

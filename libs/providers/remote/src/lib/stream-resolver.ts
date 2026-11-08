@@ -115,7 +115,8 @@ export class RemoteStreamResolver {
     signal?: AbortSignal,
     quality?: AudioQuality,
   ): Promise<{ url: string; mimeType?: string; expiresAt?: number; headers?: Record<string, string>; meta?: StreamMeta }> {
-    const stream = await this.options.client().streamUrl(pageUrl, signal, quality);
+    // Playback is the guest-capable path (`/stream`); a signed-out listener may stream.
+    const stream = await this.options.client().streamUrl(pageUrl, signal, quality, true);
     const link: StreamLink = { url: stream.url, meta: { ...stream.track, artworkUrl: stream.track.thumbnailUrl } };
     if (stream.mimeType) link.mimeType = stream.mimeType;
     if (stream.httpHeaders) link.headers = stream.httpHeaders;

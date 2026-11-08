@@ -23,10 +23,16 @@ export function remoteErrorMessage(error: unknown): string {
       return 'Cancelled.';
     case 'busy': {
       const sec = busyRetryAfterSec(error);
-      return sec
-        ? `Server is busy, try again in ${Math.ceil(sec)}s.`
-        : 'Server is busy, try again in a moment.';
+      const wait = sec ? `try again in ${Math.ceil(sec)}s` : 'try again in a moment';
+      // The guest share of the server's yt-dlp slots is full (503 guest_busy).
+      if ((error as { code?: unknown }).code === 'guest_busy')
+        return `Guest streaming is busy right now, ${wait}. Sign in to keep going.`;
+      return `Server is busy, ${wait}.`;
     }
+    case 'guest_limit':
+      return 'Guest limit reached. Sign in or request access to keep going.';
+    case 'guest_host_not_allowed':
+      return 'Guests can only play links from YouTube, SoundCloud and Bandcamp. Sign in to continue.';
     case 'HttpError':
       return message
         ? `Server error: ${message}`

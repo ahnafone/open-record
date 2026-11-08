@@ -36,6 +36,7 @@ import {
   SettingsStore,
   StreamResolverPort,
   SyncPort,
+  WEB_BUILD,
   isBusy,
   provideState,
   remoteErrorMessage,
@@ -76,6 +77,88 @@ let settingsReady!: () => void;
 const settingsAssigned = new Promise<void>((resolve) => (settingsReady = resolve));
 /** Set at app start; opens the sign-in prompt when the server rejects a call. */
 let auth: AuthStore | undefined;
+
+/** The web build: neither the Capacitor native app nor the desktop app. */
+const webBuild = !Capacitor.isNativePlatform() && getDesktopBridge() === null;
+/**
+ * The server offers guest streaming (its `GET /app-config`), as read for one
+ * server URL. Only trusted while `url` is still the saved server.
+ */
+let guestStreaming: { url: string; on: boolean; failed: boolean } = { url: '', on: false, failed: false };
+/** Latest-wins counter: an older app-config response never overwrites a newer one. */
+let guestStreamingRun = 0;
+/** Reads in flight: a guest call starts a re-read only when none is pending. */
+let guestStreamingReads = 0;
+/** The one delayed retry after a failed read (cleared by any newer read). */
+let guestStreamingRetry: ReturnType<typeof setTimeout> | undefined;
+/** Wait before the single automatic retry of a failed app-config read. */
+const GUEST_STREAMING_RETRY_MS = 3_000;
+
+/**
+ * Reads `guestStreaming` from the server's app-config (web build only; off on
+ * any failure). Called on a server change, when a guest call is rejected, and
+ * on a guest call after a failed read. A transient failure is retried once
+ * after a short delay; `retry` is false for that retry itself.
+ */
+async function refreshGuestStreaming(serverUrl: string, retry = true): Promise<void> {
+  const run = ++guestStreamingRun;
+  clearTimeout(guestStreamingRetry);
+  guestStreamingRetry = undefined;
+  let on = false;
+  let failed = false;
+  if (webBuild && serverUrl) {
+    guestStreamingReads++;
+    try {
+      const res = await createDefaultTransport().request({
+        method: 'GET',
+        url: `${serverUrl.replace(/\/+$/, '')}/app-config`,
+        headers: { accept: 'application/json' },
+        timeoutMs: 10_000,
+      });
+      if (res.status >= 200 && res.status < 300) {
+        on = (res.data as { guestStreaming?: unknown } | null)?.guestStreaming === true;
+      } else {
+        failed = true;
+      }
+    } catch {
+      failed = true;
+    } finally {
+      guestStreamingReads--;
+    }
+  }
+  if (run !== guestStreamingRun) return;
+  guestStreaming = { url: serverUrl, on, failed };
+  if (failed && retry && webBuild && serverUrl) {
+    guestStreamingRetry = setTimeout(() => void refreshGuestStreaming(serverUrl, false), GUEST_STREAMING_RETRY_MS);
+  }
+}
+
+/**
+ * Signed-out guest streaming: web build, talking to the public server, and
+ * the flag was read for the saved server URL and that server allows guests.
+ * After a failed read for this server, the call starts one fresh read (it
+ * answers `false` now and the next guest call uses the result).
+ */
+function guestStreamingAllowed(): boolean {
+  const url = settings?.downloadServerUrl();
+  const allowed =
+    webBuild &&
+    settings?.connectionMode() === 'public' &&
+    guestStreaming.on &&
+    guestStreaming.url === url;
+  if (
+    webBuild &&
+    settings?.connectionMode() === 'public' &&
+    guestStreaming.failed &&
+    guestStreaming.url === url &&
+    url &&
+    guestStreamingReads === 0 &&
+    guestStreamingRetry === undefined
+  ) {
+    void refreshGuestStreaming(url, false);
+  }
+  return allowed;
+}
 
 /**
  * Accounts: the build constant, else the project the download server offers
@@ -135,6 +218,11 @@ const remote = new RemoteProvider({
   streamQuality: () => settings?.streamQuality(),
   accessToken: () => supabase.accessToken(),
   onUnauthorized: () => auth?.promptSignIn('Sign in to search and play from the download server.'),
+  guestStreaming: guestStreamingAllowed,
+  // A session is known (even with a failed refresh): never a guest.
+  signedIn: () => auth?.signedIn() === true,
+  // A guest was rejected: the server may have turned guests off, so re-read the flag.
+  onGuestRejected: () => void refreshGuestStreaming(settings?.downloadServerUrl() ?? ''),
   lookupArtist: lookupRemoteArtist,
 });
 sources.register(remote);
@@ -201,6 +289,7 @@ export const appConfig: ApplicationConfig = {
         if (!store.hydrated()) return;
         const url = store.downloadServerUrl();
         if (lastUrl !== undefined && url !== lastUrl) void accounts.refresh();
+        if (url !== lastUrl) void refreshGuestStreaming(url);
         lastUrl = url;
       });
       return desktopReady;
@@ -215,6 +304,8 @@ export const appConfig: ApplicationConfig = {
       withRouterConfig({ canceledNavigationResolution: 'computed' }),
     ),
     { provide: MusicSourceRegistry, useValue: sources },
+    // Web build only: Library and Playlists sit behind sign-in; native and desktop are unchanged.
+    { provide: WEB_BUILD, useValue: webBuild },
     { provide: LocalMediaPort, useValue: local },
     // Spotify import: picks an Exportify .csv or data-download .json as text.
     { provide: ImportFilePort, useValue: { pickTextFile } },

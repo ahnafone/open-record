@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
-import { AuthStore, CuratedStore, PlaylistsStore } from '@open-record/state';
+import { AuthStore, CuratedStore, PlaylistsStore, WEB_BUILD } from '@open-record/state';
 import { type IconName, OrIcon } from '@open-record/ui';
 
 interface NavItem {
@@ -61,7 +61,11 @@ const NAV: readonly NavItem[] = [
     </nav>
     <section class="playlists" aria-labelledby="or-side-playlists">
       <h2 class="eyebrow" id="or-side-playlists">Playlists</h2>
-      @if (playlists.playlists().length) {
+      @if (gated()) {
+        <button type="button" class="empty-action" (click)="signIn()">
+          Sign in to see your playlists
+        </button>
+      } @else if (playlists.playlists().length) {
         <ul class="pl">
           @for (p of playlists.playlists(); track p.id) {
             <li>
@@ -310,6 +314,28 @@ const NAV: readonly NavItem[] = [
       font-size: 12px;
       color: var(--color-muted);
     }
+    .empty-action {
+      display: flex;
+      align-items: center;
+      min-height: var(--spacing-touch);
+      padding: 0 var(--spacing-md);
+      border: 0;
+      border-radius: var(--rounded-md);
+      background: transparent;
+      font: inherit;
+      font-size: 12px;
+      color: var(--color-muted);
+      text-align: start;
+      cursor: pointer;
+    }
+    .empty-action:hover {
+      color: var(--color-text);
+      background: var(--color-surface-raised);
+    }
+    .empty-action:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
     @media (prefers-reduced-motion: reduce) {
       .link,
       .pl-link {
@@ -323,6 +349,11 @@ export class OrSidebar {
   protected readonly curated = inject(CuratedStore);
   protected readonly auth = inject(AuthStore);
   protected readonly nav = NAV;
+  /** Web build, signed out: Playlists (and Library) sit behind sign-in. */
+  protected readonly gated = computed(
+    () => this.webBuild && this.auth.accountsReady() && !this.auth.signedIn(),
+  );
+  private readonly webBuild = inject(WEB_BUILD);
 
   protected signIn(): void {
     this.auth.promptSignIn('Sign in to like songs and import your library.');

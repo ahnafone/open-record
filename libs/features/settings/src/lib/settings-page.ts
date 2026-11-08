@@ -30,6 +30,7 @@ import {
   PlaylistsStore,
   SessionStore,
   SettingsStore,
+  WEB_BUILD,
   type StorageUsage,
 } from '@open-record/state';
 import {
@@ -45,6 +46,9 @@ import {
 } from '@open-record/ui';
 import { MUSIC_DISCLAIMER } from './credits';
 import { formatBytes } from './format-bytes';
+
+/** Landing page for the Android and iOS apps (Settings > About, web build). */
+const APPS_URL = 'https://ahnafone.github.io/open-record/';
 
 const LOCATION_LABELS: Record<DownloadLocation, string> = {
   data: 'App storage (default)',
@@ -419,6 +423,19 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       <span class="eyebrow">Music disclaimer</span>
       {{ disclaimer }}
     </p>
+    @if (webBuild) {
+      <p class="note apps-note">
+        Open Record is also available for Android and iOS.
+        <a
+          class="apps-link"
+          [href]="appsUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          (click)="openAppsSite($event)"
+          >Get the apps</a
+        >
+      </p>
+    }
   `,
   styles: `
     :host {
@@ -471,9 +488,9 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       min-block-size: 18px;
     }
 
-    .failed-link, .fix-row { display: inline-flex; align-items: center; gap: var(--spacing-sm);
+    .failed-link, .apps-link, .fix-row { display: inline-flex; align-items: center; gap: var(--spacing-sm);
       min-block-size: var(--spacing-touch); color: var(--color-text); border-radius: var(--rounded-md); }
-    .failed-link { text-decoration: underline; }
+    .failed-link, .apps-link { text-decoration: underline; }
     .fix-row { display: flex; text-decoration: none; }
     .retry {
       margin-block-start: var(--spacing-sm);
@@ -531,6 +548,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       text-transform: uppercase;
     }
     .disclaimer:focus-visible,
+    .apps-link:focus-visible,
     .text-link:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
@@ -689,6 +707,12 @@ export class SettingsPage {
 
   protected readonly disclaimer = MUSIC_DISCLAIMER;
 
+  /** Web build only (not native, not desktop): shows the Android / iOS note. */
+  protected readonly webBuild = inject(WEB_BUILD);
+
+  /** The single source for the Android / iOS landing page link. */
+  protected readonly appsUrl = APPS_URL;
+
   /** The Electron preload bridge is present (desktop app, not the web build). */
   protected readonly desktopApp =
     typeof window !== 'undefined' &&
@@ -814,6 +838,12 @@ export class SettingsPage {
     });
     // Cast cache usage is server-side; null on native/offline hides the line.
     void this.refreshCastUsage();
+  }
+
+  /** Opens the Android / iOS landing page in a new browsing context (web build). */
+  protected openAppsSite(event: Event): void {
+    event.preventDefault();
+    window.open(this.appsUrl, '_blank', 'noopener');
   }
 
   protected onServerInput(event: Event): void {

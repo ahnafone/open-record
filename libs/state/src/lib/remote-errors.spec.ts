@@ -1,4 +1,20 @@
-import { failureKind } from './remote-errors';
+import { failureKind, remoteErrorMessage } from './remote-errors';
+
+describe('remote error copy for guests', () => {
+  it('explains a refused guest host and points to sign-in', () => {
+    const err = Object.assign(new Error('refused'), { name: 'guest_host_not_allowed' });
+    expect(remoteErrorMessage(err)).toBe(
+      'Guests can only play links from YouTube, SoundCloud and Bandcamp. Sign in to continue.',
+    );
+  });
+
+  it('gives a retry hint for a busy guest share, and keeps the plain busy copy otherwise', () => {
+    const guest = Object.assign(new Error('busy'), { name: 'busy', code: 'guest_busy', retryAfterSec: 5 });
+    expect(remoteErrorMessage(guest)).toBe('Guest streaming is busy right now, try again in 5s. Sign in to keep going.');
+    const plain = Object.assign(new Error('busy'), { name: 'busy' });
+    expect(remoteErrorMessage(plain)).toBe('Server is busy, try again in a moment.');
+  });
+});
 
 describe('remote error classification', () => {
   // The provider's HttpError is out of reach for state (module boundaries), so

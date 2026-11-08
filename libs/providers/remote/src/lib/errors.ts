@@ -64,7 +64,41 @@ export const BUSY_ERROR_NAME = 'busy';
 export class RemoteBusyError extends RemoteError {
   override name = BUSY_ERROR_NAME;
 
-  constructor(readonly retryAfterSec?: number) {
+  /** `guest_busy` when the busy answer is for a guest (the guest yt-dlp share is full). */
+  constructor(
+    readonly retryAfterSec?: number,
+    readonly code?: string,
+  ) {
     super('The server is busy. Try again in a moment.');
+  }
+}
+
+/** Error name of {@link GuestHostError}. */
+export const GUEST_HOST_ERROR_NAME = 'guest_host_not_allowed';
+
+/**
+ * HTTP 403 `guest_host_not_allowed`: a guest asked for a site the server does
+ * not allow guests. Not a session problem: no sign-in prompt, no flag re-read.
+ */
+export class GuestHostError extends RemoteError {
+  override name = GUEST_HOST_ERROR_NAME;
+
+  constructor() {
+    super('Guests can only play links from YouTube, SoundCloud and Bandcamp.');
+  }
+}
+
+/** Error name of {@link GuestLimitError}. */
+export const GUEST_LIMIT_ERROR_NAME = 'guest_limit';
+
+/**
+ * HTTP 429 with error code `guest_limit`: a signed-out (guest) caller hit the
+ * public server's guest allowance. Signing in or requesting access lifts it.
+ */
+export class GuestLimitError extends RemoteError {
+  override name = GUEST_LIMIT_ERROR_NAME;
+
+  constructor(readonly retryAfterSec?: number) {
+    super('Guest limit reached. Sign in or request access to keep going.');
   }
 }

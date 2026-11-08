@@ -212,6 +212,9 @@ export class RemoteProvider {
       ? new RemoteClient(config, this.transport, {
           accessToken: this.options.accessToken,
           onUnauthorized: this.options.onUnauthorized,
+          guestStreaming: this.options.guestStreaming,
+          signedIn: this.options.signedIn,
+          onGuestRejected: this.options.onGuestRejected,
         })
       : null;
   }

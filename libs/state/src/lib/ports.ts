@@ -236,6 +236,13 @@ export interface AuthProjectConfig {
  */
 export const PUBLIC_SERVER = new InjectionToken<string>('PUBLIC_SERVER');
 
+/**
+ * True only in the web build (not the Capacitor native app, not the desktop
+ * app). The app provides it; the default `false` keeps native and desktop
+ * behaviour everywhere the token is not provided (tests included).
+ */
+export const WEB_BUILD = new InjectionToken<boolean>('WEB_BUILD', { factory: () => false });
+
 /** The signed-in account. */
 export interface AuthUser {
   id: string;

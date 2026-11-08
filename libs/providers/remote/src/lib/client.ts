@@ -10,7 +10,15 @@ import {
   type RemotePlaylistEntry,
   type RemoteSearchResult,
 } from '@open-record/models';
-import { AuthError, HttpError, ProtocolError, RemoteBusyError, RemoteConfigError } from './errors';
+import {
+  AuthError,
+  GuestHostError,
+  GuestLimitError,
+  HttpError,
+  ProtocolError,
+  RemoteBusyError,
+  RemoteConfigError,
+} from './errors';
 import { createFetchTransport, type HttpRequest, type HttpTransport } from './transport';
 
 /** Where the download server lives and the optional static bearer token. */
@@ -27,12 +35,28 @@ export interface RemoteAuthOptions {
   accessToken?: () => Promise<string | null | undefined>;
   /** Called when the server rejects an authenticated call (401/403). */
   onUnauthorized?: () => void;
+  /**
+   * True when a signed-out (guest) caller may search and stream on this server
+   * (web build on the public server with `guestStreaming` on). A guest call
+   * then sends no bearer and does not open the sign-in prompt on 401/403.
+   */
+  guestStreaming?: () => boolean;
+  /**
+   * True when a user session is known (signed in), even if no token could be
+   * obtained (e.g. a failed refresh). Such a caller is never a guest and gets
+   * the sign-in prompt on 401/403. Absent or false means a guest candidate.
+   */
+  signedIn?: () => boolean;
+  /** Called when a guest call (no session) is rejected with 401/403, so the app can re-read the guest flag. */
+  onGuestRejected?: () => void;
 }
 
 /** Public client config from `GET /app-config` (the anon key is public by design). */
 export interface RemoteAppConfig {
   supabaseUrl: string | null;
   supabaseAnonKey: string | null;
+  /** The server lets signed-out callers search and stream (subject to a guest limit). */
+  guestStreaming: boolean;
 }
 
 /** Normalised base URL (no trailing slash). Throws {@link RemoteConfigError} for anything but http(s). */
@@ -271,7 +295,11 @@ export class RemoteClient {
   async appConfig(signal?: AbortSignal): Promise<RemoteAppConfig> {
     const data = await this.call({ method: 'GET', path: '/app-config', auth: false, signal, timeoutMs: 10_000 });
     if (!isObj(data)) throw new ProtocolError('Unexpected app config from the server.');
-    return { supabaseUrl: str(data['supabaseUrl']) ?? null, supabaseAnonKey: str(data['supabaseAnonKey']) ?? null };
+    return {
+      supabaseUrl: str(data['supabaseUrl']) ?? null,
+      supabaseAnonKey: str(data['supabaseAnonKey']) ?? null,
+      guestStreaming: data['guestStreaming'] === true,
+    };
   }
 
   /** `GET /search?q=&source=`. */
@@ -279,7 +307,7 @@ export class RemoteClient {
     const q = query.trim();
     if (!q) return [];
     const params = new URLSearchParams({ q, source });
-    const data = await this.call({ method: 'GET', path: `/search?${params}`, signal });
+    const data = await this.call({ method: 'GET', path: `/search?${params}`, signal, guest: true });
     if (!isObj(data) || !Array.isArray(data['results'])) {
       throw new ProtocolError('Unexpected search response from the server.');
     }
@@ -321,7 +349,9 @@ export class RemoteClient {
 
   /** `POST /resolve {url}`: info for a pasted link. */
   async resolve(url: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
-    const result = parseSearchResult(await this.call({ method: 'POST', path: '/resolve', body: { url: url.trim() }, signal }));
+    const result = parseSearchResult(
+      await this.call({ method: 'POST', path: '/resolve', body: { url: url.trim() }, signal, guest: true }),
+    );
     if (!result) throw new ProtocolError('Unexpected resolve response from the server.');
     return result;
   }
@@ -330,12 +360,13 @@ export class RemoteClient {
    * `POST /stream {url, quality?}`: a direct audio link for a page. Nothing is
    * proxied; the bytes come from the source. `quality` is omitted when
    * undefined (the server then picks the highest). Rejects with
-   * {@link RemoteBusyError} on 503 or 429.
+   * {@link RemoteBusyError} on 503 or 429. `guest` is true only for playback
+   * (a signed-out listener may stream); a download is a library action.
    */
-  async streamUrl(pageUrl: string, signal?: AbortSignal, quality?: AudioQuality): Promise<RemoteStream> {
+  async streamUrl(pageUrl: string, signal?: AbortSignal, quality?: AudioQuality, guest = false): Promise<RemoteStream> {
     const body: { url: string; quality?: AudioQuality } = { url: pageUrl.trim() };
     if (quality) body.quality = quality;
-    return parseStream(await this.call({ method: 'POST', path: '/stream', body, signal, timeoutMs: 60_000 }));
+    return parseStream(await this.call({ method: 'POST', path: '/stream', body, signal, timeoutMs: 60_000, guest }));
   }
 
   /** `GET /health` (no auth). Resolves when the server answers `{status:'ok'}`. */
@@ -373,11 +404,26 @@ export class RemoteClient {
     auth?: boolean;
     /** Call `onUnauthorized` on 401/403 (default true for authenticated calls). */
     prompt?: boolean;
+    /**
+     * A guest-capable route (`/search`, `/resolve`, `/stream`): a signed-out
+     * caller may use it when the server allows guests. Every other route is
+     * never a guest route.
+     */
+    guest?: boolean;
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<unknown> {
     const authed = opts.auth !== false;
     const headers: Record<string, string> = { Accept: 'application/json', ...(authed ? await this.authHeaders() : {}) };
+    // A guest call carries no bearer; the server's guest allowance covers it.
+    // Only a caller with no known session is a guest: a signed-in user whose
+    // token could not be obtained must see the sign-in prompt instead.
+    const guest =
+      opts.guest === true &&
+      authed &&
+      !headers['Authorization'] &&
+      this.auth.signedIn?.() !== true &&
+      this.auth.guestStreaming?.() === true;
     const res = await this.transport.request({
       method: opts.method,
       url: this.baseUrl + opts.path,
@@ -386,15 +432,33 @@ export class RemoteClient {
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
+    // A guest asking for a host the server does not allow: a plain refusal,
+    // not a session problem (no prompt, and the guest flag is not stale).
+    if (res.status === 403 && hasCode(res.data, GUEST_HOST_CODE)) throw new GuestHostError();
     if (res.status === 401 || res.status === 403) {
-      if (authed && opts.prompt !== false) this.auth.onUnauthorized?.();
+      // Only a guest 401 means the server may have turned guests off.
+      if (guest) {
+        if (res.status === 401) this.auth.onGuestRejected?.();
+      } else if (authed && opts.prompt !== false) this.auth.onUnauthorized?.();
       throw new AuthError(res.status);
     }
-    // 503: resolve queue full; 429: rate limited. Both carry Retry-After.
-    if (res.status === 503 || res.status === 429) throw new RemoteBusyError(retryAfterSec(res.headers['retry-after']));
+    if (res.status === 429 && hasCode(res.data, GUEST_LIMIT_CODE)) throw new GuestLimitError(retryAfterSec(res.headers['retry-after']));
+    // 503: resolve queue full or guest share full; 429: rate limited. Both carry Retry-After.
+    if (res.status === 503 || res.status === 429) {
+      throw new RemoteBusyError(retryAfterSec(res.headers['retry-after']), hasCode(res.data, GUEST_BUSY_CODE) ? GUEST_BUSY_CODE : undefined);
+    }
     if (res.status < 200 || res.status >= 300) throw new HttpError(res.status, serverMessage(res.data, res.status));
     return res.data;
   }
+}
+
+const GUEST_LIMIT_CODE = 'guest_limit';
+const GUEST_BUSY_CODE = 'guest_busy';
+const GUEST_HOST_CODE = 'guest_host_not_allowed';
+
+/** True when the body names `code` as its error (`error` or `code` field). */
+function hasCode(data: unknown, code: string): boolean {
+  return isObj(data) && (data['error'] === code || data['code'] === code);
 }
 
 /** Longest Retry-After wait trusted from the server; a bogus huge value must not stall the UI. */
