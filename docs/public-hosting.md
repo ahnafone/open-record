@@ -70,7 +70,8 @@ ADMIN_USER_ID=<admin auth user UUID>    # same value as the Supabase secret (ste
 REQUIRE_APPROVAL=true
 SUPABASE_SERVICE_ROLE_KEY=<service_role key>  # SECRET, server-side only (see notes)
 TURNSTILE_SITE_KEY=<turnstile site key>      # public; served to the web app. Secret goes to Supabase only
-CAST_ENABLED=false                      # speakers cannot reach a loopback-bound server
+CAST_ENABLED=true                       # speakers reach the relay on the LAN port below
+CAST_RELAY_PORT=8788                    # relay-only LAN listener: /cast/relay/:token and nothing else
 WEB_DIR=dist/apps/app/browser           # path relative to the server's working directory, or absolute
 GUEST_STREAMING=false                   # default off. true lets signed-out visitors use /search, /resolve, /stream
 GUEST_STREAM_PER_MINUTE=10              # default 10: per-client guest requests per minute (shared by the three routes)
@@ -82,7 +83,8 @@ GUEST_ALLOWED_HOSTS=youtube.com,youtu.be,music.youtube.com,soundcloud.com,bandca
 
 Notes:
 
-- `HOST=127.0.0.1` keeps the server off the LAN and the internet. The bind address is the boundary: with `0.0.0.0`, any client that can reach port 8787 directly could send its own `X-Forwarded-For` or `CF-Connecting-IP` and pick its own rate-limit bucket.
+- `HOST=127.0.0.1` keeps the API off the LAN and the internet. The bind address is the boundary: with `0.0.0.0`, any client that can reach port 8787 directly could send its own `X-Forwarded-For` or `CF-Connecting-IP` and pick its own rate-limit bucket.
+- **Cast on a public host.** `CAST_RELAY_PORT` starts a second listener on `0.0.0.0:8788` that serves only the signed cast relay URL (`/cast/relay/:token`). It has no API, no login and no web app; anything else on it is a 404. Speakers fetch audio from `http://<LAN-IP>:8788`. Allow that port from your LAN only, for example `sudo ufw allow from 192.168.1.0/24 to any port 8788 proto tcp`, and never forward it on your router. Set `CAST_MEDIA_BASE_URL=http://<LAN-IP>:8788` only if the detected address is wrong.
 - `TRUST_PROXY` trusts only loopback, where cloudflared connects from. Never set it to `true` on this host. `TRUST_CF_CONNECTING_IP=true` is safe only because nothing else can reach 8787.
 - **Guest streaming** (`GUEST_STREAMING`) is off by default. When it is on, signed-out visitors can call `/search`, `/resolve` and `/stream` within the per-client limits above. Those limits key on the same client IP as the other rate limits, so they are only as good as the tunnel setup described here. Set `GUEST_STREAMING=true` only if you want guests to stream from search on the public site. Accounts and library features stay behind the approval gate either way. Guests may send `/resolve` and `/stream` only to hosts in `GUEST_ALLOWED_HOSTS` (default YouTube, SoundCloud, Bandcamp; other hosts get `403`), and `GUEST_GLOBAL_PER_MINUTE` (default 60) caps all guests together. Guests hold at most `GUEST_MAX_CONCURRENT` (default 1) of the `MAX_CONCURRENT_RESOLVES` yt-dlp slots, so signed-in users are not starved. With `GUEST_STREAMING=true` the server warns at startup if neither `TRUST_PROXY` nor `TRUST_CF_CONNECTING_IP` is set: behind the tunnel, all guests would then share one per-IP bucket. Guests never get the server's cookies: a sign-in refusal (such as an age-gated video) is returned as is, with no retry using `cookies.txt`. The per-client day counters track at most 10,000 keys and evict the oldest first, so spraying many addresses can reset a client's daily count; this is an accepted trade-off because the global per-minute cap still applies.
 - `SUPABASE_SERVICE_ROLE_KEY` **is** required on the server when `REQUIRE_APPROVAL=true`: the server reads `access_requests` with it, so approval is enforced on each HTTP request and on open websockets within ~60 s of a revoke. Find it in the Supabase dashboard (Project Settings > API Keys > `service_role`). It bypasses Row Level Security, so keep it only in `apps/server/.env` (`chmod 600`), never in the web or desktop app, a log or a commit. Edge Functions get their own copy automatically.
@@ -222,6 +224,7 @@ Network:
 - [ ] `dig +short open-record.uttarasoftware.ca` returns Cloudflare-owned addresses only (or `<UUID>.cfargotunnel.com` via CNAME). It never returns your home or LAN IP.
 - [ ] `curl -I http://<LAN-IP>:8787/` from another device on the LAN is refused or times out.
 - [ ] `curl -I http://127.0.0.1:8787/` from the host succeeds.
+- [ ] With `CAST_RELAY_PORT` set: `curl -I http://<LAN-IP>:8788/` from the LAN returns 404 (relay listener only, no API), and the port is closed to everything off the LAN.
 - [ ] `curl -I https://open-record.uttarasoftware.ca/` returns 200 with the web app.
 - [ ] Server logs show the real client address for requests, not `127.0.0.1` for everyone (per-client rate limits depend on this).
 

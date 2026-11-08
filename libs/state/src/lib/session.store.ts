@@ -47,6 +47,16 @@ const LOCAL_SEEK_GRACE_MS = 3000;
 /** Window in which the same (entry, reason, playing) report is not sent twice. */
 const REPORT_DEDUPE_MS = 1000;
 
+/** After a failed publish, automatic re-publishing waits this long (no retry loop). */
+const PUBLISH_RETRY_MS = 15_000;
+
+/**
+ * Engine media identity for session applies. The wire drops `sourceFile`, so
+ * the default key would call the same song "different media" after a publish
+ * and reload it. Session entries are identified by song id.
+ */
+const sessionMediaKey = (track: Track): string => track.id;
+
 /** Command failures that mean the transport is not usable, not a refusal. */
 const QUIET_COMMAND_FAILURES: ReadonlySet<string> = new Set([
   'offline',
@@ -304,6 +314,12 @@ export class SessionStore {
   private readonly castUploadIds = new Map<string, string>();
   /** The upload batch a new transfer (or sign-out) aborts. */
   private castUploadAbort: AbortController | null = null;
+  /** A local publish is in flight; a second one must not start. */
+  private publishing = false;
+  /** A publish request arrived mid-publish (a skip); checked once it finishes. */
+  private publishDirty = false;
+  /** Automatic re-publishing is paused until this time after a failed publish. */
+  private publishRetryAt = 0;
 
   constructor() {
     this.clientId.set(newClientId());
@@ -462,6 +478,149 @@ export class SessionStore {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Publish this device's own playback to the shared session. Used when a
+   * queue plays here while nothing owns the session: a local-only start, or a
+   * server restart / cleared target. Sends the queue from the current track
+   * (shuffle is re-applied by the server, keeping the current track), then the
+   * repeat mode, then the position (a seek sent BEFORE the transfer, so the
+   * echoed state already carries the right anchor), then transfers playback
+   * to this client. The engine is never reloaded. Resolves whether this client
+   * now targets the session.
+   */
+  async publishLocal(): Promise<boolean> {
+    if (!this.port || !this.available()) return false;
+    if (this.publishing) {
+      // A skip made while publishing was not sent. Note it; the publish in
+      // flight is checked against the engine once it finishes.
+      this.publishDirty = true;
+      return false;
+    }
+    if (!this.canPublish()) return false;
+
+    this.publishing = true;
+    this.publishDirty = false;
+    try {
+      let attempt = await this.publishQueue();
+      // Bounded: one more pass when the engine moved to another track mid-publish.
+      if (
+        attempt !== null &&
+        this.publishDirty &&
+        this.engine.current()?.id !== attempt
+      ) {
+        this.publishDirty = false;
+        attempt = await this.publishQueue();
+      }
+      return attempt !== null;
+    } finally {
+      this.publishing = false;
+      this.publishDirty = false;
+    }
+  }
+
+  /** Whether a local queue may be published now (no target yet, playing here). */
+  private canPublish(): boolean {
+    return (
+      this.port?.connection() === 'open' &&
+      !this.target() &&
+      this.localPlaybackActive() &&
+      !!this.deviceId() &&
+      this.engine.current() !== null
+    );
+  }
+
+  /**
+   * One publish pass from the engine's current track. Resolves the published
+   * first track id, or `null` when nothing was published.
+   */
+  private async publishQueue(): Promise<string | null> {
+    if (!this.canPublish()) return null;
+    const current = this.engine.current();
+    if (!current) return null;
+    const entries = [current, ...this.engine.upcoming()].map((track) =>
+      toSessionTrack(track, newEntryId()),
+    );
+    // Autoplay reads the engine when each send happens, so a pause during the
+    // publish is not overridden by a stale `true`. `shuffle` stays false: the
+    // order above already is the play order, and `true` would make the server
+    // reshuffle Up Next. The engine keeps its own shuffle state.
+    const setQueue = (): SessionCommand => ({
+      type: 'setQueue',
+      order: entries,
+      cursor: 0,
+      autoplay: this.localPlaybackActive(),
+      shuffle: false,
+    });
+    let result = await this.command(setQueue());
+    if (!result.ok) {
+      // One retry with the same entry ids, as in startSession.
+      result = await this.command(setQueue());
+    }
+    if (!result.ok) {
+      this.publishFailed(result.error ?? 'Could not start playback.');
+      return null;
+    }
+
+    const steps: SessionCommand[] = [
+      { type: 'setRepeat', repeat: this.engine.repeat() },
+    ];
+    const positionSec = this.engine.position();
+    if (positionSec > 0) steps.push({ type: 'seek', positionSec });
+    steps.push({
+      type: 'transfer',
+      target: {
+        kind: 'device',
+        clientId: this.clientId(),
+        deviceId: this.deviceId(),
+      },
+    });
+    for (const step of steps) {
+      const stepResult = await this.command(step);
+      if (!stepResult.ok) {
+        // Do not leave a half-published queue on the server.
+        await this.discardQueue();
+        this.publishFailed(stepResult.error ?? 'Could not transfer playback.');
+        return null;
+      }
+    }
+    // The engine may have paused while the queue was sent. The server still
+    // has `playing` from autoplay, so follow the transfer with a pause. Checked
+    // after the transfer, which covers a pause made during its await too.
+    if (!this.localPlaybackActive()) {
+      const paused = await this.command({ type: 'pause' });
+      if (!paused.ok) {
+        await this.discardQueue();
+        this.publishFailed(paused.error ?? 'Could not pause playback.');
+        return null;
+      }
+    }
+    this.error.set(null);
+    return entries[0]?.id ?? null;
+  }
+
+  private publishFailed(error: string): false {
+    this.publishRetryAt = Date.now() + PUBLISH_RETRY_MS;
+    this.recordRefusal(error);
+    return false;
+  }
+
+  /** Whether this client's engine is playing (or starting to) a loaded track. */
+  private localPlaybackActive(): boolean {
+    return (
+      (this.engine.status() === 'playing' || this.engine.intendsToPlay) &&
+      this.engine.current() !== null
+    );
+  }
+
+  /**
+   * This device plays its own queue but lost the session target: keep playing
+   * and publish it again. Backs off after a failed publish.
+   */
+  private keepLocalPlayback(): void {
+    if (Date.now() < this.publishRetryAt) return;
+    void this.publishLocal();
   }
 
   /** Record a refused command; a transport failure just means local playback. */
@@ -778,14 +937,14 @@ export class SessionStore {
     this.stopKeepalive();
   }
 
-  private stopTargetPlayback(): void {
+  private stopTargetPlayback(options: { keepPlaying?: boolean } = {}): void {
     const wasActive = this.targetActive;
     this.targetActive = false;
     this.applyingRemote = false;
     this.applyPending = null;
     this.needsGesture.set(false);
     // Local-only playback must survive a session that never owned the engine.
-    if (wasActive) void this.engine.pause();
+    if (wasActive && !options.keepPlaying) void this.engine.pause();
   }
 
   private stop(): void {
@@ -861,6 +1020,17 @@ export class SessionStore {
     const nowTarget = isThisClient(next?.target ?? null, this.clientId());
     const wasTarget = this.targetActive;
     this.session.set(next);
+    // Nothing owns the session any more: an empty session (server restart), or
+    // the target cleared by the server after a long silence (the queue stays).
+    // A queue playing here keeps playing and is published again. A user's
+    // `clear` also clears the target but empties `order`, so it still stops.
+    const ownerGone =
+      next === null || (next.target === null && next.order.length > 0);
+    if (!nowTarget && ownerGone && this.localPlaybackActive()) {
+      this.stopTargetPlayback({ keepPlaying: true });
+      this.keepLocalPlayback();
+      return;
+    }
     if (!next) {
       if (wasTarget) this.stopTargetPlayback();
       return;
@@ -1038,10 +1208,15 @@ export class SessionStore {
       return;
     }
 
+    // The song already loaded here keeps playing: no reload and no seek to the
+    // anchor (the drift check below handles that within tolerance). This is
+    // the echo of this device's own publish.
+    const sameSong = this.engine.current()?.id === tracks[cursor]?.id;
     await this.engine.applyOrder(tracks, cursor, {
       autoplay: state.playing,
-      positionSec: state.positionSec,
+      positionSec: sameSong ? undefined : state.positionSec,
       sessionMode: true,
+      mediaKey: sessionMediaKey,
     });
     if (!this.isTarget()) return;
     // A reload starts at 0, and the anchor moved while the state travelled.

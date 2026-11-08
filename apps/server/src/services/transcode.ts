@@ -190,22 +190,37 @@ export function createTranscoder(opts: TranscoderOptions): Transcoder {
 }
 
 /** Probe results per binary path, so a burst of relay requests spawns one probe. */
-const availability = new Map<string, Promise<boolean>>();
+const availability = new Map<string, { result: Promise<boolean>; expiresAt: number }>();
+
+/** A missing binary is re-probed after this long; a found binary stays cached. */
+const NEGATIVE_PROBE_TTL_MS = 60_000;
 
 /**
- * Runs `ffmpegPath -version` at most once per path and caches the result. A
- * missing binary resolves false (the relay answers 503) instead of throwing,
- * and it never fails server startup: cast is optional.
+ * Runs `ffmpegPath -version` and caches the result. A found binary is cached
+ * for the process lifetime; a missing one is retried after 60 s so an install
+ * does not need a restart. A missing binary resolves false (the relay answers
+ * 503) instead of throwing, and it never fails server startup: cast is optional.
  */
 export function ffmpegAvailable(
   ffmpegPath: string,
-  opts: { spawn?: SpawnFn } = {},
+  opts: { spawn?: SpawnFn; now?: () => number } = {},
 ): Promise<boolean> {
+  const now = (opts.now ?? Date.now)();
   const cached = availability.get(ffmpegPath);
-  if (cached) return cached;
-  const probe = probeFfmpeg(ffmpegPath, opts.spawn ?? spawn);
-  availability.set(ffmpegPath, probe);
-  return probe;
+  if (cached && (cached.expiresAt === Infinity || cached.expiresAt > now)) {
+    return cached.result;
+  }
+  const result = probeFfmpeg(ffmpegPath, opts.spawn ?? spawn);
+  availability.set(ffmpegPath, { result, expiresAt: Infinity });
+  void result.then((available) => {
+    if (!available) {
+      const entry = availability.get(ffmpegPath);
+      if (entry?.result === result) {
+        availability.set(ffmpegPath, { result, expiresAt: now + NEGATIVE_PROBE_TTL_MS });
+      }
+    }
+  });
+  return result;
 }
 
 function probeFfmpeg(ffmpegPath: string, spawnFn: SpawnFn): Promise<boolean> {

@@ -69,6 +69,8 @@ const PRESENCE_ONLINE_MS = 30_000;
 /** Presence: remove a non-target client after this much silence. */
 const PRESENCE_REMOVE_MS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MIN = 120;
+/** A cast transfer that has not finished by then is abandoned (see `boundedTransferToCast`). */
+const CAST_TRANSFER_TIMEOUT_MS = 30_000;
 const DEFAULT_TARGET_STALE_MIN = 30;
 /**
  * A duplicate `ended` for the same entry arrives back-to-back with the first
@@ -119,6 +121,12 @@ function defaultState(now: number): SessionState {
     updatedAt: now,
     updatedBy: null,
   };
+}
+
+/** Identity of the playback target: a cast or a device, by its id. */
+function targetKey(target: SessionState['target'] | undefined): string {
+  if (!target) return 'none';
+  return target.kind === 'cast' ? `cast:${target.castId}` : `device:${target.clientId}`;
 }
 
 function cloneState(state: SessionState): SessionState {
@@ -319,6 +327,8 @@ export interface SessionServiceOptions {
   idleTimeoutMin?: number;
   targetStaleMin?: number;
   targetStaleAfterMs?: number;
+  /** Upper bound for one cast transfer. */
+  castTransferTimeoutMs?: number;
 }
 
 export class SessionService {
@@ -326,8 +336,13 @@ export class SessionService {
   private readonly idleTimeoutMs: number;
   private readonly targetStaleMs: number;
   private readonly targetStaleAfterMs: number;
+  private readonly castTransferTimeoutMs: number;
   private readonly rooms = new Map<string, Room>();
   private castHooks: SessionCastHooks | null = null;
+  /** Per-user tail of cast transfers: transfers for one user run one at a time. */
+  private readonly castTransfers = new Map<string, Promise<unknown>>();
+  /** Newest transfer attempt per cast: decides which attempt may release a speaker. */
+  private readonly castAttempts = new Map<string, { abandoned: boolean }>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: SessionServiceOptions = {}) {
@@ -335,6 +350,7 @@ export class SessionService {
     this.idleTimeoutMs = (opts.idleTimeoutMin ?? DEFAULT_IDLE_TIMEOUT_MIN) * 60_000;
     this.targetStaleMs = (opts.targetStaleMin ?? DEFAULT_TARGET_STALE_MIN) * 60_000;
     this.targetStaleAfterMs = opts.targetStaleAfterMs ?? TARGET_STALE_AFTER_MS;
+    this.castTransferTimeoutMs = opts.castTransferTimeoutMs ?? CAST_TRANSFER_TIMEOUT_MS;
   }
 
   /** Set by T5.6 once CastService exists. */
@@ -466,7 +482,7 @@ export class SessionService {
     room.lastActivity = now;
 
     if (command.type === 'transfer') return this.transfer(userId, room, clientId, command.target, now);
-    if (command.type === 'takeOver') return this.takeOver(userId, room, clientId, command.castId, now);
+    if (command.type === 'takeOver') return this.takeOver(userId, room, clientId, command.castId);
 
     let mutated = false;
     let forward: SessionCommand | null = null;
@@ -1146,7 +1162,7 @@ export class SessionService {
       return { ok: true, revision: state.revision };
     }
 
-    return this.transferToCast(userId, room, clientId, target.castId, now, false);
+    return this.transferToCast(userId, room, clientId, target.castId, false);
   }
 
   private async takeOver(
@@ -1154,19 +1170,64 @@ export class SessionService {
     room: Room,
     clientId: string,
     castId: string,
-    now: number,
   ): Promise<CommandResult> {
-    return this.transferToCast(userId, room, clientId, castId, now, true);
+    return this.transferToCast(userId, room, clientId, castId, true);
   }
 
-  private async transferToCast(
+  private transferToCast(
     userId: string,
     room: Room,
     clientId: string,
     castId: string,
-    now: number,
     force: boolean,
   ): Promise<CommandResult> {
+    const prior = this.castTransfers.get(userId) ?? Promise.resolve();
+    const run = prior
+      .catch(() => undefined)
+      .then(() => this.boundedTransferToCast(userId, room, clientId, castId, force));
+    this.castTransfers.set(userId, run);
+    run
+      .catch(() => undefined)
+      .then(() => {
+        if (this.castTransfers.get(userId) === run) this.castTransfers.delete(userId);
+      });
+    return run;
+  }
+
+  /**
+   * Caps one transfer at `castTransferTimeoutMs` so a stuck hook cannot block
+   * every later transfer of this user. A timed-out attempt is abandoned: if its
+   * hook resolves later it releases the speaker instead of committing.
+   */
+  private boundedTransferToCast(
+    userId: string,
+    room: Room,
+    clientId: string,
+    castId: string,
+    force: boolean,
+  ): Promise<CommandResult> {
+    const ticket = { abandoned: false };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<CommandResult>((resolve) => {
+      timer = setTimeout(() => {
+        ticket.abandoned = true;
+        resolve({ ok: false, error: 'cast-unavailable' });
+      }, this.castTransferTimeoutMs);
+    });
+    const attempt = this.runTransferToCast(userId, room, clientId, castId, force, ticket);
+    return Promise.race([attempt, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  private async runTransferToCast(
+    userId: string,
+    room: Room,
+    clientId: string,
+    castId: string,
+    force: boolean,
+    ticket: { abandoned: boolean },
+  ): Promise<CommandResult> {
+    // Taken here, not from the caller: this runs after any queued transfer.
+    const now = this.nowFn();
     const hooks = this.castHooks;
     if (!hooks) return { ok: false, error: 'cast-disabled' };
     const castOnline = hooks.devices().some((device) => {
@@ -1179,6 +1240,8 @@ export class SessionService {
 
     const previous = room.session;
     const previousCastId = previous.target?.kind === 'cast' ? previous.target.castId : null;
+    const previousTarget = targetKey(previous.target);
+    const revisionBefore = previous.revision;
     const next = cloneState(previous);
     next.target = { kind: 'cast', castId };
     next.positionSec = anchoredPosition(previous, now);
@@ -1188,6 +1251,7 @@ export class SessionService {
     delete next.targetStale;
     delete next.castOwner;
 
+    this.castAttempts.set(castId, ticket);
     try {
       await hooks.onTarget(
         userId,
@@ -1197,15 +1261,19 @@ export class SessionService {
         force ? { force: true } : undefined,
       );
     } catch (error) {
+      // An abandoned attempt has already been answered: never write to the session.
+      if (ticket.abandoned) return { ok: false, error: 'cast-unavailable' };
       if (error instanceof CastBusyError) {
-        previous.castOwner = {
+        // Write to the live session: a commit during the await may have replaced it.
+        const live = room.session;
+        live.castOwner = {
           deviceId: error.owner.deviceId,
           deviceName: error.owner.deviceName,
         };
-        previous.positionSec = anchoredPosition(previous, now);
-        previous.revision += 1;
-        previous.updatedAt = now;
-        this.broadcast(room, { type: 'state', session: previous });
+        live.positionSec = anchoredPosition(live, now);
+        live.revision += 1;
+        live.updatedAt = now;
+        this.broadcast(room, { type: 'state', session: live });
         this.refreshDevices(room, true, undefined, now);
         return { ok: false, error: 'cast-busy' };
       }
@@ -1213,12 +1281,71 @@ export class SessionService {
       return { ok: false, error: errorText(error, 'cast-unavailable') };
     }
 
-    room.session = next;
+    // The speaker is now running `next`. Nothing may commit it to the session if
+    // this attempt was abandoned by the timeout, or if the target moved meanwhile
+    // (a device transfer landed): release the speaker and fail instead.
+    const releaseCast = async (): Promise<void> => {
+      try {
+        await hooks.onTarget(userId, requester, castId, null);
+      } catch {
+        // The speaker is already gone or owned elsewhere.
+      }
+    };
+    if (ticket.abandoned) {
+      // Only the newest attempt for this speaker may release it: a later transfer
+      // to the same cast may already own it.
+      if (this.castAttempts.get(castId) === ticket) {
+        this.castAttempts.delete(castId);
+        await releaseCast();
+      }
+      return { ok: false, error: 'cast-unavailable' };
+    }
+    const live = room.session;
+    if (targetKey(live.target) !== previousTarget) {
+      await releaseCast();
+      return { ok: false, error: 'target-changed' };
+    }
+
+    // The session changed while the cast was being started (queue/position commands,
+    // reports). Rebase onto the live state; keep only the cast-side fields from `next`.
+    let committed = next;
+    if (live.revision !== revisionBefore) {
+      committed = cloneState(live);
+      committed.target = { kind: 'cast', castId };
+      committed.positionSec = anchoredPosition(live, now);
+      committed.updatedBy = clientId;
+      committed.updatedAt = now;
+      committed.revision = live.revision + 1;
+      delete committed.targetStale;
+      delete committed.castOwner;
+      // Unavailable flags name entries; re-derive them against the live order.
+      const planned = new Set(next.unavailable ?? []);
+      const unavailable = committed.order.filter((entry) => planned.has(entry.entryId));
+      if (unavailable.length > 0) committed.unavailable = unavailable.map((entry) => entry.entryId);
+      else delete committed.unavailable;
+      if (next.castVolume !== undefined) committed.castVolume = next.castVolume;
+      else delete committed.castVolume;
+    }
+
+    // The speaker loaded the entry `next` pointed at. If the live queue now points
+    // elsewhere (cursor moved, or the entry was replaced), the speaker must reload.
+    const loaded = next.cursor >= 0 ? next.order[next.cursor] : undefined;
+    const liveEntry = committed.cursor >= 0 ? committed.order[committed.cursor] : undefined;
+    const reloadNeeded = JSON.stringify(loaded ?? null) !== JSON.stringify(liveEntry ?? null);
+
+    room.session = committed;
     room.lastTargetContactAt = now;
     room.lastActivity = now;
-    this.broadcast(room, { type: 'state', session: next });
+    this.broadcast(room, { type: 'state', session: committed });
     this.refreshDevices(room, true, undefined, now);
-    return { ok: true, revision: next.revision };
+    if (reloadNeeded && this.castHooks?.onState) {
+      try {
+        await this.castHooks.onState(userId, castId, committed);
+      } catch {
+        // CastService reports its own failures (unavailable + paused).
+      }
+    }
+    return { ok: true, revision: room.session.revision };
   }
 
   /**

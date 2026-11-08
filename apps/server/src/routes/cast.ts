@@ -11,18 +11,11 @@ import { catalogAudioPath } from '../services/media-plan';
 import { clientAddress, clientKey } from '../services/client-ip';
 import { createFixedWindow } from '../services/fixed-window';
 import { createResolveCache, type ResolveCache } from '../services/stream-cache';
-import {
-  createTranscoder,
-  ffmpegAvailable,
-  isCastFriendlyAudio,
-  TranscodeUnavailableError,
-  type FfmpegProbe,
-  type TranscodeFactory,
-  type Transcoder,
-} from '../services/transcode';
+import { ffmpegAvailable, isCastFriendlyAudio } from '../services/transcode';
 import { resolveStream, type StreamResponse } from '../services/ytdlp';
 import { validateUrl, type ValidatedUrl } from '../services/url-guard';
 import { serveRelayUpload } from './cast-uploads';
+import { defaultTranscodeDeps, streamTranscoded, type TranscodeDeps } from './cast-transcode';
 import type { RouteOptions } from './index';
 
 /** Longest relay token accepted (well above the 43 + 1 + 43 characters a real one uses). */
@@ -30,18 +23,6 @@ const TOKEN_MAX_LENGTH = 512;
 
 /** Longest offset a cast URL may ask the transcode to start from (24 hours). */
 const MAX_OFFSET_SEC = 86_400;
-
-/**
- * Headers for a transcoded stream: ADTS AAC, chunked (the duration is unknown
- * up front) and explicitly not seekable, so a player does not retry ranges.
- */
-const TRANSCODE_HEADERS: Record<string, string> = {
-  'content-type': 'audio/aac',
-  'cache-control': 'no-store',
-  'x-content-type-options': 'nosniff',
-  'content-disposition': 'inline',
-  'accept-ranges': 'none',
-};
 
 /** A public route is limited by IP: 300 requests per minute, like the rest of `/cast`. */
 const RELAY_RATE_LIMIT_MAX = 300;
@@ -54,15 +35,6 @@ const MAX_INVALID_TOKEN_IPS = 10_000;
 
 /** Redirects followed for a resolved media URL; every hop is re-validated. */
 const MAX_REDIRECTS = 3;
-
-/**
- * At most one ffmpeg per relay entry (T6.1's "one ffmpeg per active cast
- * stream"). The receiver gets exactly one signed URL per stream, so a second
- * GET on the same entry means a retry after a blip; it supersedes the stale
- * attempt (kill its encoder, drop its source) rather than being rejected,
- * because a 409/503 would leave the speaker silent.
- */
-const activeTranscodes = new Map<string, () => void>();
 
 /** Connect/socket timeout for the upstream fetch. */
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -88,13 +60,6 @@ interface ResolvedMedia {
   mimeType?: string;
   headers?: Record<string, string>;
   expiresAt?: number;
-}
-
-/** Injected seams for the ffmpeg fallback (`RouteOptions` overrides in tests). */
-interface TranscodeDeps {
-  transcode: TranscodeFactory;
-  hasFfmpeg: FfmpegProbe;
-  ffmpegPath: string;
 }
 
 /** True when `path` is inside `root` (both already resolved). */
@@ -142,12 +107,19 @@ function safeCatalogPath(webDir: string | null, file: string): string | null {
   return isInside(root, path) ? path : null;
 }
 
-/** Streams a catalog file with single-range support; nothing is buffered. */
+/**
+ * Streams a catalog file with single-range support; nothing is buffered. A file
+ * the receiver cannot play directly (or any `offset` restart) goes through ffmpeg.
+ */
 async function serveCatalog(
+  entry: RelayEntry,
   webDir: string | null,
   file: string,
+  relay: MediaRelay,
   request: FastifyRequest,
   reply: FastifyReply,
+  offsetSec: number,
+  ffmpeg: TranscodeDeps,
 ): Promise<FastifyReply> {
   const path = safeCatalogPath(webDir, file);
   if (!path) return reply.code(404).send({ error: 'not-found' });
@@ -162,6 +134,9 @@ async function serveCatalog(
   }
 
   const mimeType = CATALOG_MIME_BY_EXT[extname(file).slice(1).toLowerCase()] ?? 'application/octet-stream';
+  if (!isCastFriendlyAudio(mimeType) || offsetSec > 0) {
+    return streamTranscoded(entry, createReadStream(path), relay, request, reply, offsetSec, ffmpeg);
+  }
   const range = parseRange(request.headers.range, size);
   if (range === 'invalid') {
     return reply
@@ -243,7 +218,12 @@ function requestUpstream(
         lookup: pinnedLookup(target.addresses),
         agent: false,
       },
-      resolvePromise,
+      (response) => {
+        // The timeout covers connect and headers only. A paused speaker that
+        // stops reading the body must not look like a stalled upstream.
+        request.setTimeout(0);
+        resolvePromise(response);
+      },
     );
     request.once('error', rejectPromise);
     request.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
@@ -405,7 +385,7 @@ async function serveRemote(
   // can honour it without the receiver having to decode from zero. The cast
   // client only sends an offset for streams it has already seen transcoded.
   if (!(await ffmpeg.hasFfmpeg(ffmpeg.ffmpegPath))) {
-    upstream.resume();
+    upstream.destroy();
     return fail(request, reply, entry, 503, 'ffmpeg-missing');
   }
 
@@ -425,61 +405,7 @@ async function serveRemote(
     }
   }
 
-  // Supersede the previous attempt for this entry before starting a new encoder
-  // (the previous callable kills its ffmpeg and destroys its upstream).
-  activeTranscodes.get(entry.id)?.();
-
-  let transcoder: Transcoder;
-  try {
-    transcoder = ffmpeg.transcode({ ffmpegPath: ffmpeg.ffmpegPath, offsetSec });
-  } catch (error) {
-    upstream.resume();
-    if (error instanceof TranscodeUnavailableError) {
-      return fail(request, reply, entry, 503, 'ffmpeg-missing');
-    }
-    throw error;
-  }
-
-  /** Kill this stream and drop its source; idempotent on every teardown path. */
-  const teardown = (): void => {
-    transcoder.kill();
-    upstream.destroy();
-  };
-  /** Unregister only if this request still owns the entry (a newer stream may have replaced it). */
-  const unregister = (): void => {
-    if (activeTranscodes.get(entry.id) === teardown) activeTranscodes.delete(entry.id);
-  };
-  const finish = (): void => {
-    unregister();
-    teardown();
-  };
-  activeTranscodes.set(entry.id, teardown);
-
-  // Past this point the response head is committed: a stream error destroys the
-  // client socket instead of trying to write a JSON error into the audio body.
-  relay.setStream(entry.id, { transcoded: true, offsetSec });
-  upstream.pipe(transcoder.stdin);
-  upstream.once('error', finish);
-  reply.hijack();
-  reply.raw.writeHead(200, TRANSCODE_HEADERS);
-  reply.raw.once('close', finish);
-  pipeline(transcoder.stream, reply.raw, (error) => {
-    if (!error) {
-      // A completed stream must not leave a stale registration behind; its own
-      // close handler still runs the (idempotent) kill afterwards.
-      unregister();
-      return;
-    }
-    finish();
-    reply.raw.destroy();
-  });
-  // ffmpeg failing after the headers went out can only be surfaced by closing
-  // the socket; the receiver then reports idle and the session advances.
-  void transcoder.done.catch(() => {
-    finish();
-    if (!reply.raw.destroyed) reply.raw.destroy();
-  });
-  return reply;
+  return streamTranscoded(entry, upstream, relay, request, reply, offsetSec, ffmpeg);
 }
 
 /**
@@ -509,11 +435,7 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
     resolve: options.resolveStream ?? resolveStream,
   });
   const validateRelay = options.validateRelayUrl ?? validateUrl;
-  const ffmpeg: TranscodeDeps = {
-    transcode: options.transcode ?? createTranscoder,
-    hasFfmpeg: options.hasFfmpeg ?? ffmpegAvailable,
-    ffmpegPath: config.ffmpegPath,
-  };
+  const ffmpeg = defaultTranscodeDeps(options, config.ffmpegPath, ffmpegAvailable);
 
   app.get<{ Params: { token: string }; Querystring: { offset?: number } }>(
     '/cast/relay/:token',
@@ -560,10 +482,19 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
           // Account uploads are served from the per-user cache; a missing file
           // (cleared/evicted) is the handler's 410, not a disabled cast.
           return options.uploads
-            ? serveRelayUpload(options.uploads, entry, request, reply)
+            ? serveRelayUpload(options.uploads, entry, relay, request, reply, request.query.offset ?? 0, ffmpeg)
             : reply.code(503).send({ error: 'cast-disabled' });
         case 'catalog':
-          return serveCatalog(config.webDir, entry.plan.file, request, reply);
+          return serveCatalog(
+            entry,
+            config.webDir,
+            entry.plan.file,
+            relay,
+            request,
+            reply,
+            request.query.offset ?? 0,
+            ffmpeg,
+          );
         case 'remote': {
           const offset = request.query.offset ?? 0;
           return serveRemote(

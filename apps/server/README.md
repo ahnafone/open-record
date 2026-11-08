@@ -132,7 +132,9 @@ is already set.
 | `SESSION_IDLE_TIMEOUT_MIN` | `120` | Minutes without contact from any device before a session is dropped from memory. |
 | `SESSION_TARGET_STALE_MIN` | `30`  | Minutes the playing device may stay silent before the server pauses and clears the target. |
 | `CAST_ENABLED`      | `true`       | Discover Google Cast speakers over mDNS and relay audio to them. Inert unless sessions and `CAST_MEDIA_BASE_URL` are available. |
-| `CAST_MEDIA_BASE_URL` | (unset)    | URL the speaker uses to reach this server, e.g. `http://<lan-ip>:8787`. Casting stays off when unset. |
+| `CAST_RELAY_PORT`   | (unset)      | Port of a relay-only listener for speakers, e.g. `8788`. It serves only `/cast/relay/:token` (no API, no login) and must differ from `PORT`. Set it when `HOST=127.0.0.1` (public hosting): the main API stays on loopback while speakers reach the relay on the LAN. Open this TCP port to your LAN only; never forward it. |
+| `CAST_RELAY_HOST`   | `0.0.0.0`    | Interface the relay listener binds. |
+| `CAST_MEDIA_BASE_URL` | (unset)    | Explicit URL the speaker uses to reach the relay, e.g. `http://<lan-ip>:8788`. Overrides the default. With `CAST_RELAY_PORT` set the default is the detected LAN address on that port; without it, `PUBLIC_URL`, then `HOST`, then the LAN address. |
 | `CAST_RELAY_TTL_SEC` | `900`       | Lifetime of a relay token in seconds (60-86400), slid while the speaker keeps playing; the hard cap is 24 hours. |
 | `CAST_CACHE_MB`     | `2048`       | Per-account cap for uploaded PC imports; `0` disables uploads. Least-recently-used files are evicted, never the one the speaker is playing. A cap below `CAST_UPLOAD_MAX_MB` also caps a single upload: the effective limit is the smaller of the two. |
 | `CAST_UPLOAD_MAX_MB` | `200`       | Largest accepted upload from the PC browser (1-4096). Effective limit is `min(this, CAST_CACHE_MB)`. |

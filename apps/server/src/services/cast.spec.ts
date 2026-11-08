@@ -413,7 +413,7 @@ describe('cast setTarget', () => {
     expect(h.calls.unavailable).toEqual([]);
   });
 
-  it('loads an upload entry with the content type from its extension', async () => {
+  it('announces ADTS AAC for an upload the relay has to transcode (flac)', async () => {
     const uploadId = `${'a'.repeat(64)}.flac`;
     const h = createHarness({
       queue: [remoteTrack('a', { uploadId })],
@@ -424,7 +424,7 @@ describe('cast setTarget', () => {
     await castTo(h);
 
     const loaded = h.transport.loads[0];
-    expect(loaded?.contentType).toBe('audio/flac');
+    expect(loaded?.contentType).toBe('audio/aac');
     expect(loaded?.url.startsWith(`${BASE_URL}/cast/relay/`)).toBe(true);
 
     const token = loaded?.url.slice(`${BASE_URL}/cast/relay/`.length) ?? '';
@@ -711,6 +711,40 @@ describe('cast status and idle', () => {
     expect(transport.loads[1]?.title).toBe('Track b');
   });
 
+  it('ignores a stale FINISHED from the previous entry while the next load is in flight', async () => {
+    const h = createHarness({
+      queue: [remoteTrack('a'), remoteTrack('b'), remoteTrack('c')],
+      cursor: 0,
+      playing: true,
+    });
+    await castTo(h);
+    const transport = h.transport;
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realLoad = transport.load.bind(transport);
+    transport.load = async (media, opts) => {
+      await gate;
+      return realLoad(media, opts);
+    };
+
+    // SessionService moves the cursor before forwarding next (see the commands test).
+    h.setState({ ...h.state(), cursor: 1, positionSec: 0 });
+    const pending = h.service.control('u1', 'cast-1', { type: 'next' });
+    await settle();
+    // The receiver still reports the old entry finishing while `b` is loading.
+    transport.emitStatus({ playing: false, positionSec: 180, volume: 1, idle: true });
+    await settle();
+    expect(h.calls.ended).toHaveLength(0);
+
+    release();
+    await pending;
+    await settle();
+    expect(transport.loads.map((load) => load.title)).toEqual(['Track a', 'Track b']);
+  });
+
   it('keeps the cursor and reloads the same entry for repeat-one', async () => {
     const h = createHarness({
       queue: [remoteTrack('a'), remoteTrack('b')],
@@ -742,6 +776,41 @@ describe('cast status and idle', () => {
     expect(h.state().playing).toBe(false);
     expect(transport.calls).toContain('stop');
     expect(transport.loads).toHaveLength(1);
+  });
+
+  it('marks an ERROR entry unavailable and advances to the next entry', async () => {
+    const h = createHarness({ queue: [remoteTrack('a'), remoteTrack('b')], cursor: 0, playing: true });
+    await castTo(h);
+    const transport = h.transport;
+
+    transport.emitStatus({ playing: false, positionSec: 0, volume: 1, idle: true, failed: true });
+    await settle();
+
+    expect(h.calls.unavailable.at(-1)?.entryIds).toEqual(['a']);
+    expect(h.calls.ended).toHaveLength(1);
+    expect(h.state().cursor).toBe(1);
+    expect(transport.loads.map((load) => load.title)).toEqual(['Track a', 'Track b']);
+  });
+
+  it('pauses instead of looping when an ERROR entry is repeat-one', async () => {
+    const h = createHarness({
+      queue: [remoteTrack('a'), remoteTrack('b')],
+      cursor: 0,
+      playing: true,
+      repeat: 'one',
+    });
+    await castTo(h);
+    const transport = h.transport;
+
+    transport.emitStatus({ playing: false, positionSec: 0, volume: 1, idle: true, failed: true });
+    await settle();
+
+    expect(h.calls.ended).toHaveLength(0);
+    expect(h.calls.unavailable.at(-1)?.entryIds).toEqual(['a']);
+    expect(h.state().cursor).toBe(0);
+    expect(transport.loads).toHaveLength(1);
+    expect(transport.calls).toContain('pause');
+    expect(h.calls.reports.at(-1)?.report).toMatchObject({ reason: 'playing', playing: false });
   });
 
   it('marks the entry unavailable and pauses when the reload after idle fails', async () => {

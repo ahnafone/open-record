@@ -372,6 +372,9 @@ export class OrDevicePicker {
   });
 
   protected readonly errorText = computed(() => {
+    if (this.session.connection() === 'refused') {
+      return 'Sync refused — sign in with an approved account.';
+    }
     const error = this.session.error();
     switch (error) {
       case null:

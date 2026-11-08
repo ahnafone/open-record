@@ -19,12 +19,15 @@ import { planFor, type MediaPlan } from './media-plan';
 import type { MediaRelay } from './media-relay';
 import { CastBusyError, type SessionService } from './session';
 import { UPLOAD_MIME_BY_EXT, type UploadExtension } from './upload-cache';
+import { isCastFriendlyAudio } from './transcode';
 
 /** A dropped speaker stays listed as offline for this long before its target clears. */
 export const CAST_LOST_GRACE_MS = 20_000;
 /** Position-only reports are at most one per this window. */
 const CAST_TICK_REPORT_MS = 2_000;
 const DEFAULT_CONTENT_TYPE = 'audio/mp4';
+/** ADTS AAC: what the relay transcodes non-friendly local files into. */
+const TRANSCODED_CONTENT_TYPE = 'audio/aac';
 
 export interface CastServiceOptions {
   relay: MediaRelay;
@@ -56,6 +59,8 @@ interface CastConnection {
   offsetSec: number;
   /** Monotonic load counter: one FINISHED event may advance exactly one load. */
   loadSeq: number;
+  /** LOAD calls not yet resolved. Receiver status seen meanwhile belongs to the old media. */
+  loadsInFlight: number;
   idleHandledFor: number;
   lastPlaying: boolean;
   lastTickAt: number;
@@ -93,12 +98,13 @@ function isPlayable(plan: MediaPlan): boolean {
   return plan.kind === 'catalog' || plan.kind === 'remote' || plan.kind === 'upload';
 }
 
-function contentTypeFor(plan: MediaPlan): string {
+/** Mime of a local (catalog/upload) file as the relay serves it, or undefined when unknown. */
+function localMimeFor(plan: MediaPlan): string | undefined {
   if (plan.kind === 'upload') {
     const ext = plan.uploadId.slice(plan.uploadId.lastIndexOf('.') + 1).toLowerCase();
-    return UPLOAD_MIME_BY_EXT[ext as UploadExtension] ?? DEFAULT_CONTENT_TYPE;
+    return UPLOAD_MIME_BY_EXT[ext as UploadExtension];
   }
-  if (plan.kind !== 'catalog') return DEFAULT_CONTENT_TYPE;
+  if (plan.kind !== 'catalog') return undefined;
   switch (plan.file.slice(plan.file.lastIndexOf('.') + 1).toLowerCase()) {
     case 'mp3':
       return 'audio/mpeg';
@@ -113,8 +119,18 @@ function contentTypeFor(plan: MediaPlan): string {
     case 'wav':
       return 'audio/wav';
     default:
-      return DEFAULT_CONTENT_TYPE;
+      return undefined;
   }
+}
+
+/**
+ * Content type the receiver is told. A local file the relay will transcode
+ * (format not cast-friendly, or unknown) is announced as the ADTS AAC it becomes.
+ */
+function contentTypeFor(plan: MediaPlan): string {
+  if (plan.kind !== 'catalog' && plan.kind !== 'upload') return DEFAULT_CONTENT_TYPE;
+  const mime = localMimeFor(plan);
+  return mime !== undefined && isCastFriendlyAudio(mime) ? mime : TRANSCODED_CONTENT_TYPE;
 }
 
 function errorText(error: unknown): string {
@@ -236,10 +252,10 @@ export class CastService {
     });
   }
 
-  async setVolume(castId: string, volume: number): Promise<void> {
+  async setVolume(userId: string, castId: string, volume: number): Promise<void> {
     await this.enqueue(castId, async () => {
       const conn = this.casts.get(castId);
-      if (!conn) return;
+      if (!conn || conn.userId !== userId) return;
       await conn.transport.setVolume(volume);
     });
   }
@@ -409,6 +425,7 @@ export class CastService {
       transcoded: false,
       offsetSec: 0,
       loadSeq: 0,
+      loadsInFlight: 0,
       idleHandledFor: 0,
       lastPlaying: false,
       lastTickAt: this.now(),
@@ -502,17 +519,22 @@ export class CastService {
     // controllers see a stuck position.
     conn.lastPlaying = false;
     conn.lastTickAt = this.now();
-    await conn.transport.load(
-      {
-        url: offsetSec > 0 ? `${relay.url}?offset=${encodeURIComponent(String(offsetSec))}` : relay.url,
-        contentType: contentTypeFor(plan),
-        title: entry.title,
-        artist: entry.artist,
-        ...(entry.artUrl !== undefined ? { artUrl: entry.artUrl } : {}),
-        ...(entry.durationSec !== undefined ? { durationSec: entry.durationSec } : {}),
-      },
-      { startSec: Math.max(0, startSec), autoplay },
-    );
+    conn.loadsInFlight += 1;
+    try {
+      await conn.transport.load(
+        {
+          url: offsetSec > 0 ? `${relay.url}?offset=${encodeURIComponent(String(offsetSec))}` : relay.url,
+          contentType: contentTypeFor(plan),
+          title: entry.title,
+          artist: entry.artist,
+          ...(entry.artUrl !== undefined ? { artUrl: entry.artUrl } : {}),
+          ...(entry.durationSec !== undefined ? { durationSec: entry.durationSec } : {}),
+        },
+        { startSec: Math.max(0, startSec), autoplay },
+      );
+    } finally {
+      conn.loadsInFlight -= 1;
+    }
   }
 
   /** Plans, mints and loads one entry; on failure marks it unavailable and pauses. */
@@ -677,8 +699,11 @@ export class CastService {
     if (this.casts.get(conn.castId) !== conn || conn.offline) return;
     if (conn.relayId) this.relay.touch(conn.relayId);
 
+    // A LOAD still in flight means this status describes the media being
+    // replaced. Ignore it; the next poll (or the PLAYING change) reports the new one.
     if (status.idle) {
-      this.handleIdle(conn);
+      if (conn.loadsInFlight > 0) return;
+      this.handleIdle(conn, status.failed === true);
       return;
     }
 
@@ -686,11 +711,15 @@ export class CastService {
     if (!sessions) return;
     const state = sessions.snapshot(conn.userId);
     if (!state || state.target?.kind !== 'cast' || state.target.castId !== conn.castId) return;
+    // The queue may already point at a newer entry (next/previous/seek, or a
+    // reload still planning). The receiver is then playing the OLD media, so its
+    // position must not be written into the new track.
+    const current = state.cursor >= 0 ? state.order[state.cursor] : undefined;
+    if (conn.loadsInFlight > 0 || !conn.entryId || !current) return;
+    if (current.entryId !== conn.entryId || entryKey(current) !== conn.loadKey) return;
     // Adopt the relay's mode before mapping the receiver clock onto a position.
     this.syncStreamInfo(conn);
-    const entryId =
-      conn.entryId ?? (state.cursor >= 0 ? state.order[state.cursor]?.entryId : undefined);
-    if (!entryId) return;
+    const entryId = conn.entryId;
 
     if (status.playing !== conn.lastPlaying) {
       conn.lastPlaying = status.playing;
@@ -717,22 +746,51 @@ export class CastService {
     );
   }
 
-  private handleIdle(conn: CastConnection): void {
+  private handleIdle(conn: CastConnection, failed: boolean): void {
     // One FINISHED event advances exactly one load, even when repeat keeps the
     // same entry (the load counter changes on every reload).
     if (conn.idleHandledFor === conn.loadSeq) return;
     conn.idleHandledFor = conn.loadSeq;
-    void this.processIdle(conn);
+    void this.processIdle(conn, conn.loadSeq, failed);
   }
 
   /**
    * Runs outside the per-cast chain: `castEnded` calls `onControl('play')`,
-   * which enqueues, so awaiting it inside the chain would deadlock.
+   * which enqueues, so awaiting it inside the chain would deadlock. Instead it
+   * waits for the chain to drain (a `next` or reload that started after this
+   * FINISHED finishes first) and then re-checks that the load it describes is
+   * still the current one. A stale FINISHED must not skip the newer track.
+   *
+   * `failed` (receiver `idleReason: ERROR`) marks the loaded entry unavailable
+   * first. Repeat-one, or a queue where every entry is now unavailable, pauses
+   * instead of advancing, so a broken entry cannot loop forever.
    */
-  private async processIdle(conn: CastConnection): Promise<void> {
+  private async processIdle(conn: CastConnection, seq: number, failed: boolean): Promise<void> {
     const sessions = this.sessions;
     if (!sessions) return;
+    const ready = await this.enqueue(
+      conn.castId,
+      async () =>
+        this.casts.get(conn.castId) === conn && conn.loadSeq === seq && conn.loadsInFlight === 0,
+    );
+    if (!ready) return;
+
     const entryId = conn.entryId;
+    if (!entryId || !this.isLoadCurrent(conn, entryId)) return;
+    if (failed) {
+      const state = sessions.snapshot(conn.userId);
+      const unavailable = new Set(state?.unavailable ?? []);
+      unavailable.add(entryId);
+      if (!state || state.repeat === 'one' || unavailable.size >= state.order.length) {
+        await this.failEntry(conn, state, entryId, new Error('receiver reported ERROR'));
+        return;
+      }
+      // Re-check right before writing: the drain above may have raced a queue command.
+      if (!this.isLoadCurrent(conn, entryId)) return;
+      sessions.setUnavailable(conn.userId, [...unavailable]);
+    }
+    // Re-check right before advancing: a `next`/`previous` may have moved the cursor.
+    if (!this.isLoadCurrent(conn, entryId)) return;
     try {
       await sessions.castEnded(conn.userId, conn.castId);
     } catch (error) {
@@ -744,6 +802,13 @@ export class CastService {
       if (state?.unavailable?.includes(failedEntryId)) return;
       await this.failEntry(conn, state, failedEntryId, error);
     }
+  }
+
+  /** True while the session's current entry is the one this load plays. */
+  private isLoadCurrent(conn: CastConnection, entryId: string): boolean {
+    const state = this.sessions?.snapshot(conn.userId);
+    const current = state && state.cursor >= 0 ? state.order[state.cursor] : undefined;
+    return current?.entryId === entryId;
   }
 
   private handleDisconnect(conn: CastConnection): void {

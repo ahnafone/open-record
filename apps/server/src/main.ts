@@ -78,8 +78,16 @@ async function main(): Promise<void> {
 
   // loadConfig leaves this null when unset; the detected URL is host-dependent,
   // so it is resolved here rather than in config.ts (unit-testable config).
+  // With a relay port, speakers get the LAN address on that port. PUBLIC_URL is
+  // deliberately skipped: it is the tunnel hostname, which a speaker should not
+  // fetch media through (router hairpin, public upload bandwidth).
+  const castRelayPort = config.castRelayPort;
+  const relayPicked =
+    castRelayPort !== null
+      ? pickLanUrl({ host: config.castRelayHost, port: castRelayPort, interfaces: networkInterfaces() })
+      : null;
   if (config.castMediaBaseUrl === null) {
-    config.castMediaBaseUrl = picked.url;
+    config.castMediaBaseUrl = relayPicked?.url ?? picked.url;
   }
   if (config.castEnabled && isLoopbackUrl(config.castMediaBaseUrl)) {
     console.warn(
@@ -121,6 +129,15 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
 
   await app.listen({ port: config.port, host: config.host });
+
+  if (app.castRelayListener && castRelayPort !== null) {
+    await app.castRelayListener.listen({ port: castRelayPort, host: config.castRelayHost });
+    console.log(
+      `open-record-server: cast relay listening on ${config.castRelayHost}:${castRelayPort} (relay route only)`,
+    );
+  } else if (castRelayPort !== null) {
+    console.log('open-record-server: CAST_RELAY_PORT is set but casting is off; no relay listener started');
+  }
 
   // Console, not the logger: the token must not reach request or app logs.
   // The desktop owns the token, so it suppresses the banner entirely.

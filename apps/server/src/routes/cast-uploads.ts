@@ -5,7 +5,8 @@ import { basename, extname } from 'node:path';
 import { pipeline } from 'node:stream';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { requireAccount } from '../plugins/auth';
-import { MAX_RELAY_TTL_MS, type RelayEntry } from '../services/media-relay';
+import { MAX_RELAY_TTL_MS, type MediaRelay, type RelayEntry } from '../services/media-relay';
+import { isCastFriendlyAudio } from '../services/transcode';
 import {
   InvalidUploadError,
   UPLOAD_MIME_BY_EXT,
@@ -13,6 +14,7 @@ import {
   UploadsDisabledError,
   UploadTooLargeError,
 } from '../services/upload-cache';
+import { streamTranscoded, type TranscodeDeps } from './cast-transcode';
 import type { RouteOptions } from './index';
 
 interface ByteRange {
@@ -87,8 +89,11 @@ function uploadErrorResponse(error: unknown): { status: number; error: string } 
 export async function serveRelayUpload(
   cache: UploadCache,
   entry: RelayEntry,
+  relay: MediaRelay,
   request: FastifyRequest,
   reply: FastifyReply,
+  offsetSec: number,
+  ffmpeg: TranscodeDeps,
 ): Promise<FastifyReply> {
   if (entry.plan.kind !== 'upload') return reply.code(410).send({ error: 'unavailable' });
 
@@ -107,6 +112,10 @@ export async function serveRelayUpload(
   const extension = extname(path).slice(1).toLowerCase();
   const mimeType =
     UPLOAD_MIME_BY_EXT[extension as keyof typeof UPLOAD_MIME_BY_EXT] ?? 'application/octet-stream';
+  // Formats the receiver cannot play (and any offset restart) are transcoded.
+  if (!isCastFriendlyAudio(mimeType) || offsetSec > 0) {
+    return streamTranscoded(entry, createReadStream(path), relay, request, reply, offsetSec, ffmpeg);
+  }
 
   const range = parseRange(request.headers.range, size);
   if (range === 'invalid') {

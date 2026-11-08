@@ -8,6 +8,7 @@ import { SignJWT } from 'jose';
 import { buildApp } from '../app';
 import { loadConfig, type ServerConfig } from '../config';
 import { MediaRelay } from '../services/media-relay';
+import { createTranscoder } from '../services/transcode';
 import { UploadCache } from '../services/upload-cache';
 import { castUploadRoutes, serveRelayUpload } from './cast-uploads';
 
@@ -80,7 +81,11 @@ describe('cast upload routes', () => {
             async (request, reply) => {
               const entry = relay.verify(request.params.token);
               if (!entry) return reply.code(404).send({ error: 'not-found' });
-              return serveRelayUpload(cache, entry, request, reply);
+              return serveRelayUpload(cache, entry, relay, request, reply, 0, {
+                transcode: createTranscoder,
+                hasFfmpeg: async () => false,
+                ffmpegPath: 'ffmpeg',
+              });
             },
           );
         },

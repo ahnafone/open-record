@@ -474,10 +474,16 @@ export class PlayerStore {
     }
     await this.engine.playAt(queueIndex);
     if (this.session.isTarget()) this.session.report('native-skip');
+    else void this.session.publishLocal();
   }
 
   // ---- Transport -------------------------------------------------------
 
+  /**
+   * Starting playback of a local-only queue publishes it to the session, so
+   * other devices see it (`publishLocal` is a no-op when nothing is playing
+   * here or a session target already exists).
+   */
   async play(): Promise<void> {
     if (this.session.mirroring()) {
       await this.session.command({ type: 'play' });
@@ -485,6 +491,7 @@ export class PlayerStore {
     }
     await this.engine.play();
     if (this.session.isTarget()) this.session.report('playing');
+    else void this.session.publishLocal();
   }
 
   async pause(): Promise<void> {
@@ -503,6 +510,7 @@ export class PlayerStore {
     }
     await this.engine.togglePlay();
     if (this.session.isTarget()) this.session.report('playing');
+    else void this.session.publishLocal();
   }
 
   async next(): Promise<boolean> {
@@ -511,7 +519,10 @@ export class PlayerStore {
       return result.ok;
     }
     const moved = await this.engine.next();
-    if (!this.session.isTarget()) return moved;
+    if (!this.session.isTarget()) {
+      void this.session.publishLocal();
+      return moved;
+    }
     if (moved) {
       this.session.report('native-skip');
       return true;
@@ -531,7 +542,10 @@ export class PlayerStore {
     }
     const before = this.engine.currentIndex();
     await this.engine.previous();
-    if (!this.session.isTarget()) return;
+    if (!this.session.isTarget()) {
+      void this.session.publishLocal();
+      return;
+    }
     // Moving back is an entry change; otherwise `previous` restarted the
     // current record, which the server sees as a position tick.
     this.session.report(

@@ -65,6 +65,15 @@ export interface ServerConfig {
    * when it is a loopback address (a speaker cannot use that).
    */
   castMediaBaseUrl: string | null;
+  /**
+   * Port of a separate listener that serves ONLY `GET /cast/relay/:token`
+   * (CAST_RELAY_PORT). Set it so speakers can reach the relay on the LAN while
+   * the main API stays on loopback behind the tunnel. Null = the relay is served
+   * by the main listener only (the pre-split behaviour).
+   */
+  castRelayPort: number | null;
+  /** Interface the cast relay listener binds (CAST_RELAY_HOST). Default 0.0.0.0. */
+  castRelayHost: string;
   /** Relay token TTL in seconds; slid while the cast session is active. */
   castRelayTtlSec: number;
   /** Per-user upload cache cap in MB. 0 disables uploads. */
@@ -244,8 +253,14 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     .map((o) => o.trim())
     .filter(Boolean);
 
+  const port = int(env, 'PORT', 8787, 1, 65535);
+  const castRelayPort = env['CAST_RELAY_PORT']?.trim() ? int(env, 'CAST_RELAY_PORT', 8788, 1, 65535) : null;
+  if (castRelayPort !== null && castRelayPort === port) {
+    throw new ConfigError('CAST_RELAY_PORT must differ from PORT');
+  }
+
   return {
-    port: int(env, 'PORT', 8787, 1, 65535),
+    port,
     host: env['HOST']?.trim() || '0.0.0.0',
     token,
     quietStartup: bool(env, 'OPEN_RECORD_QUIET_STARTUP', false),
@@ -267,6 +282,8 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     guestAllowedHosts: guestAllowedHosts(env),
     castEnabled: bool(env, 'CAST_ENABLED', true),
     castMediaBaseUrl: httpUrl(env, 'CAST_MEDIA_BASE_URL', null),
+    castRelayPort,
+    castRelayHost: env['CAST_RELAY_HOST']?.trim() || '0.0.0.0',
     castRelayTtlSec: int(env, 'CAST_RELAY_TTL_SEC', 900, 60, 86_400),
     castCacheMb: int(env, 'CAST_CACHE_MB', 2048, 0, 1_048_576),
     castUploadMaxMb: int(env, 'CAST_UPLOAD_MAX_MB', 200, 1, 4096),

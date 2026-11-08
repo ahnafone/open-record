@@ -172,6 +172,11 @@ interface UpNextRow {
           <span class="status-text"
             ><or-spinner [size]="18" />Reconnecting to the server…</span
           >
+        } @else if (refused()) {
+          <span class="status-bad"
+            ><or-icon name="alert" [size]="18" />Sync refused — sign in with an
+            approved account</span
+          >
         } @else if (staleTarget()) {
           <span class="status-bad"
             ><or-icon name="alert" [size]="18" />Not responding ·</span
@@ -655,6 +660,11 @@ export class NowPlayingPage {
     () => this.session.connection() === 'retrying',
   );
 
+  /** The server refused this account or device for sync (not a network blip). */
+  protected readonly refused = computed(
+    () => this.session.connection() === 'refused',
+  );
+
   /**
    * Whether the status line has a message to show. Mirrors the branches of the
    * `.status` template so the empty line can collapse (no reserved gap).
@@ -664,6 +674,7 @@ export class NowPlayingPage {
       this.player.isLoading() ||
       !!this.player.error() ||
       this.reconnecting() ||
+      this.refused() ||
       this.staleTarget() ||
       this.session.needsGesture() ||
       this.session.mirroring(),

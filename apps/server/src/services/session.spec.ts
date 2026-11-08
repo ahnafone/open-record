@@ -409,6 +409,37 @@ describe('transfer and the cast lock', () => {
     expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
   });
 
+  it('keeps a queue change made while a cast transfer is starting', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    // A queue edit lands while the cast is still starting.
+    await setQueue(['a', 'b', 'c'], 0);
+    release();
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    expect(entryIds()).toEqual(['a', 'b', 'c']);
+    const state = stateOf();
+    expect(state.target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(state.revision).toBe(result.ok ? result.revision : -1);
+  });
+
   it('leaves the previous target untouched and records castOwner when the cast is busy', async () => {
     castHooks();
     join('u', 'a');
@@ -529,6 +560,119 @@ describe('transfer and the cast lock', () => {
     expect(stateOf('v').target).toBeNull();
     expect(stateOf('v').castOwner).toEqual({ deviceId: 'device-c', deviceName: 'Device c' });
     expect(stateOf('v').revision).toBe(revisions.v + 1);
+  });
+
+  it('reloads the speaker when the cursor moves during a pending cast transfer', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    // The user skips to `b` while the speaker is still loading `a`.
+    await setQueue(['a', 'b', 'c'], 1);
+    release();
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    expect(stateOf().cursor).toBe(1);
+    expect(hooks.stateCalls).toHaveLength(1);
+    expect(hooks.stateCalls[0]?.castId).toBe('cast-1');
+    expect(hooks.stateCalls[0]?.state.cursor).toBe(1);
+  });
+
+  it('fails with target-changed and releases the speaker when a device transfer lands mid-transfer', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    expect((await transferToDevice('b')).ok).toBe(true);
+    release();
+
+    expect(await pending).toEqual({ ok: false, error: 'target-changed' });
+    expect(stateOf().target).toEqual({ kind: 'device', clientId: 'b', deviceId: 'device-b' });
+    expect(hooks.events).toContain('stop:u');
+    expect(hooks.owner).toBeNull();
+  });
+
+  it('times out a stuck cast transfer, lets the next transfer run, and keeps a late release from stopping it', async () => {
+    service = new SessionService({ now: () => now, castTransferTimeoutMs: 20 });
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    let stuck = true;
+    hooks.onTarget = async (...args) => {
+      if (stuck && args[3] !== null) {
+        stuck = false;
+        await gate;
+      }
+      return onTarget(...args);
+    };
+
+    const first = await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    expect(first).toEqual({ ok: false, error: 'cast-unavailable' });
+    expect(stateOf().target).toBeNull();
+
+    // The stuck hook no longer blocks this user's transfers.
+    const second = await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    expect(second.ok).toBe(true);
+
+    // The abandoned attempt finishes late: it must not stop the speaker the second one owns.
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(hooks.owner?.userId).toBe('u');
   });
 });
 

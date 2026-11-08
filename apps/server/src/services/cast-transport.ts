@@ -17,8 +17,10 @@ export interface CastStatus {
   playing: boolean;
   positionSec: number;
   durationSec?: number;
-  /** True once the receiver reached the end of the media (`idleReason: FINISHED`). */
+  /** True once the receiver reached the end of the media (`idleReason: FINISHED`) or failed it (`ERROR`). */
   idle?: boolean;
+  /** True when the receiver stopped on a media error (`idleReason: ERROR`). Always with `idle`. */
+  failed?: boolean;
   volume: number;
 }
 
@@ -59,7 +61,12 @@ export function toCastStatus(status: CastMediaStatus, volume: number): CastStatu
     playing: status.playerState === 'PLAYING',
     positionSec: positiveNumber(status.currentTime) ?? 0,
     ...(durationSec !== undefined ? { durationSec } : {}),
-    ...(status.idleReason === 'FINISHED' ? { idle: true } : {}),
+    // FINISHED advances the queue. ERROR is also "idle" but flagged, so the
+    // session marks the entry unavailable before it advances. INTERRUPTED and
+    // CANCELLED (another sender took the device, or a stop) are plain pauses:
+    // they must never advance the queue.
+    ...(status.idleReason === 'FINISHED' || status.idleReason === 'ERROR' ? { idle: true } : {}),
+    ...(status.idleReason === 'ERROR' ? { failed: true } : {}),
     volume: normaliseVolume(volume),
   };
 }

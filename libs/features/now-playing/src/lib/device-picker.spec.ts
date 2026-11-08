@@ -79,6 +79,7 @@ function makeSession() {
     target: computed(() => state()?.target ?? null),
     targetStale: computed(() => state()?.targetStale === true),
     error: signal<string | null>(null),
+    connection: signal<'open' | 'refused'>('open'),
     castUpload: signal<{
       done: number;
       total: number;

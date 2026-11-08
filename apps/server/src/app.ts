@@ -7,6 +7,7 @@ import Fastify, {
   type FastifyPluginAsync,
   type FastifyServerOptions,
 } from 'fastify';
+import { buildCastRelayApp } from './cast-relay-app';
 import { ConfigError, type ServerConfig } from './config';
 import {
   createSupabaseVerifier,
@@ -27,6 +28,16 @@ import { SessionService } from './services/session';
 import { UploadCache } from './services/upload-cache';
 import { configureResolveLimits, resolveStream, type StreamResponse } from './services/ytdlp';
 import { validateUrl, type ValidatedUrl } from './services/url-guard';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /**
+     * Relay-only listener (CAST_RELAY_PORT). Present only when this app built
+     * its own cast services and the port is set; `main.ts` calls `listen` on it.
+     */
+    castRelayListener?: FastifyInstance;
+  }
+}
 
 /** Cast services a caller (tests) can inject instead of constructing them. */
 export interface CastServices {
@@ -203,6 +214,17 @@ export async function buildApp(
       castServices?.resolveStream ?? ((url: string) => resolveStream(url, 'highest')),
     validateRelayUrl: castServices?.validateRelayUrl ?? validateUrl,
   };
+
+  // CAST_RELAY_PORT: a relay-only listener for speakers on the LAN. Built here so
+  // it shares the live MediaRelay and caches; `main.ts` starts it. Only when this
+  // app owns the cast services (tests that inject them listen nowhere).
+  if (ownedCast && config.castRelayPort !== null) {
+    const relayListener = await buildCastRelayApp(routeOptions, options.logger ?? false);
+    app.decorate('castRelayListener', relayListener);
+    app.addHook('onClose', async () => {
+      await relayListener.close();
+    });
+  }
 
   for (const route of options.routes ?? defaultRoutes) {
     await app.register(route, routeOptions);
