@@ -300,6 +300,25 @@ a:hover {
   color: var(--color-on-primary);
 }
 
+/* Secondary text inside a primary button (download file names). The global
+   .muted colour is light grey and unreadable on coral, so inherit the
+   on-primary colour and stack it under the label. */
+.button--primary .muted {
+  color: inherit;
+  /* Checked: about 6:1 on coral, above AA. Do not lower without re-checking. */
+  opacity: 0.85;
+  font-weight: 500;
+  font-size: var(--text-meta);
+  overflow-wrap: anywhere;
+}
+
+.button--primary:has(> .muted) {
+  flex-direction: column;
+  gap: 0;
+  padding-block: var(--space-sm);
+  text-align: center;
+}
+
 .button--ghost {
   background: transparent;
 }
