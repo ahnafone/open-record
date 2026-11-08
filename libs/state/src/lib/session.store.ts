@@ -49,6 +49,8 @@ const REPORT_DEDUPE_MS = 1000;
 
 /** After a failed publish, automatic re-publishing waits this long (no retry loop). */
 const PUBLISH_RETRY_MS = 15_000;
+/** Automatic re-publishes allowed in a row before the client waits for a new loss. */
+const MAX_AUTO_REPUBLISHES = 2;
 
 /**
  * Engine media identity for session applies. The wire drops `sourceFile`, so
@@ -300,7 +302,11 @@ export class SessionStore {
   private targetActive = false;
   private applyingRemote = false;
   private applyRunning = false;
-  private applyPending: SessionState | null = null;
+  private applyPending: {
+    state: SessionState;
+    /** A local seek is newer than this state's anchor: do not correct to it. */
+    keepPosition: boolean;
+  } | null = null;
   /** Revision whose engine drift was already reconciled (one retry per revision). */
   private reconciledRevision = -1;
   private observedEntryId = '';
@@ -323,11 +329,30 @@ export class SessionStore {
    * of this publish would rewind a skip. Checked once the publish finishes.
    */
   private pendingIncoming: SessionState | null = null;
+  /** The server lost its owner (restart, cleared target) during a publish. */
+  private ownerGoneWhilePublishing = false;
+  /** Entry ids this publish sent; the echo of those is not an owner loss. */
+  private readonly publishEntryIds = new Set<string>();
+  /** Automatic re-publishes since the last success or genuine owner loss. */
+  private republishStreak = 0;
+  /** Engine was seen paused at any point during a publish (a resume may follow). */
+  private pausedDuringHold = false;
   /** Automatic re-publishing is paused until this time after a failed publish. */
   private publishRetryAt = 0;
+  /** Scheduled re-publish after the back-off; one at a time. */
+  private republishTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.clientId.set(newClientId());
+
+    // Remember a local resume that lands while a publish holds the state.
+    // Only the pause is recorded here; whether a resume followed is sampled
+    // when the publish settles, so loading or coalesced effects cannot hide it.
+    effect(() => {
+      // Read first: the effect must track the status even while idle.
+      const status = this.engine.status();
+      if (this.publishing && status === 'paused') this.pausedDuringHold = true;
+    });
 
     // Connect/disconnect when the gate inputs change (auth, settings, URL).
     effect(() => {
@@ -506,31 +531,137 @@ export class SessionStore {
 
     this.publishing = true;
     this.pendingIncoming = null;
-    // Set when the second pass succeeded: its own echo supersedes held state.
-    let superseded = false;
-    // Track id of the last successful pass, or null.
-    let published: string | null = null;
+    this.ownerGoneWhilePublishing = false;
+    this.publishEntryIds.clear();
+    this.pausedDuringHold = false;
+    // Track id of the last pass that transferred playing to this client. A
+    // failed later pass never clears it: the server still has that queue.
+    let lastGood: string | null = null;
+    // Set when the second pass succeeded: its own echo follows held state.
+    let secondPassOk = false;
+    // Set when the second pass ran and failed: it may have discarded the queue.
+    let secondPassFailed = false;
     try {
-      published = await this.publishQueue();
+      lastGood = await this.publishQueue();
       // Bounded: one more pass when the engine left the published track
       // mid-publish. Native skips (media keys) bypass PlayerStore, so only this
       // comparison sees them. Echoes never trigger a pass. The first pass may
       // already have transferred the target to this client.
-      if (published !== null && this.engine.current()?.id !== published) {
-        published = await this.publishQueue();
-        superseded = published !== null;
+      if (lastGood !== null && this.engine.current()?.id !== lastGood) {
+        const second = await this.publishQueue();
+        if (second !== null) {
+          lastGood = second;
+          secondPassOk = true;
+        } else {
+          secondPassFailed = true;
+        }
       }
-      return published !== null;
+      return lastGood !== null;
     } finally {
       this.publishing = false;
+      const ownerGone = this.ownerGoneWhilePublishing;
+      this.ownerGoneWhilePublishing = false;
+      this.publishEntryIds.clear();
       const pending = this.pendingIncoming;
       this.pendingIncoming = null;
+      // Read before the flush clears it: a seek is newer than the held state.
+      const seeked = this.seekHeld;
+      // Paused at some point during the hold and playing again now.
+      const resumed =
+        this.pausedDuringHold &&
+        (this.engine.status() === 'playing' || this.engine.intendsToPlay);
+      this.pausedDuringHold = false;
       // Replayed before the held state is settled: applying that state can
       // change the engine's status, which would hide what the hold swallowed.
       this.flushHeldSeek();
-      this.replayHeldEvents(published, superseded);
-      if (pending) this.settlePendingIncoming(pending, superseded);
+      const skipReported = this.replayHeldEvents(lastGood);
+      if (pending) {
+        this.settlePendingIncoming(pending, {
+          // The newer report (or the second pass's own echo) supersedes a
+          // held state for another track.
+          stale: skipReported || secondPassOk,
+          seeked,
+          resumed,
+        });
+      }
+      // A lost owner, or a failed second pass that discarded its queue, can
+      // leave this device playing with an empty session. Publish again once
+      // the back-off allows. Keyed on those events (not on an empty session
+      // alone), so a publish that succeeds without an echo cannot loop. Only a
+      // publish the server confirmed (this client targets a non-empty queue)
+      // ends the streak; each automatic re-publish spends one of
+      // `MAX_AUTO_REPUBLISHES`, so a persistent refusal cannot retry forever.
+      if (this.isTarget() && (this.session()?.order.length ?? 0) > 0) {
+        this.republishStreak = 0;
+      }
+      const serverEmpty = (this.session()?.order.length ?? 0) === 0;
+      const republish =
+        this.localPlaybackActive() &&
+        ((ownerGone && this.republishNeeded()) ||
+          (secondPassFailed && serverEmpty && this.isTarget()));
+      if (republish && this.republishStreak < MAX_AUTO_REPUBLISHES) {
+        this.republishStreak++;
+        this.scheduleRepublish();
+      }
     }
+  }
+
+  /**
+   * True for the target-less echo of this publish's own queue. The server
+   * broadcasts `setQueue` before the transfer, so that echo is not a lost owner.
+   */
+  private isOwnPublishEcho(state: SessionState | null): boolean {
+    return (
+      this.publishing &&
+      state !== null &&
+      state.target === null &&
+      state.order.length > 0 &&
+      state.order.every((entry) => this.publishEntryIds.has(entry.entryId))
+    );
+  }
+
+  private cancelRepublish(): void {
+    if (this.republishTimer) clearTimeout(this.republishTimer);
+    this.republishTimer = null;
+  }
+
+  /**
+   * True while this device plays but no session queue is owned here: the
+   * session has no target, or this client targets an emptied queue.
+   */
+  private republishNeeded(): boolean {
+    if (!this.localPlaybackActive()) return false;
+    return (
+      !this.target() ||
+      (this.isTarget() && (this.session()?.order.length ?? 0) === 0)
+    );
+  }
+
+  /**
+   * Publish again now, or when the back-off ends. One timer at a time; the
+   * timer re-checks, so a publish that already restored the session is not
+   * repeated.
+   */
+  private scheduleRepublish(): void {
+    if (this.republishTimer) return;
+    const wait = this.publishRetryAt - Date.now();
+    if (wait <= 0) {
+      this.keepLocalPlayback();
+      return;
+    }
+    this.republishTimer = setTimeout(() => {
+      this.republishTimer = null;
+      // Offline: nothing to publish to. The welcome path re-checks ownership.
+      if (this.port?.connection() !== 'open') return;
+      if (!this.republishNeeded()) return;
+      if (Date.now() < this.publishRetryAt) {
+        // A publish failed meanwhile and the back-off still holds: wait out the
+        // rest of it. Bounded by the streak, like the publishes it leads to.
+        if (this.republishStreak < MAX_AUTO_REPUBLISHES) this.scheduleRepublish();
+        return;
+      }
+      this.keepLocalPlayback();
+    }, wait);
   }
 
   /** Report a local seek made while the hold was on, now that it is over. */
@@ -546,36 +677,55 @@ export class SessionStore {
    * cursor), and a terminal status. Baselines followed the engine during the
    * hold, so the observer would not report them.
    */
-  private replayHeldEvents(published: string | null, superseded: boolean): void {
-    if (!this.isTarget()) return;
+  private replayHeldEvents(lastGood: string | null): boolean {
+    if (!this.isTarget()) return false;
+    const entryId = this.engineEntryId();
+    // The engine left the last published track: the server still has the old
+    // cursor, so report the move. Only for the entry the engine is on now.
+    let skipReported = false;
     if (
-      superseded &&
-      published !== null &&
-      this.engine.current()?.id !== published &&
-      this.engineEntryId()
+      lastGood !== null &&
+      this.engine.current()?.id !== lastGood &&
+      entryId
     ) {
-      this.emitReport('native-skip');
+      this.emitReport('native-skip', {
+        entryId,
+        playing: this.engine.status() === 'playing' || this.engine.intendsToPlay,
+      });
+      skipReported = true;
     }
     // A state applied by the hold owns the engine: leave its status alone.
-    if (this.applyingRemote) return;
+    // A skip does not hide a terminal status of the engine's current entry.
+    if (this.applyingRemote || !entryId) return skipReported;
     const status = this.engine.status();
-    if (status === 'ended') this.emitReport('ended');
-    else if (status === 'error') this.emitReport('playing');
+    if (status === 'ended') this.emitReport('ended', { entryId });
+    else if (status === 'error') this.emitReport('playing', { entryId });
+    return skipReported;
   }
 
   /**
    * Apply the server state that arrived mid-publish, once the publish is over.
    * Runs whenever this client is the target, even if the publish failed: the
-   * server is authoritative then. A state for another track is stale only when
-   * a second pass succeeded (its own echo follows); otherwise it is a remote
-   * command made during the publish and is applied. A playing state while the
-   * engine is paused is applied paused, and the server is told to pause.
+   * server is authoritative then. A state for another track is stale when a
+   * newer report already moved the server past it (`stale`); otherwise it is a
+   * remote command made during the publish and is applied. A seek made during
+   * the hold is newer than the state's anchor, so the anchor must not drag the
+   * engine back. A paused state while the engine plays is answered with a play
+   * command, not a pause, but only when a local resume was seen during the
+   * hold; otherwise the held paused state is a remote pause and is applied. A
+   * playing state while the engine is paused is applied paused, and the server
+   * is told to pause. If the server refuses a replayed play, the engine is
+   * paused and the server is told, so both agree; a transport failure leaves
+   * local playback alone.
    */
-  private settlePendingIncoming(state: SessionState, superseded: boolean): void {
+  private settlePendingIncoming(
+    state: SessionState,
+    opts: { stale: boolean; seeked: boolean; resumed: boolean },
+  ): void {
     if (!this.isTarget()) return;
     const cursorId =
       state.cursor >= 0 ? state.order[state.cursor]?.id : undefined;
-    if (superseded && cursorId !== this.engine.current()?.id) return;
+    if (opts.stale && cursorId !== this.engine.current()?.id) return;
     // An emptied queue (a failed publish's discard) must not stop playback
     // that is still running here.
     if (state.cursor < 0 && this.localPlaybackActive()) return;
@@ -585,10 +735,27 @@ export class SessionStore {
           this.recordRefusal(paused.error ?? 'Could not pause playback.');
         }
       });
-      this.scheduleApply({ ...state, playing: false });
+      this.scheduleApply({ ...state, playing: false }, opts.seeked);
       return;
     }
-    this.scheduleApply(state);
+    if (!state.playing && this.localPlaybackActive() && opts.resumed) {
+      // The user resumed during the publish: keep the engine playing, and tell
+      // the server rather than letting the held `paused` state stop it.
+      const entryId = this.engineEntryId();
+      void this.command({ type: 'play' }).then((played) => {
+        if (played.ok || !this.isTarget()) return;
+        const error = played.error ?? 'Could not start playback.';
+        this.recordRefusal(error);
+        // A transport failure says nothing about the server's state: keep
+        // playing locally. Only a real refusal makes the server read paused.
+        if (QUIET_COMMAND_FAILURES.has(error)) return;
+        void this.engine.pause();
+        this.emitReport('playing', { entryId, playing: false });
+      });
+      this.scheduleApply({ ...state, playing: true }, opts.seeked);
+      return;
+    }
+    this.scheduleApply(state, opts.seeked);
   }
 
   /**
@@ -648,6 +815,7 @@ export class SessionStore {
       shuffle,
       ...(shuffle && baseOrderIds ? { shuffled: true, baseOrderIds } : {}),
     });
+    for (const entry of entries) this.publishEntryIds.add(entry.entryId);
     let result = await this.command(setQueue());
     if (!result.ok) {
       // One retry with the same entry ids, as in startSession.
@@ -872,8 +1040,16 @@ export class SessionStore {
    * engine back.
    */
   reportSeek(): void {
-    if (!this.started || !this.port || !this.isTarget()) return;
+    if (!this.started || !this.port) return;
     if (this.applyingRemote) return;
+    // During a publish the target is not this client until its transfer is
+    // echoed, so the seek is recorded first: the hold reports it at the end.
+    if (this.publishing) {
+      this.lastLocalSeekAt = Date.now();
+      this.seekHeld = true;
+      return;
+    }
+    if (!this.isTarget()) return;
     this.lastLocalSeekAt = Date.now();
     if (this.holdingEcho()) {
       this.seekHeld = true;
@@ -1037,6 +1213,7 @@ export class SessionStore {
     this.resetCastUploads();
     this.stopClock();
     this.stopKeepalive();
+    this.cancelRepublish();
   }
 
   private stopTargetPlayback(options: { keepPlaying?: boolean } = {}): void {
@@ -1060,6 +1237,7 @@ export class SessionStore {
     this.unsubscribeMessage = undefined;
     this.stopClock();
     this.stopKeepalive();
+    this.cancelRepublish();
   }
 
   // ---- Messages -----------------------------------------------------------
@@ -1131,8 +1309,16 @@ export class SessionStore {
       next === null || (next.target === null && next.order.length > 0);
     if (!nowTarget && ownerGone && this.localPlaybackActive()) {
       // A publish in flight already re-establishes the target. Its own echo
-      // (target null) must not restart it or hold a second publish.
-      if (this.publishing) return;
+      // (target null) must not restart it or hold a second publish. Only a
+      // genuine loss is remembered: if the publish does not end with a target,
+      // the finally publishes again. The old target's pending state and status
+      // are dropped so a later echo cannot treat this client as still targeted.
+      if (this.publishing) {
+        if (!this.isOwnPublishEcho(next)) this.ownerGoneWhilePublishing = true;
+        this.targetActive = false;
+        this.applyPending = null;
+        return;
+      }
       this.stopTargetPlayback({ keepPlaying: true });
       this.keepLocalPlayback();
       return;
@@ -1143,6 +1329,8 @@ export class SessionStore {
     }
     if (nowTarget) {
       this.targetActive = true;
+      // The server confirms this client owns a queue: a republish has succeeded.
+      if ((next?.order.length ?? 0) > 0) this.republishStreak = 0;
       if (this.publishing) this.pendingIncoming = next;
       else this.scheduleApply(next);
     } else if (wasTarget) {
@@ -1257,8 +1445,8 @@ export class SessionStore {
     return entries;
   }
 
-  private scheduleApply(state: SessionState): void {
-    this.applyPending = state;
+  private scheduleApply(state: SessionState, keepPosition = false): void {
+    this.applyPending = { state, keepPosition };
     this.applyingRemote = true;
     if (this.applyRunning) return;
     this.applyRunning = true;
@@ -1268,11 +1456,11 @@ export class SessionStore {
   private async runApplies(): Promise<void> {
     try {
       while (this.applyPending) {
-        const state = this.applyPending;
+        const { state, keepPosition } = this.applyPending;
         this.applyPending = null;
         if (!this.isTarget()) continue;
         try {
-          await this.applyTarget(state);
+          await this.applyTarget(state, keepPosition);
         } catch (error) {
           this.error.set(errorText(error));
         }
@@ -1286,8 +1474,11 @@ export class SessionStore {
     }
   }
 
-  private async applyTarget(state: SessionState): Promise<void> {
-    await this.applyState(state);
+  private async applyTarget(
+    state: SessionState,
+    keepPosition: boolean,
+  ): Promise<void> {
+    await this.applyState(state, keepPosition);
     if (!this.isTarget()) return;
 
     // The engine can land on a different entry than the server's cursor (e.g.
@@ -1300,10 +1491,13 @@ export class SessionStore {
     if (actual === expected) return;
     if (this.reconciledRevision === state.revision) return;
     this.reconciledRevision = state.revision;
-    await this.applyState(state);
+    await this.applyState(state, keepPosition);
   }
 
-  private async applyState(state: SessionState): Promise<void> {
+  private async applyState(
+    state: SessionState,
+    keepPosition = false,
+  ): Promise<void> {
     const tracks = this.mapEntries(state.order).map((entry) => entry.track);
     const cursor = state.cursor;
     if (cursor < 0 || cursor >= tracks.length) {
@@ -1326,11 +1520,15 @@ export class SessionStore {
       mediaKey: sessionMediaKey,
     });
     if (!this.isTarget()) return;
-    // A reload starts at 0, and the anchor moved while the state travelled.
-    await this.engine.seekIfDrifted(
-      anchoredPosition(state, Date.now() + this.serverSkew()),
-      SEEK_TOLERANCE_SEC,
-    );
+    // The same song kept its position: a seek held during a publish is newer
+    // than this anchor, so correcting to it would undo the seek.
+    if (!(keepPosition && sameSong)) {
+      // A reload starts at 0, and the anchor moved while the state travelled.
+      await this.engine.seekIfDrifted(
+        anchoredPosition(state, Date.now() + this.serverSkew()),
+        SEEK_TOLERANCE_SEC,
+      );
+    }
     if (!this.isTarget()) return;
 
     if (state.playing) {
