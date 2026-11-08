@@ -84,7 +84,7 @@ export function readOrCreateToken(dataDir: string): string {
       // for a single-instance desktop app, then enforce the mode bits.
       writeFileSync(path, `${token}\n`, { mode: 0o600 });
     } else {
-      throw new Error(`could not create the server token: ${errorText(err)}`);
+      throw new Error(`could not create the server token: ${errorText(err)}`, { cause: err });
     }
   }
   try {

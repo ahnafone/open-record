@@ -200,7 +200,7 @@ export class FailedDownloadsStore {
       track = await this.remote.resolveUrl(url, signal);
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
-      throw new Error(linkCheckError(error));
+      throw new Error(linkCheckError(error), { cause: error });
     }
     return this.checkCandidate(track, signal);
   }
@@ -218,7 +218,7 @@ export class FailedDownloadsStore {
       await this.resolver.probe(url, signal);
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
-      throw new Error(linkCheckError(error));
+      throw new Error(linkCheckError(error), { cause: error });
     }
     return track;
   }

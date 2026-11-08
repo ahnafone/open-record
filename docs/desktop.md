@@ -4,7 +4,7 @@ Open Record for desktop bundles the web UI, the local Fastify server, yt-dlp and
 one Electron app. It works offline for the bundled catalogue, local imports and playback;
 an optional Supabase project adds sync and lets phones on your Wi-Fi use the same library.
 The window loads a fixed local address, `http://127.0.0.1:47900`, not a public server (see
-[Deploy over HTTPS](../README.md#deploy-over-https)).
+[Public access](../README.md#public-access)).
 
 > **Unsigned builds.** SmartScreen will warn you on Windows, and there is no
 > auto-update. Windows installers are CI-built and untested here. macOS installers are
@@ -203,8 +203,8 @@ only.
 - **HTTP, not HTTPS.** Your Supabase session and other LAN traffic are unencrypted. Use a
   network you trust, and turn the toggle off when done. Keep the computer awake, and
   reserve a DHCP address if its IP changes. On macOS 15+, allow the Local Network prompt.
-- **Never port-forward 47900** or expose it to the internet; for outside access run the
-  separate public server in [Deploy over HTTPS](../README.md#deploy-over-https).
+- **Never port-forward 47900** or expose it to the internet; for outside access,
+  put your own server behind HTTPS, as described in [Public access](../README.md#public-access).
 - **Same subnet, no client isolation.** "AP isolation" and guest networks block
   phone-to-computer traffic; browsers on `https://` pages cannot use an `http://` server.
 
@@ -257,7 +257,7 @@ old one, and the fixed address and reused folder keep the library, imports and s
 
 - Unsigned installers and no auto-update: expect warnings; update by reinstalling. The
   server is LAN-only: never expose 47900; use
-  [Deploy over HTTPS](../README.md#deploy-over-https) for public access.
+  [Public access](../README.md#public-access) for outside access.
 - Remote search, streaming and saving need internet and the bundled yt-dlp. Stream links
   are IP-bound and expire, so remote playback works on the same network as the desktop,
   not from mobile data.

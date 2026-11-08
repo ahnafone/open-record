@@ -1,20 +1,21 @@
 ---
 import { url } from '../lib/site';
 
-// Desktop capture from docs/screenshots (07-desktop.png) inside a window frame.
+// Desktop capture from docs/screenshots (07-desktop.png by default) inside a window frame.
 interface Props {
   alt: string;
   caption: string;
   eager?: boolean;
+  name?: string;
 }
 
-const { alt, caption, eager = false } = Astro.props;
+const { alt, caption, eager = false, name = '07-desktop' } = Astro.props;
 ---
 
 <figure class="window-frame">
   <div class="window-frame__bar" aria-hidden="true"><span></span><span></span><span></span></div>
   <img
-    src={url('screenshots/07-desktop.webp')}
+    src={url(`screenshots/${name}.webp`)}
     width="1280"
     height="900"
     alt={alt}

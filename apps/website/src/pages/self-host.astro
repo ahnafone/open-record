@@ -1,88 +1,203 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import PageHeader from '../components/PageHeader.astro';
-import { PUBLIC_HOSTING_URL, SERVER_GUIDE_URL, url } from '../lib/site';
+import PhoneShot from '../components/PhoneShot.astro';
+import WindowShot from '../components/WindowShot.astro';
+import { DOWNLOADS, DESKTOP_GUIDE_URL, README_URL, REPO, SERVER_GUIDE_URL, url } from '../lib/site';
 ---
 
 <Layout
   title="Self-host"
   path="self-host/"
-  description="Run your own Open Record server and expose it on a domain through a Cloudflare Tunnel. Keep the server bound to loopback and let cloudflared be the only way in."
+  description="Run Open Record on your own network: the desktop app's bundled server, or the server from source, paired with your phone over Wi-Fi."
 >
   <div class="container">
     <PageHeader
       title="Self-host"
-      lead="Run the Open Record server on a machine you control and publish it on your own domain. The supported public setup is a Cloudflare Tunnel."
+      lead="Run the Open Record server on a machine you control and use it from your phone on the same Wi-Fi. Start with the desktop app; run it from source if you want the server on its own."
     />
 
     <div class="page-body">
-      <section aria-labelledby="self-host-when">
-        <h2 id="self-host-when">When to self-host</h2>
-        <p class="prose">
-          Self-hosting gives your phone and web app a server you run, with your own Supabase project and your own
-          access rules. You do not need it for the desktop app, which bundles its own local server.
-        </p>
-        <ul class="rule-list">
-          <li>Keep the server bound to <code>127.0.0.1</code>. The tunnel is the only way in.</li>
-          <li>Set <code>PUBLIC_URL</code> to the public address you own.</li>
-          <li>Keep secrets such as the Supabase service role key only in the server's <code>.env</code> file.</li>
-        </ul>
-      </section>
+      <nav aria-label="On this page">
+        <div class="card__actions">
+          <a class="button button--primary" href="#desktop">Desktop app</a>
+          <a class="button" href="#run-from-source">Run from source</a>
+          <a class="button button--ghost" href="#away-from-home">Away from home</a>
+          <a class="button button--ghost" href="#accounts">Accounts (optional)</a>
+        </div>
+      </nav>
 
-      <section aria-labelledby="self-host-steps">
-        <h2 id="self-host-steps">Steps</h2>
+      <section id="desktop" aria-labelledby="desktop-title">
+        <h2 id="desktop-title">Desktop app</h2>
+        <p class="prose">
+          The desktop app runs its own local server. Turn on phone access and your phone can use it over your home
+          Wi-Fi. There is no server setup beyond a firewall rule and your Supabase project.
+        </p>
         <ol class="steps">
           <li>
-            <h3>Start the server on loopback</h3>
-            <p>Bind the server to the loopback address only, so nothing on your network can reach it directly.</p>
-            <code class="code-line">npm run server:up -- --host 127.0.0.1</code>
-          </li>
-          <li>
-            <h3>Create a tunnel</h3>
+            <h3>Install the desktop app</h3>
             <p>
-              Install <code>cloudflared</code>, create a tunnel, and route your hostname to it. The tunnel forwards
-              HTTPS traffic from the public hostname to the local server on port 8787.
+              Get the Windows or Linux installer. The installers are unsigned. macOS has no installer yet; build the
+              desktop app from source.
             </p>
-            <code class="code-line">cloudflared tunnel run open-record</code>
+            <div class="card__actions">
+              <a class="button button--primary" href={DOWNLOADS.linuxDeb} rel="noopener">Linux .deb (recommended)</a>
+              <a class="button" href={DOWNLOADS.windows} rel="noopener">Windows installer</a>
+              <a class="button" href={DOWNLOADS.linuxAppImage} rel="noopener">Linux AppImage</a>
+              <a class="button button--ghost" href={url('install/')}>All downloads</a>
+            </div>
           </li>
           <li>
-            <h3>Set the server environment</h3>
+            <h3>Allow phones on this network</h3>
             <p>
-              In <code>apps/server/.env</code>, set the values below. Apply the proxy settings only when cloudflared is
-              the only path into the server.
+              Open <strong>Settings &gt; Desktop app</strong>, or go to <code>http://127.0.0.1:47900/desktop</code>.
+              Turn on <strong>Allow phones on this network</strong>. The server restarts on your network address and
+              shows a LAN address, a copy button and a QR code.
             </p>
-            <code class="code-line">HOST=127.0.0.1
-PUBLIC_URL=https://your-domain.example
-TRUST_PROXY=127.0.0.1/8,::1
-TRUST_CF_CONNECTING_IP=true</code>
+            <p>Allow TCP 47900 from your own subnet only:</p>
+            <code class="code-line">sudo ufw allow from 192.168.1.0/24 to any port 47900 proto tcp</code>
+            <p>
+              On Windows, allow Open Record on the Private network. On macOS, allow incoming connections for Open Record
+              in System Settings &gt; Network &gt; Firewall.
+            </p>
           </li>
           <li>
-            <h3>Check it</h3>
-            <p>Open your public hostname in a browser. If it does not load, confirm the server is running and the tunnel shows as connected.</p>
+            <h3>Pair your phone</h3>
+            <p>
+              Install the Android APK, or open the LAN address in the phone browser. In the app, go to
+              <strong>Settings &gt; Stream server</strong>, then choose <strong>Scan QR code</strong> or type the
+              address. The desktop server never shares its local token with phones, so the phone signs in with the same
+              Supabase account as the desktop app. Set that up first: see <a href="#accounts">Accounts</a>.
+            </p>
+            <div class="card__actions">
+              <a class="button" href={DOWNLOADS.android} rel="noopener">Android APK</a>
+            </div>
           </li>
         </ol>
+        <WindowShot
+          name="09-desktop-phones"
+          alt="Open Record desktop app, Desktop app settings: Allow phones on this network is on, showing the LAN address http://192.168.1.20:47900 and a pairing QR code."
+          caption="Desktop app with phones allowed. The phone needs this address and the same Supabase account."
+        />
+        <div class="gallery">
+          <PhoneShot
+            name="08-settings"
+            alt="Phone Settings screen with the Stream server section: a Scan QR code button and a server URL field."
+            label="Settings > Stream server"
+            caption="Scan the QR code, or type the LAN address."
+          />
+        </div>
+        <p class="meta">
+          Full desktop guide: <a href={DESKTOP_GUIDE_URL} rel="noopener">docs/desktop.md on GitHub</a>, or
+          <a href={url('desktop/')}>the desktop app page</a>.
+        </p>
       </section>
 
-      <section aria-labelledby="self-host-rules">
-        <h2 id="self-host-rules">Rules that keep it safe</h2>
+      <section id="run-from-source" aria-labelledby="source-title">
+        <h2 id="source-title">Run from source</h2>
+        <p class="prose">
+          Run the stream-link server on its own. It serves the web app and the API on one address, and it needs Node
+          24 and yt-dlp on this machine.
+        </p>
         <ul class="rule-list">
-          <li><code>TRUST_PROXY=true</code> is never safe on a host the public can reach. Trust only loopback.</li>
-          <li><code>TRUST_CF_CONNECTING_IP=true</code> is safe only because nothing else can reach the server port.</li>
-          <li>Guest streaming is off unless you turn it on. Accounts stay behind approval either way.</li>
-          <li>Rate limits are only as good as this setup. If you change the tunnel or the bind address, re-check them.</li>
+          <li><strong>Node 24</strong> and npm.</li>
+          <li><strong>yt-dlp</strong>: <code>pipx install yt-dlp</code>.</li>
+          <li><strong>ffmpeg</strong> (optional): only for transcoding while casting.</li>
+        </ul>
+        <ol class="steps">
+          <li>
+            <h3>Clone and install</h3>
+            <code class="code-line">{`git clone ${REPO}.git
+cd open-record
+npm ci`}</code>
+          </li>
+          <li>
+            <h3>Start the server</h3>
+            <p>
+              This builds the web app and the server, starts them detached, and prints the address and a pairing QR
+              code. It binds your LAN address by default.
+            </p>
+            <code class="code-line">{`npm run server:up
+npm run server:up -- --ip 192.168.1.20   # choose the LAN address
+npm run server:up -- --stop              # stop the detached server
+npm run server:dev                       # run in the foreground`}</code>
+          </li>
+          <li>
+            <h3>Connect a device</h3>
+            <p>
+              Open the printed <code>http://lan-ip:8787/</code> on any device on your Wi-Fi. For the Android app, build
+              it with <code>npm run android</code> or install the APK, then use <strong>Settings &gt; Stream server</strong>
+              and scan the QR code. For iPhone, follow <a href={url('iphone/')}>the iPhone build guide</a>.
+            </p>
+          </li>
+        </ol>
+        <h3>Keep it running</h3>
+        <p class="prose">
+          For an always-on host, write a systemd user unit that runs the built server instead of
+          <code>server:up</code> (the server README has an example). Use <code>HOST=0.0.0.0</code> and allow
+          only your subnet on port 8787:
+        </p>
+        <code class="code-line">sudo ufw allow from 192.168.1.0/24 to any port 8787 proto tcp</code>
+        <div class="card__actions">
+          <a class="button button--ghost" href={SERVER_GUIDE_URL} rel="noopener">Server README</a>
+        </div>
+      </section>
+
+      <section id="lan-caveats" aria-labelledby="caveats-title">
+        <h2 id="caveats-title">LAN caveats</h2>
+        <ul class="rule-list">
+          <li>Plain HTTP and a bearer token: use trusted Wi-Fi only. Anyone on the same network can read the traffic.</li>
+          <li>Never port-forward 8787 or 47900, and never expose them to the internet.</li>
+          <li>
+            Phone and server must share a subnet. Guest networks, separate VLANs and AP isolation block the connection.
+          </li>
+          <li>
+            The hosted https web app cannot call an http LAN server (mixed content). Use the page served by your server,
+            or the Android app.
+          </li>
+          <li>Reserve a DHCP address for the computer, and keep it awake while you listen.</li>
         </ul>
       </section>
 
-      <section aria-labelledby="self-host-guides">
-        <h2 id="self-host-guides">Full runbooks</h2>
+      <section id="away-from-home" aria-labelledby="away-title">
+        <h2 id="away-title">Away from home</h2>
         <p class="prose">
-          The complete tunnel, Supabase, approval and limits setup for the hosted deployment is in the public hosting
-          runbook. The server's own options are in the server README.
+          Outside your own Wi-Fi, use HTTPS. The simplest private option is Tailscale: run
+          <code>tailscale serve --bg 8787</code> on the server, then use the <code>https://</code> address it gives you.
+          You can also put your own HTTPS reverse proxy in front of the server.
+        </p>
+        <ul class="rule-list">
+          <li>
+            Start the server with <code>npm run server:up -- --host 127.0.0.1</code> so only the proxy can reach it.
+            Phones must be on your tailnet for the Tailscale route.
+          </li>
+          <li>Set <code>PUBLIC_URL</code> to the HTTPS address, so the banner and QR code show it.</li>
+          <li>
+            Cast speakers cannot reach a loopback-only server. Set <code>CAST_RELAY_PORT</code> for casting; see the
+            server README.
+          </li>
+          <li>
+            Set <code>TRUST_PROXY=127.0.0.1</code> only when the proxy runs on the same machine. Never set
+            <code>TRUST_PROXY=true</code> while the port is reachable from your LAN.
+          </li>
+          <li>Still never port-forward the port. The server README has the full settings.</li>
+        </ul>
+        <div class="card__actions">
+          <a class="button button--ghost" href={SERVER_GUIDE_URL} rel="noopener">Server README</a>
+        </div>
+      </section>
+
+      <section id="accounts" aria-labelledby="accounts-title">
+        <h2 id="accounts-title">Accounts and sync (optional)</h2>
+        <p class="prose">
+          Sign-in, sync and shared playlists use a Supabase project that you create and own. Open Record hosts no
+          accounts. Running the server from source does not require Supabase: its pairing QR carries the token. The
+          desktop app's phone pairing does: phones sign in with the same Supabase account as the desktop app.
         </p>
         <div class="card__actions">
-          <a class="button button--primary" href={PUBLIC_HOSTING_URL} rel="noopener">Public hosting runbook</a>
-          <a class="button button--ghost" href={SERVER_GUIDE_URL} rel="noopener">Server README</a>
-          <a class="button button--ghost" href={url('web/')}>About the web app</a>
+          <a class="button button--ghost" href={`${README_URL}#supabase-accounts-optional`} rel="noopener">
+            Supabase setup in the README
+          </a>
         </div>
       </section>
     </div>

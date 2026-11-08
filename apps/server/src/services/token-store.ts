@@ -75,6 +75,7 @@ export function resolveToken({ env, dataDir, fs = nodeTokenFs }: ResolveTokenOpt
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
       `cannot save the access token to ${path} (${reason}); set OPEN_RECORD_TOKEN to run without it`,
+      { cause: err },
     );
   }
   return { token, source: 'generated', path };

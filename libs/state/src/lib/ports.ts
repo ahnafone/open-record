@@ -226,7 +226,7 @@ export abstract class NetworkStatusPort {
 export interface AuthProjectConfig {
   url: string;
   anonKey: string;
-  /** Cloudflare Turnstile site key for the access request form (null when the server has none). */
+  /** Turnstile site key for the access request form (null when the server has none). */
   turnstileSiteKey?: string | null;
 }
 

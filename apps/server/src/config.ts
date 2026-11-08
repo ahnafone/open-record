@@ -21,14 +21,14 @@ export interface ServerConfig {
   /** Requests per minute per client (T1.6 keys it by user/token/IP). */
   rateLimitMax: number;
   /**
-   * Trust X-Forwarded-For from a reverse proxy / tunnel: `true` trusts every
+   * Trust X-Forwarded-For from a reverse proxy: `true` trusts every
    * hop, a string limits it to those proxy IPs / CIDRs (comma list).
    */
   trustProxy: boolean | string;
   /**
-   * Opt-in: honour `CF-Connecting-IP` when the TCP peer is loopback and the
-   * header is a valid IP. Only safe when cloudflared is the sole path to the
-   * origin: a same-host proxy that forwards unknown headers would let any client
+   * Opt-in: honour the `CF-Connecting-IP` header when the TCP peer is loopback and the
+   * header is a valid IP. Only safe when a proxy that overwrites that header is the
+   * sole path to the origin: a same-host proxy that forwards unknown headers would let any client
    * pick its own rate-limit bucket. Default false.
    */
   trustCfConnectingIp: boolean;
@@ -68,7 +68,7 @@ export interface ServerConfig {
   /**
    * Port of a separate listener that serves ONLY `GET /cast/relay/:token`
    * (CAST_RELAY_PORT). Set it so speakers can reach the relay on the LAN while
-   * the main API stays on loopback behind the tunnel. Null = the relay is served
+   * the main API stays on loopback behind the reverse proxy. Null = the relay is served
    * by the main listener only (the pre-split behaviour).
    */
   castRelayPort: number | null;
@@ -123,7 +123,7 @@ export interface ServerConfig {
 export interface AppConfig {
   supabaseUrl: string | null;
   supabaseAnonKey: string | null;
-  /** Public Cloudflare Turnstile site key; null when TURNSTILE_SITE_KEY is unset. */
+  /** Public Turnstile site key; null when TURNSTILE_SITE_KEY is unset. */
   turnstileSiteKey: string | null;
 }
 

@@ -366,7 +366,7 @@ export class AuthStore {
 
   private async probeAdminFor(userId: string): Promise<void> {
     let project: AuthProjectConfig | null = null;
-    let token: string | null = null;
+    let token: string | null;
     try {
       // The current project (the connection mode may have just changed).
       project = (await this.port?.activeProject()) ?? null;

@@ -361,7 +361,7 @@ function run(command, args, what) {
   try {
     execFileSync(command, args, { stdio: 'inherit' });
   } catch (error) {
-    throw new Error(`${what} failed (${command}): ${error.message}`);
+    throw new Error(`${what} failed (${command}): ${error.message}`, { cause: error });
   }
 }
 

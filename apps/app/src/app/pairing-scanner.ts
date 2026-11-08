@@ -109,11 +109,11 @@ export class WebPairingScanner extends PairingScannerPort {
       });
     } catch (err) {
       const name = err instanceof DOMException ? err.name : '';
-      if (name === 'NotAllowedError' || name === 'SecurityError') throw new Error(CAMERA_OFF);
+      if (name === 'NotAllowedError' || name === 'SecurityError') throw new Error(CAMERA_OFF, { cause: err });
       if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-        throw new Error('No camera found on this device.');
+        throw new Error('No camera found on this device.', { cause: err });
       }
-      throw new Error('Could not start the camera. Try again.');
+      throw new Error('Could not start the camera. Try again.', { cause: err });
     }
 
     const ui = buildOverlay();

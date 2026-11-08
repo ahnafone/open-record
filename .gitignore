@@ -98,3 +98,6 @@ supabase/.env*
 supabase/functions/.env*
 !supabase/.env.example
 !supabase/functions/.env.example
+
+# Owner-only public deployment runbook: kept locally, never tracked.
+docs/public-hosting.md

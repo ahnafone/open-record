@@ -36,15 +36,15 @@ async function main(): Promise<void> {
   // own ~/.config/open-record/cookies.txt happens to exist.
   configureCookies(config.ytdlpCookiesFile, join(config.dataDir, 'cookies.txt'));
 
-  // Behind a tunnel or proxy without a trust setting, request.ip is the proxy's
+  // Behind a reverse proxy without a trust setting, request.ip is the proxy's
   // loopback address, so every guest shares one per-IP bucket.
   if (config.guestStreaming && config.trustProxy === false && !config.trustCfConnectingIp) {
     console.warn(
       [
         '',
         '*** WARNING: GUEST_STREAMING=true but neither TRUST_PROXY nor TRUST_CF_CONNECTING_IP is set. ***',
-        '*** Behind a tunnel or reverse proxy, every guest shares ONE per-IP limit (the proxy address). ***',
-        '*** Set TRUST_CF_CONNECTING_IP=true when cloudflared is the only path to the origin, ***',
+        '*** Behind a reverse proxy, every guest shares ONE per-IP limit (the proxy address). ***',
+        '*** Set TRUST_CF_CONNECTING_IP=true only when a proxy that overwrites CF-Connecting-IP is the only path to the origin, ***',
         '*** or TRUST_PROXY=<proxy address> when a reverse proxy adds X-Forwarded-For. ***',
         '',
       ].join('\n'),
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
   // loadConfig leaves this null when unset; the detected URL is host-dependent,
   // so it is resolved here rather than in config.ts (unit-testable config).
   // With a relay port, speakers get the LAN address on that port. PUBLIC_URL is
-  // deliberately skipped: it is the tunnel hostname, which a speaker should not
+  // deliberately skipped: it is the public hostname, which a speaker should not
   // fetch media through (router hairpin, public upload bandwidth).
   const castRelayPort = config.castRelayPort;
   const relayPicked =

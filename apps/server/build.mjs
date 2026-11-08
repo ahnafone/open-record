@@ -66,6 +66,14 @@ writeFileSync(
       dependencies: Object.fromEntries(
         runtimeDeps.map((d) => [d, installedVersion(d)]),
       ),
+      // Same security pins as the workspace (e.g. protobufjs under castv2-client),
+      // so the staged lockfile resolves the patched transitive versions. Only plain
+      // version overrides are copied; `file:` / nested overrides are workspace-only.
+      overrides: Object.fromEntries(
+        Object.entries(rootPkg.overrides ?? {}).filter(
+          ([, spec]) => typeof spec === 'string' && !spec.startsWith('file:'),
+        ),
+      ),
     },
     null,
     2,

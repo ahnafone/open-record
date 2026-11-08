@@ -20,8 +20,8 @@ function isLoopback(address: string): boolean {
 }
 
 /**
- * Whether `CF-Connecting-IP` may name the client. Off by default: only enable
- * (TRUST_CF_CONNECTING_IP=true) when cloudflared is the sole path to the origin.
+ * Whether the `CF-Connecting-IP` header may name the client. Off by default: only enable
+ * (TRUST_CF_CONNECTING_IP=true) when a proxy that overwrites that header is the sole path to the origin.
  * Set once by `buildApp` from config; module state, like `configureResolveLimits`.
  */
 let trustCfConnectingIp = false;
@@ -31,11 +31,11 @@ export function configureClientIp(options: { trustCfConnectingIp: boolean }): vo
 }
 
 /**
- * The address a client is counted under. Behind a Cloudflare Tunnel every
- * request arrives from loopback (cloudflared), so `request.ip` is 127.0.0.1 and
+ * The address a client is counted under. Behind a same-host reverse proxy every
+ * request arrives from loopback (the proxy), so `request.ip` is 127.0.0.1 and
  * all users would share one budget. When `trustCfConnectingIp` is enabled and
- * the TCP peer is loopback (the local tunnel) with a valid IP in
- * `CF-Connecting-IP` (overwritten by Cloudflare), that header is used. A
+ * the TCP peer is loopback (the local proxy) with a valid IP in
+ * `CF-Connecting-IP` (overwritten by that proxy), that header is used. A
  * non-loopback peer never gets this treatment, so it cannot spoof its address.
  * Otherwise `request.ip` (TRUST_PROXY) applies, exactly as before.
  */

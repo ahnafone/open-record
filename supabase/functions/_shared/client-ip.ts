@@ -2,8 +2,8 @@
 // for the Turnstile remoteip check and is never stored or logged; the database
 // gets a salted hash.
 //
-// Caveat: the Supabase Edge gateway is not behind Cloudflare, so cf-connecting-ip
-// and x-forwarded-for are client-influenceable. The throttle is best-effort abuse
+// Caveat: the Supabase Edge gateway is not behind a proxy you control, so
+// cf-connecting-ip and x-forwarded-for are client-influenceable. The throttle is best-effort abuse
 // reduction, not a hard guarantee.
 
 export const UNKNOWN_SOURCE = "unknown";

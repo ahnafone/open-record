@@ -7,7 +7,6 @@ export const BADGE_TEXT = `Beta · ${VERSION}`;
 export const REPO = 'https://github.com/ahnafone/open-record';
 export const WEB_APP_URL = 'https://open-record.uttarasoftware.ca';
 export const IPHONE_GUIDE_URL = `${REPO}/blob/main/docs/ios-install.md`;
-export const PUBLIC_HOSTING_URL = `${REPO}/blob/main/docs/public-hosting.md`;
 export const DESKTOP_GUIDE_URL = `${REPO}/blob/main/docs/desktop.md`;
 export const SERVER_GUIDE_URL = `${REPO}/blob/main/apps/server/README.md`;
 export const LICENSE_URL = `${REPO}/blob/main/LICENSE`;

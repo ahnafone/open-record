@@ -13,7 +13,7 @@ import { MAX_ACCESS_NOTE_LENGTH, type AccessStatus } from '@open-record/models';
 import { AccessRequestService, AuthStore } from '@open-record/state';
 import { OrButton, OrIcon, OrSpinner } from '@open-record/ui';
 
-/** Cloudflare Turnstile, explicit mode: we render the widget ourselves. */
+/** Turnstile, explicit mode: we render the widget ourselves. */
 const TURNSTILE_SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 
 interface TurnstileApi {

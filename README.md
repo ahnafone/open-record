@@ -41,7 +41,7 @@ accounts and sync. The Electron desktop app bundles the UI and local server, and
 
 ## Web app
 
-The web app runs at **https://open-record.uttarasoftware.ca**.
+The hosted web app is at **https://open-record.uttarasoftware.ca**.
 
 - **Guests** can play the bundled catalogue and stream from search, within rate limits.
 - **Library and playlists** need an account. Sign-up is a request: the owner reviews it and approves
@@ -126,14 +126,12 @@ See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and t
 Build the app for the current OS with `npm run desktop:dist`; `npm run desktop:dev` runs the
 Electron shell against the local build.
 
-## Public hosting
+## Public access
 
-The public web app is served through a **Cloudflare Tunnel**, the only way in. The server listens on
-`127.0.0.1` and `cloudflared` forwards `https://open-record.uttarasoftware.ca` to it. There is no
-port forwarding and no reverse proxy, and the LAN address is not public.
-
-Full runbook (Cloudflare tunnel, server environment, Supabase, Turnstile, Resend, limits and
-verification): [docs/public-hosting.md](docs/public-hosting.md).
+Never port-forward the server or the desktop port (8787, 47900). To reach the server from outside
+your network, expose it only over HTTPS through a private network (e.g. Tailscale) or a trusted
+reverse proxy that you run yourself, and bind the server to loopback behind it. Set `TRUST_PROXY`
+and `PUBLIC_URL` to match your setup. Server settings are in [apps/server/README.md](apps/server/README.md).
 
 ## Website
 
@@ -238,7 +236,7 @@ mode 0600, and the command prints the URL and QR code. The server has a concurre
 rate limits and a link cache, and returns `503` with `Retry-After` when busy.
 
 Use plain HTTP only on a trusted home LAN; the bearer token is unencrypted. Outside the home, use
-HTTPS through Tailscale or the Cloudflare Tunnel in [docs/public-hosting.md](docs/public-hosting.md),
+HTTPS through Tailscale or a trusted reverse proxy (see [Public access](#public-access)),
 and set `TRUST_PROXY` and `PUBLIC_URL`. Never port-forward 8787.
 
 ## Repo layout
@@ -248,7 +246,7 @@ apps/app/              Angular + Capacitor app (android/, ios/)
 apps/desktop/          Electron app, installer config and server-package-lock.json
 apps/server/           Self-hosted Fastify + yt-dlp stream-link server
 apps/website/          Astro landing site, deployed to GitHub Pages
-docs/                  Screenshots and runbooks (public-hosting, ios-install, desktop)
+docs/                  Screenshots and guides (ios-install, desktop)
 supabase/              Supabase config and SQL migrations (optional accounts)
 libs/                  Shared models, state, storage, player, UI and feature libraries
 mockup/                Interactive HTML design mockup (index.html, assets/)

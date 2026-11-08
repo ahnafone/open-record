@@ -37,7 +37,7 @@ const USAGE = `Usage:
   npm run server:up                  detect the LAN IP, build, start detached, print banner + URL, exit 0
   npm run server:up -- --ip 10.0.0.5 use this address instead of detecting
   npm run server:up -- --host 127.0.0.1
-                                     bind this address instead (e.g. behind a tunnel)
+                                     bind this address instead (e.g. behind a reverse proxy)
   npm run server:up -- --follow      stay attached and stream the server's output (no detach)
   npm run server:up -- --stop        stop the detached server
   npm run server:up -- --help

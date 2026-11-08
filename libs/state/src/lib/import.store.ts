@@ -588,7 +588,7 @@ export class ImportStore {
         list = await remote.importPlaylist(url.trim(), signal);
       } catch (error) {
         if (isAbort(error)) throw error;
-        throw new Error(youtubeErrorMessage(error));
+        throw new Error(youtubeErrorMessage(error), { cause: error });
       }
       const tracks = dedupeById(list.tracks);
       if (!tracks.length) {
@@ -880,7 +880,7 @@ export class ImportStore {
     } catch (error) {
       if (isAbort(error) || abort.signal.aborted) return;
       if (error instanceof Error && error.message === LINK_UNAVAILABLE) throw error;
-      throw new Error(remoteErrorMessage(error));
+      throw new Error(remoteErrorMessage(error), { cause: error });
     } finally {
       this.endSearching(key, abort);
     }
@@ -922,7 +922,7 @@ export class ImportStore {
       await this.persist();
     } catch (error) {
       if (isAbort(error) || abort.signal.aborted) return;
-      throw new Error(remoteErrorMessage(error));
+      throw new Error(remoteErrorMessage(error), { cause: error });
     } finally {
       this.endSearching(key, abort);
     }
@@ -950,7 +950,7 @@ export class ImportStore {
         .map(({ candidate, score, durationMatch }) => ({ track: candidate, score, durationMatch }));
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
-      throw new Error(remoteErrorMessage(error));
+      throw new Error(remoteErrorMessage(error), { cause: error });
     }
   }
 
@@ -1226,7 +1226,7 @@ export class ImportStore {
             await sleep(PACE_MS, signal);
             const extra = await this.fallbackSearch(altQuery, signal);
             const merged = mergeTracks(candidates, extra);
-            if (merged.length > candidates.length) result = matchTrack(wanted, (candidates = merged), aliases);
+            if (merged.length > candidates.length) result = matchTrack(wanted, merged, aliases);
           }
         }
       }

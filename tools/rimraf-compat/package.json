@@ -1,0 +1,7 @@
+{
+  "name": "rimraf-compat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal rimraf@2-compatible shim (callback + sync) for `temp`, backed by fs.rm. Exists only so the deprecated rimraf@2 tree is not installed.",
+  "main": "index.js"
+}

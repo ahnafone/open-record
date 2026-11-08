@@ -1,7 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import PageHeader from '../components/PageHeader.astro';
-import { PUBLIC_HOSTING_URL, WEB_APP_URL, url } from '../lib/site';
+import { WEB_APP_URL, url } from '../lib/site';
 ---
 
 <Layout
@@ -52,9 +52,6 @@ import { PUBLIC_HOSTING_URL, WEB_APP_URL, url } from '../lib/site';
           The desktop app and a server you run yourself skip the hosted limits, the sign-up request and the approval
           step. Your own server uses your own access token; see <a href={url('desktop/')}>the desktop app</a> or
           <a href={url('self-host/')}>self-hosting</a>.
-        </p>
-        <p class="meta">
-          The hosted server's operator setup is described in the <a href={PUBLIC_HOSTING_URL} rel="noopener">public hosting runbook on GitHub</a>.
         </p>
       </section>
     </div>

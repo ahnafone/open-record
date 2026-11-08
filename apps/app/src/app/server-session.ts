@@ -233,7 +233,7 @@ export class SessionHttp {
       this.options.onUnauthorized?.();
       return response;
     }
-    let refreshed: string | null = null;
+    let refreshed: string | null;
     try {
       refreshed = await this.options.refreshAccessToken();
     } catch {
@@ -635,7 +635,7 @@ export class WebSession extends BaseSession {
   private async refreshAndReconnect(): Promise<void> {
     const generation = this.generation;
     this.setConnection('retrying');
-    let token: string | null = null;
+    let token: string | null;
     try {
       token = await this.options.refreshAccessToken();
     } catch {
@@ -1229,7 +1229,7 @@ export class ServerCastUploads extends CastUploadPort {
     if (typeof XMLHttpRequest === 'undefined') {
       throw new Error('Uploading files is not supported here.');
     }
-    let token: string | null = null;
+    let token: string | null;
     try {
       token = await this.options.accessToken();
     } catch {
@@ -1395,7 +1395,7 @@ export class ServerCastUploads extends CastUploadPort {
         'Uploading files for casting is only available in the browser.',
       );
     }
-    let base = '';
+    let base: string;
     try {
       base = this.options.baseUrl().trim();
     } catch {

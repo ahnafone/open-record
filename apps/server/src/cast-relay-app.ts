@@ -7,7 +7,7 @@ import { castRoutes } from './routes/cast';
  * A second listener that serves ONLY the cast media relay (`GET /cast/relay/:token`).
  *
  * Speakers must reach the relay over the LAN, but the main API is bound to
- * loopback behind the Cloudflare Tunnel. Serving the whole API on the LAN would
+ * loopback behind the reverse proxy. Serving the whole API on the LAN would
  * expose every bearer-protected route to any LAN host, so the relay gets its own
  * Fastify instance with no auth hooks, no CORS, no session/search/stream routes
  * and no web app. Everything else on this listener is a plain 404.

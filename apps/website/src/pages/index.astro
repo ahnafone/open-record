@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import PhoneShot from '../components/PhoneShot.astro';
 import WindowShot from '../components/WindowShot.astro';
-import { DESKTOP_GUIDE_URL, DOWNLOADS, IPHONE_GUIDE_URL, INSTALL_GUIDE_URL, PUBLIC_HOSTING_URL, RELEASES_URL, REPO, WEB_APP_URL, url } from '../lib/site';
+import { DESKTOP_GUIDE_URL, DOWNLOADS, IPHONE_GUIDE_URL, INSTALL_GUIDE_URL, RELEASES_URL, REPO, SERVER_GUIDE_URL, WEB_APP_URL, url } from '../lib/site';
 
 const features = [
   {
@@ -323,13 +323,13 @@ const features = [
         <h2 id="self-host-title">Self-host</h2>
       </div>
       <p class="lead">
-        Search and streaming need a stream-link server. Run it on your own machine and reach it through a Cloudflare
-        Tunnel. The server stays on loopback, nothing is port-forwarded, and phones connect over HTTPS. Never expose
-        the server's plain HTTP port to the internet.
+        Search and streaming need a stream-link server. Use the desktop app's bundled server, or run your own from
+        source, and pair your phone over your home Wi-Fi. That traffic is plain HTTP, so use trusted networks only.
+        Nothing is port-forwarded; for use outside your home, put the server behind HTTPS.
       </p>
       <div class="card__actions">
         <a class="button" href={url('self-host/')}>Self-host guide</a>
-        <a class="button button--ghost" href={PUBLIC_HOSTING_URL} rel="noopener">Public hosting runbook on GitHub</a>
+        <a class="button button--ghost" href={SERVER_GUIDE_URL} rel="noopener">Server README</a>
       </div>
     </div>
   </section>

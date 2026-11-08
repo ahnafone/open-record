@@ -57,7 +57,7 @@ Then `npm install` once in the repository root.
 npm run server:up                   # detect the LAN IP, build, start detached, print banner + QR, exit
 npm run server:up -- --ip <lan-ip>  # choose the LAN address
 npm run server:up -- --host 127.0.0.1
-                                    # bind this address instead (e.g. behind a tunnel)
+                                    # bind this address instead (e.g. behind a reverse proxy)
 npm run server:up -- --follow       # stay attached and stream the server output
 npm run server:up -- --stop         # stop the detached server
 npm run server:start                # alias for server:up
@@ -90,15 +90,36 @@ Other targets: `npx nx run-many -t lint,typecheck,build,test --projects=server`.
 ## Run as a systemd user service
 
 To keep the server running on a host, use a systemd user unit instead of `server:up`
-(both use port 8787, so run one or the other). The public unit, with install
-and journal commands, is in
-[`docs/public-hosting.md`](../../docs/public-hosting.md#systemd-user-unit-server).
-It binds `HOST=127.0.0.1` so only the Cloudflare Tunnel's `cloudflared` can reach it.
+(both use port 8787, so run one or the other). Build first (`npx nx build app` and
+`npx nx build server`), then save this as `~/.config/systemd/user/open-record-server.service`
+(adjust the paths):
 
-For LAN-only use (phones or Cast speakers on your Wi-Fi), copy that unit, set
-`HOST=0.0.0.0`, and allow only your subnet through the firewall:
+```ini
+[Unit]
+Description=Open Record server
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/open-record
+Environment=NODE_ENV=production
+Environment=WEB_DIR=%h/open-record/dist/apps/app/browser
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/node --env-file-if-exists=apps/server/.env dist/apps/server/main.mjs
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user daemon-reload && systemctl --user enable --now open-record-server`
+(`loginctl enable-linger $USER` keeps it running after you log out). Logs:
+`journalctl --user -u open-record-server`.
+
+For LAN-only use (phones or Cast speakers on your Wi-Fi), set `HOST=0.0.0.0` in
+`apps/server/.env` and allow only your subnet through the firewall:
 `sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. Never port-forward
-8787. The unit runs `~/.local/bin/node`, a symlink to your nvm-managed Node; after
+8787. Behind a reverse proxy, set `HOST=127.0.0.1` instead, so only that proxy can
+reach it. The unit runs `~/.local/bin/node`, a symlink to your nvm-managed Node; after
 an nvm upgrade, repoint it with `ln -sf "$(command -v node)" ~/.local/bin/node`.
 
 ## Environment variables
@@ -116,8 +137,8 @@ is already set.
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
 | `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit sets it explicitly. |
-| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list (`127.0.0.1/8,::1` works). Behind a proxy or tunnel set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host cloudflared use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
-| `TRUST_CF_CONNECTING_IP` | `false` | Opt-in. When `true`, a loopback TCP peer that sends a valid `CF-Connecting-IP` is keyed by that address (per-client limits see the real visitor behind a Cloudflare Tunnel). Set it **only** when cloudflared is the sole path to the origin (no other same-host proxy in front). A same-host proxy that forwards unknown headers would let any client choose its own rate-limit bucket. When `false` (default), `CF-Connecting-IP` is ignored entirely and `TRUST_PROXY` alone decides the address. |
+| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list (`127.0.0.1/8,::1` works). Behind a reverse proxy set it, or every client is the proxy's IP and per-client limits are shared; behind a same-host proxy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `TRUST_CF_CONNECTING_IP` | `false` | Opt-in. When `true`, a loopback TCP peer that sends a valid `CF-Connecting-IP` header is keyed by that address. Set it **only** when a proxy that overwrites that header is the sole path to the origin (no other same-host proxy in front). When `false` (default), the header is ignored and `TRUST_PROXY` alone decides the address. |
 | `LOG_LEVEL`         | `info`       | pino level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`). Relay URLs in request logs are redacted. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
@@ -132,7 +153,7 @@ is already set.
 | `SESSION_IDLE_TIMEOUT_MIN` | `120` | Minutes without contact from any device before a session is dropped from memory. |
 | `SESSION_TARGET_STALE_MIN` | `30`  | Minutes the playing device may stay silent before the server pauses and clears the target. |
 | `CAST_ENABLED`      | `true`       | Discover Google Cast speakers over mDNS and relay audio to them. Inert unless sessions and `CAST_MEDIA_BASE_URL` are available. |
-| `CAST_RELAY_PORT`   | (unset)      | Port of a relay-only listener for speakers, e.g. `8788`. It serves only `/cast/relay/:token` (no API, no login) and must differ from `PORT`. Set it when `HOST=127.0.0.1` (public hosting): the main API stays on loopback while speakers reach the relay on the LAN. Open this TCP port to your LAN only; never forward it. |
+| `CAST_RELAY_PORT`   | (unset)      | Port of a relay-only listener for speakers, e.g. `8788`. It serves only `/cast/relay/:token` (no API, no login) and must differ from `PORT`. Set it when `HOST=127.0.0.1` (behind a reverse proxy): the main API stays on loopback while speakers reach the relay on the LAN. Open this TCP port to your LAN only; never forward it. |
 | `CAST_RELAY_HOST`   | `0.0.0.0`    | Interface the relay listener binds. |
 | `CAST_MEDIA_BASE_URL` | (unset)    | Explicit URL the speaker uses to reach the relay, e.g. `http://<lan-ip>:8788`. Overrides the default. With `CAST_RELAY_PORT` set the default is the detected LAN address on that port; without it, `PUBLIC_URL`, then `HOST`, then the LAN address. |
 | `CAST_RELAY_TTL_SEC` | `900`       | Lifetime of a relay token in seconds (60-86400), slid while the speaker keeps playing; the hard cap is 24 hours. |
@@ -145,7 +166,7 @@ is already set.
 | `REQUIRE_APPROVAL`  | `false`      | Public mode: Supabase users may use the API only once approved (see [Public mode](#public-mode)). Needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, or startup fails. |
 | `SUPABASE_SERVICE_ROLE_KEY` | (unset) | Server-side only, for the approval lookup. Never sent to clients, never logged, never printed by the banner. Keep it in `apps/server/.env` (mode 600). |
 | `ADMIN_USER_ID`     | (unset)      | Supabase user id (UUID) that is always allowed, without an approved access request. |
-| `TURNSTILE_SITE_KEY` | (unset)     | Optional, public Cloudflare Turnstile site key, served at `GET /app-config` as `turnstileSiteKey` for the web app's sign-up challenge. Not a secret. |
+| `TURNSTILE_SITE_KEY` | (unset)     | Optional, public Turnstile site key, served at `GET /app-config` as `turnstileSiteKey` for the web app's sign-up challenge. Not a secret. |
 | `WEB_DIR`           | (unset)      | Optional. Host path of a built web app (`dist/apps/app/browser`) served at `/` without a token, with SPA fallback to `index.html` for HTML GETs. API routes keep their auth and are never shadowed. Unset (or no `index.html`) = API only. |
 | `YTDLP_PATH`        | `yt-dlp`     | yt-dlp binary to run.                                                 |
 | `YTDLP_COOKIES_FILE` | `<data dir>/cookies.txt` when present | Optional Netscape `cookies.txt` on this machine, e.g. `/home/you/cookies.txt`. Every request goes out without cookies first; only a video refused for sign-in (age gate, private, members-only, bot check) is retried once with them, so those songs take two yt-dlp runs. When unset, `<OPEN_RECORD_DATA_DIR>/cookies.txt` is used if that file exists; when neither exists the server has no cookies at all (no warning). An explicit path always wins, even when it is broken. A path that is unreadable, empty or not a Netscape file only logs a warning and a banner note; it never stops the server, and requests run anonymously. See [Age-restricted videos (cookies)](#age-restricted-videos-cookies). |
@@ -330,21 +351,18 @@ Caveats:
 ### HTTPS (recommended, required outside your home)
 
 Do not expose the plain HTTP port to the internet. The token travels in every
-request, so it must be encrypted. Put the server behind an HTTPS tunnel:
+request, so it must be encrypted. Put the server behind an HTTPS endpoint:
 
 - **Tailscale** (private): install Tailscale on the server and phone, then
   `tailscale serve --bg 8787` gives you `https://<machine>.<tailnet>.ts.net`.
-- **Cloudflare Tunnel** (public URL, the only public ingress):
-  [docs/public-hosting.md](../../docs/public-hosting.md) covers the tunnel, the
-  server settings (`HOST=127.0.0.1`, `TRUST_CF_CONNECTING_IP=true`), Supabase,
-  Turnstile and verification.
+- **Your own reverse proxy** (any HTTPS proxy you run and trust). Bind the server
+  to `HOST=127.0.0.1` so only that proxy can reach it.
 
-The tunnel dials `127.0.0.1`, but `npm run server:up` binds the LAN address by
-default. Start it with `--host 127.0.0.1` for a tunnel (the public systemd unit
-in `docs/public-hosting.md` sets `HOST=127.0.0.1`).
+A same-host proxy dials `127.0.0.1`, but `npm run server:up` binds the LAN address
+by default. Start it with `--host 127.0.0.1` in that case.
 
 Set `PUBLIC_URL` to the HTTPS URL behind either so the banner and QR code show
-it. Behind a same-host tunnel, `TRUST_PROXY` must be set (per-client limits
+it. Behind a same-host reverse proxy, `TRUST_PROXY` must be set (per-client limits
 otherwise see only the proxy's address); use `TRUST_PROXY=127.0.0.1` so only
 the loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only safe
 when 8787 is bound to loopback and nothing else can reach it; never use `true`
@@ -353,10 +371,10 @@ the QR code (or enter the URL) in the app under Settings, Stream server.
 
 ## Public mode
 
-Public mode runs the server on the internet behind a Cloudflare Tunnel
+Public mode runs the server on the internet behind a trusted reverse proxy
 with an admin-approval gate: a person can sign in with Supabase, but may use the
 API only after an admin approves them. Self-hosters leave `REQUIRE_APPROVAL`
-unset and nothing here applies. Full setup: [`docs/public-hosting.md`](../../docs/public-hosting.md).
+unset and nothing here applies.
 
 | Variable | Notes |
 | --- | --- |
@@ -381,16 +399,14 @@ How the gate decides, for a request carrying a valid Supabase access token:
 - The lookup has a 3-second timeout and sends only the user id (validated as a
   UUID) to `<SUPABASE_URL>/rest/v1/access_requests`.
 
-Behind a Cloudflare Tunnel, cloudflared connects from loopback, so every request
-looks like `127.0.0.1`. Set `TRUST_CF_CONNECTING_IP=true` to key per-client limits
-by the visitor's address from `CF-Connecting-IP` (Cloudflare overwrites it, so
-visitors cannot set it). This is off by default and is not automatic: with it off,
-every tunnelled visitor shares one loopback bucket unless `TRUST_PROXY` is set to
-handle `X-Forwarded-For`. Enable it only when cloudflared is the sole path to the
-origin (for example `HOST=127.0.0.1` with no other proxy in front). Behind a same-host
-reverse proxy, leave it `false`: a proxy that forwards unknown headers, so a client could pick its
-own bucket. A non-loopback peer is never trusted this way. Set
-`TRUST_PROXY=127.0.0.1` as well when a same-host proxy adds `X-Forwarded-For`.
+Behind a same-host reverse proxy, every request looks like `127.0.0.1`. Set
+`TRUST_PROXY=127.0.0.1` so the proxy's `X-Forwarded-For` is used. Setting
+`TRUST_CF_CONNECTING_IP=true` additionally keys per-client limits by the
+`CF-Connecting-IP` header, but only when your proxy overwrites that header and it
+is the sole path to the origin (for example `HOST=127.0.0.1` with no other proxy
+in front). It is off by default and is not automatic. A proxy that forwards
+unknown headers would let a client pick its own bucket, so leave it `false`
+in that case. A non-loopback peer is never trusted this way.
 
 ## Guest streaming
 
@@ -432,11 +448,11 @@ downloads stay token-only.
   most `GUEST_MAX_CONCURRENT` yt-dlp processes at once (default 1), and never the last
   slot. When guests are full, the request gets `503` `{"error":"guest_busy"}` with
   `Retry-After`, immediately; signed-in callers are not queued behind it.
-- **Tunnel warning.** With `GUEST_STREAMING=true` and neither `TRUST_PROXY` nor
-  `TRUST_CF_CONNECTING_IP` set, the server logs a warning at startup: behind a tunnel,
-  every guest then shares the loopback address and one per-IP bucket.
+- **Proxy warning.** With `GUEST_STREAMING=true` and neither `TRUST_PROXY` nor
+  `TRUST_CF_CONNECTING_IP` set, the server logs a warning at startup: behind a reverse
+  proxy, every guest then shares the loopback address and one per-IP bucket.
 - **Client IP** is the address the other per-client limits use: `request.ip`
-  (`TRUST_PROXY`), or `CF-Connecting-IP` when `TRUST_CF_CONNECTING_IP=true`. A
+  (`TRUST_PROXY`), or the `CF-Connecting-IP` header when `TRUST_CF_CONNECTING_IP=true`. A
   client's own `X-Forwarded-For` or `CF-Connecting-IP` is ignored unless the trust
   setting says so, so it cannot pick a new bucket.
 - **Approval gate.** `REQUIRE_APPROVAL` checks only verified Supabase users, so it

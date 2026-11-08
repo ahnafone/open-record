@@ -809,14 +809,12 @@ export class SessionService {
         this.freezePosition(state, now);
         const length = state.order.length;
         let cursor = state.cursor;
-        let positionSec = state.positionSec;
         if (index === state.cursor) {
           const advanced = nextCursor(cursor, length, state.repeat, false);
           state.order.splice(index, 1);
           const newLength = state.order.length;
           if (newLength === 0) {
             cursor = -1;
-            positionSec = 0;
             state.playing = false;
           } else if (advanced > index) {
             cursor = advanced - 1;
@@ -826,9 +824,8 @@ export class SessionService {
             // repeat off at the end: fall back to the new last entry.
             cursor = newLength - 1;
           }
-          positionSec = 0;
           state.cursor = clampCursor(newLength, cursor);
-          state.positionSec = positionSec;
+          state.positionSec = 0;
         } else {
           state.order.splice(index, 1);
           if (index < state.cursor) state.cursor -= 1;

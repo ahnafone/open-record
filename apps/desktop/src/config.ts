@@ -136,7 +136,7 @@ export function saveDesktopConfig(userData: string, config: DesktopConfig): void
     } catch {
       // Best effort cleanup.
     }
-    throw new Error(`could not save desktop config: ${errorText(err)}`);
+    throw new Error(`could not save desktop config: ${errorText(err)}`, { cause: err });
   }
 
   // fsync the directory so the rename survives a crash on POSIX systems.

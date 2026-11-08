@@ -14,6 +14,8 @@ const target = path.join(siteRoot, 'public/screenshots');
 const PHONE_WIDTH = 600;
 const DESKTOP_WIDTH = 1280;
 
+const DESKTOP_SHOTS = new Set(['07-desktop.png', '09-desktop-phones.png']);
+
 const SHOTS = [
   '01-browse.png',
   '02-search.png',
@@ -22,6 +24,7 @@ const SHOTS = [
   '06-now-playing.png',
   '07-desktop.png',
   '08-settings.png',
+  '09-desktop-phones.png',
 ];
 
 await rm(target, { recursive: true, force: true });
@@ -34,7 +37,7 @@ if (missing.length > 0) {
 }
 
 for (const name of SHOTS) {
-  const width = name.startsWith('07') ? DESKTOP_WIDTH : PHONE_WIDTH;
+  const width = DESKTOP_SHOTS.has(name) ? DESKTOP_WIDTH : PHONE_WIDTH;
   const out = path.join(target, name.replace(/\.png$/, '.webp'));
   const info = await sharp(path.join(source, name))
     .resize({ width, withoutEnlargement: true })

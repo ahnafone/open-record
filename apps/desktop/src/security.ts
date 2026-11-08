@@ -14,7 +14,7 @@ import { SERVER_ORIGIN, SERVER_PORT, SERVER_HOST } from './server';
 const METADATA_ORIGINS = ['https://itunes.apple.com', 'https://api.deezer.com'];
 
 /**
- * Cloudflare Turnstile (the request-access bot check): its api.js loads as a
+ * Turnstile (the request-access bot check): its api.js loads as a
  * script and its widget renders in an iframe. The widget talks to its frame by
  * postMessage, so it needs no connect-src.
  */
