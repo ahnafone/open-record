@@ -61,7 +61,7 @@ Create the file from `apps/server/.env.example` and `chmod 600` it. It is git-ig
 HOST=127.0.0.1                          # loopback only: cloudflared is the sole way in
 PORT=8787
 PUBLIC_URL=https://open-record.uttarasoftware.ca
-TRUST_CF_CONNECTING_IP=true             # cloudflared is the ONLY way in (no Caddy); real client IP for rate limits
+TRUST_CF_CONNECTING_IP=true             # cloudflared is the ONLY way in; real client IP for rate limits
 TRUST_PROXY=127.0.0.1/8,::1             # cloudflared connects from loopback; trust only that
 CORS_ORIGINS=https://open-record.uttarasoftware.ca
 SUPABASE_URL=https://<ref>.supabase.co
@@ -72,15 +72,56 @@ SUPABASE_SERVICE_ROLE_KEY=<service_role key>  # SECRET, server-side only (see no
 TURNSTILE_SITE_KEY=<turnstile site key>      # public; served to the web app. Secret goes to Supabase only
 CAST_ENABLED=false                      # speakers cannot reach a loopback-bound server
 WEB_DIR=dist/apps/app/browser           # path relative to the server's working directory, or absolute
+GUEST_STREAMING=false                   # default off. true lets signed-out visitors use /search, /resolve, /stream
+GUEST_STREAM_PER_MINUTE=10              # default 10: per-client guest requests per minute (shared by the three routes)
+GUEST_STREAM_PER_DAY=100                # default 100: per-client guest requests per day
+GUEST_GLOBAL_PER_MINUTE=60               # default 60: all guests together, per minute
+GUEST_MAX_CONCURRENT=1                   # default 1: yt-dlp slots guests may hold (below MAX_CONCURRENT_RESOLVES)
+GUEST_ALLOWED_HOSTS=youtube.com,youtu.be,music.youtube.com,soundcloud.com,bandcamp.com   # hosts guests may resolve/stream
 ```
 
 Notes:
 
-- `HOST=127.0.0.1` replaces the `0.0.0.0` used by the LAN/Caddy setup. With `0.0.0.0`, a LAN client could hit port 8787 directly and spoof `X-Forwarded-For`.
+- `HOST=127.0.0.1` keeps the server off the LAN and the internet. The bind address is the boundary: with `0.0.0.0`, any client that can reach port 8787 directly could send its own `X-Forwarded-For` or `CF-Connecting-IP` and pick its own rate-limit bucket.
+- `TRUST_PROXY` trusts only loopback, where cloudflared connects from. Never set it to `true` on this host. `TRUST_CF_CONNECTING_IP=true` is safe only because nothing else can reach 8787.
+- **Guest streaming** (`GUEST_STREAMING`) is off by default. When it is on, signed-out visitors can call `/search`, `/resolve` and `/stream` within the per-client limits above. Those limits key on the same client IP as the other rate limits, so they are only as good as the tunnel setup described here. Set `GUEST_STREAMING=true` only if you want guests to stream from search on the public site. Accounts and library features stay behind the approval gate either way. Guests may send `/resolve` and `/stream` only to hosts in `GUEST_ALLOWED_HOSTS` (default YouTube, SoundCloud, Bandcamp; other hosts get `403`), and `GUEST_GLOBAL_PER_MINUTE` (default 60) caps all guests together. Guests hold at most `GUEST_MAX_CONCURRENT` (default 1) of the `MAX_CONCURRENT_RESOLVES` yt-dlp slots, so signed-in users are not starved. With `GUEST_STREAMING=true` the server warns at startup if neither `TRUST_PROXY` nor `TRUST_CF_CONNECTING_IP` is set: behind the tunnel, all guests would then share one per-IP bucket. Guests never get the server's cookies: a sign-in refusal (such as an age-gated video) is returned as is, with no retry using `cookies.txt`. The per-client day counters track at most 10,000 keys and evict the oldest first, so spraying many addresses can reset a client's daily count; this is an accepted trade-off because the global per-minute cap still applies.
 - `SUPABASE_SERVICE_ROLE_KEY` **is** required on the server when `REQUIRE_APPROVAL=true`: the server reads `access_requests` with it, so approval is enforced on each HTTP request and on open websockets within ~60 s of a revoke. Find it in the Supabase dashboard (Project Settings > API Keys > `service_role`). It bypasses Row Level Security, so keep it only in `apps/server/.env` (`chmod 600`), never in the web or desktop app, a log or a commit. Edge Functions get their own copy automatically.
 - **Accepted limit:** a revoked user's Supabase access token stays valid for the Supabase REST API until it expires (about 1 hour by default). Banning the account stops token refresh. The REST API only returns that user's own rows under RLS, so the window is accepted; the Open Record server itself enforces the revoke within ~60 s.
 - Do not set `SUPABASE_JWT_SECRET` on a current project (asymmetric signing keys are verified via JWKS).
-- Start the server with `npm run server:dev` for a quick check, or through its systemd user unit for production.
+- Start the server with `npm run server:dev` for a quick check, or through the systemd user unit below for production.
+
+### Systemd user unit (server)
+
+Runs the server as your user, directly on the host (no Docker). Build first with `npx nx build app && npx nx build server`, then:
+
+```ini
+# ~/.config/systemd/user/open-record-server.service
+[Unit]
+Description=Open Record server
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Github/open-record
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOST=127.0.0.1
+Environment=WEB_DIR=%h/Github/open-record/dist/apps/app/browser
+ExecStart=%h/.local/bin/node --env-file-if-exists=%h/Github/open-record/apps/server/.env %h/Github/open-record/dist/apps/server/main.mjs
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+loginctl enable-linger "$USER"        # start at boot, before login
+systemctl --user daemon-reload
+systemctl --user enable --now open-record-server
+journalctl --user -u open-record-server -f
+```
+
+`HOST` and `WEB_DIR` are set in the unit; everything else (`PUBLIC_URL`, `TRUST_PROXY`, `TRUST_CF_CONNECTING_IP`, `REQUIRE_APPROVAL`, Supabase, guest limits) comes from `apps/server/.env`. Node does not override variables that are already set, so the unit values win. `~/.local/bin/node` is a symlink to your Node 24; after an nvm upgrade, repoint it with `ln -sf "$(command -v node)" ~/.local/bin/node`. Stop the foreground `server:up` before starting the unit: both use port 8787.
 
 ## (c) Supabase hosted project
 
@@ -167,6 +208,8 @@ Two separate things:
   - A per-source throttle: more than 5 request rows from one hashed source in the last hour returns 429. The source is the IP from `cf-connecting-ip`, else the first `x-forwarded-for` entry, salted with `REQUEST_IP_SALT`. The raw IP is never stored. The count is over rows, so repeats of an existing address do not add to it, but the throttle still applies to them while the source is over the limit.
   - A global cap of 500 pending requests (429). This is a count of the current queue, not per hour. It is left as is, because the admin clears the queue regularly. It is also a denial-of-service lever: anyone who can submit requests can fill the queue to 500 and then refuse every new legitimate request until the admin clears it. Clear the queue (deny the spam) promptly when this happens.
   - Admin-notification and approved-notice cooldowns (see (e)).
+
+  > **Note: Supabase Edge Functions are not behind Cloudflare.** Requests reach them directly from the client, so `cf-connecting-ip` and `x-forwarded-for` on those routes are set by the caller and are spoofable. The `request-access` throttle relies on Turnstile and the pending cap, not on the per-source count. The tunnel's `TRUST_CF_CONNECTING_IP` setting does not apply there.
 
   Limits and caveats:
   - Turnstile, the per-source throttle and the cooldowns are best-effort. The Edge gateway is not behind Cloudflare, so `cf-connecting-ip` and `x-forwarded-for` are set by the client. Per-IP throttling can be bypassed by header rotation: sending a new `cf-connecting-ip` or `x-forwarded-for` value on each request gives a fresh source bucket every time. An attacker who rotates headers, IPs or addresses is not stopped by the per-source throttle alone. Turnstile and the pending cap are the real limits here.

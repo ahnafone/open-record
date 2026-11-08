@@ -1,11 +1,13 @@
 # Open Record
 
 A vinyl record-shop listening room for your phone and desktop: browse the crates, build playlists,
-import your own music, and play it all on a virtual turntable. **Version 1.0.0.**
+import your own music, and play it all on a virtual turntable. **Version 0.0.1 (beta).**
 
 ![Open Record overview](docs/screenshots/00-overview.png)
 
 ## Download
+
+Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md). Checksums for the desktop installers are in `SHA256SUMS.txt` on the release page.
 
 | Platform | File | Notes |
 |---|---|---|
@@ -14,12 +16,11 @@ import your own music, and play it all on a virtual turntable. **Version 1.0.0.*
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
 | macOS Apple Silicon | [OpenRecord-macos-arm64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-arm64.dmg) | Open the DMG, drag to Applications |
 | macOS Intel | [OpenRecord-macos-x64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-x64.dmg) | Same, with the Intel DMG |
-| Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; see [release builds](#release-builds) |
-| iPhone / iPad | [Build with Xcode](#run-on-iphone) | Free Apple ID; re-sign every 7 days |
+| Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; beta-tested; see [release builds](#release-builds) |
+| iPhone / iPad | [Build from source](docs/ios-install.md) | Not tested yet. Mac, Xcode and a free Apple ID; re-sign every 7 days |
 
-Desktop builds are unsigned. The v1.0.0 desktop installers and Android APK are built and staged,
-but **no GitHub release is published yet**; the download links below resolve once it is. There is
-no App Store, TestFlight, Play Store or enterprise build.
+Desktop installers are unsigned and there is no auto-update: reinstall to update. There is no App
+Store, TestFlight, Play Store or enterprise build.
 
 > **Notices**
 >
@@ -29,15 +30,24 @@ no App Store, TestFlight, Play Store or enterprise build.
 
 ## Status
 
-Open Record 1.0.0 is the v1 source tree: an Angular + Capacitor app (Android, iOS and web) with a
-bundled public-domain catalogue, local imports, playlists, a queue, background downloads and
-optional accounts and sync. The Electron desktop app bundles the UI and local server, and
+Open Record 0.0.1 is a beta: an Angular + Capacitor app (Android, iOS and web) with a bundled
+public-domain catalogue, local imports, playlists, a queue, background downloads and optional
+accounts and sync. The Electron desktop app bundles the UI and local server, and
 `.github/workflows/desktop-build.yml` builds the desktop installers.
 
-Collaborators is hidden in v1; its role logic is kept for v2. Android and iOS device testing is
-still pending. A signed Android APK and the desktop installers are built and staged for v1.0.0, but
-the GitHub release is not published yet. The iPhone install uses a free Apple ID in Xcode and expires
-after 7 days.
+- **Android:** beta-tested on devices.
+- **iPhone:** not tested yet. It is build-from-source only (see [docs/ios-install.md](docs/ios-install.md)).
+- **Desktop:** installers are unsigned and do not auto-update.
+- Collaborators is hidden in this release; its role logic is kept for later.
+
+## Web app
+
+The web app runs at **https://open-record.uttarasoftware.ca**.
+
+- **Guests** can play the bundled catalogue and stream from search, within rate limits.
+- **Library and playlists** need an account. Sign-up is a request: the owner reviews it and approves
+  it, and you then get an email to set a password.
+- **Desktop app and self-hosted server** skip this gate. They run on your own machine or network.
 
 ## Install and run
 
@@ -77,8 +87,7 @@ npm run android:release:install
 
 Release builds need `apps/app/android/keystore.properties` and your own keystore outside the repo;
 see [RELEASE_SIGNING.md](apps/app/android/RELEASE_SIGNING.md). For a local performance build only,
-`./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key. The
-signed v1.0.0 APK is built and staged but not published.
+`./gradlew assembleRelease -PallowDebugSigning` in `apps/app/android` signs with the debug key.
 
 **Updating without losing your downloads.** Downloads and library data live in app-specific storage
 (internal, or the external app folder if you chose it), and uninstalling the app deletes both. Android
@@ -94,16 +103,9 @@ only updates in place when the new APK is signed with the same key as the instal
 
 ### Run on iPhone
 
-1. On a Mac with Xcode, run `npm ci` and `npm run ios:open` to sync the web build and open the
-   project.
-2. Select the **App** target > **Signing & Capabilities**, choose your Personal Team (a free Apple
-   ID), and use a unique bundle ID if `app.openrecord` is taken.
-3. Connect an iPhone (iOS 18+), enable Developer Mode if asked, select it and press Run.
-4. Trust the developer in **Settings > General > VPN & Device Management**. Free-account builds
-   expire after **7 days**; re-run from Xcode to re-sign. This is not TestFlight or the App Store.
-
-`npm run ios` uses the Capacitor CLI; `npm run ios:release` makes a generic Release build that is not
-directly installable. Use Xcode Run for a device.
+iPhone builds are from source only: a Mac with Xcode, a free Apple ID, and re-signing from Xcode
+every 7 days. This path is **not tested yet**. Follow the step-by-step guide in
+[docs/ios-install.md](docs/ios-install.md).
 
 ## Desktop app
 
@@ -125,22 +127,20 @@ See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and t
 Build the app for the current OS with `npm run desktop:dist`; `npm run desktop:dev` runs the
 Electron shell against the local build.
 
-## Deploy over HTTPS
+## Public hosting
 
-Full DNS, router, firewall, Caddy and Supabase runbook: [deploy/README.md](deploy/README.md).
-The reference deployment uses `https://open-record.uttarasoftware.ca`: a DNS A record points it at
-the public address, and the router forwards **TCP 80 and 443 only**. Caddy on the LAN host
-(`10.0.0.139`) terminates TLS with a Let's Encrypt certificate and proxies to `127.0.0.1:8787`.
+The public web app is served through a **Cloudflare Tunnel**, the only way in. The server listens on
+`127.0.0.1` and `cloudflared` forwards `https://open-record.uttarasoftware.ca` to it. There is no
+port forwarding and no reverse proxy, and the LAN address is not public.
 
-`10.0.0.139:8787` is the home-Wi-Fi address, **not** the public URL. Keep 8787 firewalled to the LAN
-and never expose it directly. Verify `/health`, `/app-config`, the 401/200 `/ping` pair, and that
-8787 is closed from outside.
+Full runbook (Cloudflare tunnel, server environment, Supabase, Turnstile, Resend, limits and
+verification): [docs/public-hosting.md](docs/public-hosting.md).
 
 ## Website
 
-A static landing page is planned for GitHub Pages at <https://ahnafone.github.io/open-record/>. When
-published it will be served from [docs/](docs/) with the same downloads, screenshots and install
-links. The page is not live yet; until then this README and [docs/desktop.md](docs/desktop.md) are the docs.
+The landing page is the Astro site in `apps/website`. GitHub Actions deploys it to GitHub Pages at
+<https://ahnafone.github.io/open-record/>. It is not served from `docs/`; `docs/` holds screenshots
+and the runbooks.
 
 ## Features
 
@@ -200,9 +200,9 @@ Build and measure with release builds, not debug.
 - **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
   configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
   opt-in with `-PallowDebugSigning` for local performance builds. The signed `OpenRecord-android.apk`
-  is built and staged for v1.0.0, but not published yet.
-- **iPhone:** run the **Release** configuration from Xcode with a Personal Team to install on a
-  device; `npm run ios:release` only makes a generic build. No TestFlight; free-account builds expire after 7 days.
+  is attached to the v0.0.1 release.
+- **iPhone:** build from source in Xcode with a Personal Team; see [docs/ios-install.md](docs/ios-install.md).
+  `npm run ios:release` only makes a generic build. No TestFlight; free-account builds expire after 7 days.
 - **Checks:** `npm run check` runs token checks, lint, typecheck and build.
 
 ## Supabase accounts (optional)
@@ -237,10 +237,9 @@ It needs Node 24 and `yt-dlp` on the host. The generated token lives in `~/.conf
 mode 0600, and the command prints the URL and QR code. The server has a concurrency cap, wait queue,
 rate limits and a link cache, and returns `503` with `Retry-After` when busy.
 
-Use plain HTTP only on a trusted home LAN; the bearer token is unencrypted. Outside the home, put the
-server behind HTTPS (Tailscale or a Cloudflare tunnel) and set `TRUST_PROXY` and `PUBLIC_URL`. See the
-[server README](apps/server/README.md#https-recommended-required-outside-your-home). Never
-port-forward 8787.
+Use plain HTTP only on a trusted home LAN; the bearer token is unencrypted. Outside the home, use
+HTTPS through Tailscale or the Cloudflare Tunnel in [docs/public-hosting.md](docs/public-hosting.md),
+and set `TRUST_PROXY` and `PUBLIC_URL`. Never port-forward 8787.
 
 ## Repo layout
 
@@ -248,15 +247,15 @@ port-forward 8787.
 apps/app/              Angular + Capacitor app (android/, ios/)
 apps/desktop/          Electron app, installer config and server-package-lock.json
 apps/server/           Self-hosted Fastify + yt-dlp stream-link server
-deploy/                Caddy/systemd deployment runbook and unit
-docs/                  Screenshots and the planned Pages landing page
-docs/desktop.md        Desktop install, Supabase and LAN phone guide
+apps/website/          Astro landing site, deployed to GitHub Pages
+docs/                  Screenshots and runbooks (public-hosting, ios-install, desktop)
 supabase/              Supabase config and SQL migrations (optional accounts)
 libs/                  Shared models, state, storage, player, UI and feature libraries
 mockup/                Interactive HTML design mockup (index.html, assets/)
-.github/workflows/     Desktop installer CI
+.github/workflows/     Desktop installer CI and Pages deploy
 DESIGN.md              Design system
 AGENTS.md              Rules for AI agents working on this project
+RELEASE_NOTES.md       Release notes for the current version
 LICENSE                MIT license
 ```
 

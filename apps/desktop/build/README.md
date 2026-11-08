@@ -30,7 +30,7 @@ commit a differently sized `icon.png`: keep it at 512x512 or larger.
 
 macOS style note: the source icon is a full-bleed dark square, so the DMG app
 icon is square rather than macOS-style rounded. This matches the web/Android
-branding and is intentional for v1.0.0.
+branding and is intentional for v0.0.1.
 
 ## Media binaries and the mirror
 

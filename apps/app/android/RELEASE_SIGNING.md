@@ -46,7 +46,7 @@ cd apps/app/android
 ```
 
 The output APK is `app/build/outputs/apk/release/app-release.apk` and should
-report `versionCode 1`, `versionName 1.0.0` (`aapt dump badging ...`).
+report `versionCode 1`, `versionName 0.0.1` (`aapt dump badging ...`).
 
 ## Local performance builds only
 

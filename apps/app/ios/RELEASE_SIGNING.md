@@ -2,7 +2,7 @@
 
 The project intentionally has no `DEVELOPMENT_TEAM`: the release is installed
 with a free Apple ID, and each person must select their own Personal Team.
-`MARKETING_VERSION` is `1.0.0`, `CURRENT_PROJECT_VERSION` is `1`, and the bundle
+`MARKETING_VERSION` is `0.0.1`, `CURRENT_PROJECT_VERSION` is `1`, and the bundle
 ID is `app.openrecord`.
 
 ## Select the team in Xcode
@@ -28,4 +28,4 @@ ID is `app.openrecord`.
 Do not use the generic `ios:release` target: it produces an uninstallable
 archive on Linux/CI. A free Apple ID build expires after **7 days** and must be
 re-signed by running from Xcode again. TestFlight/App Store distribution is not
-used for 1.0.0.
+used for 0.0.1.
