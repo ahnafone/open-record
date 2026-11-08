@@ -8,7 +8,7 @@ import {
   type SettingsRepository,
 } from '@open-record/storage';
 import { defaultDeviceName, ensureDeviceId } from './device-identity';
-import { RemoteServerPort } from './ports';
+import { PUBLIC_SERVER, RemoteServerPort } from './ports';
 import { SettingsStore } from './settings.store';
 
 function boot(
@@ -134,6 +134,66 @@ function fakeRemote(probe: () => Promise<void> = async () => undefined): {
   } as unknown as RemoteServerPort;
   return { port, probeServer, testConnection };
 }
+
+const PUBLIC_URL = 'https://public.example.com';
+
+function bootWithPublic(
+  storage: StoragePort,
+  remote: RemoteServerPort,
+): SettingsStore {
+  TestBed.resetTestingModule();
+  TestBed.configureTestingModule({
+    providers: [
+      { provide: StoragePort, useValue: storage },
+      { provide: RemoteServerPort, useValue: remote },
+      { provide: PUBLIC_SERVER, useValue: PUBLIC_URL },
+    ],
+  });
+  return TestBed.inject(SettingsStore);
+}
+
+describe('SettingsStore connection mode', () => {
+  it('switching to the public server and back restores the own server', async () => {
+    const storage = createInMemoryStorage();
+    const { port } = fakeRemote();
+    const store = bootWithPublic(storage, port);
+    await store.ready();
+    await store.setDownloadServer({ url: 'http://own.example:47900' });
+
+    await store.setConnectionMode('public');
+    expect(store.downloadServerUrl()).toBe(PUBLIC_URL);
+    expect(store.ownServerUrl()).toBe('http://own.example:47900');
+
+    // Own-server edits are saved but do not replace the public server.
+    await store.setDownloadServer({ url: 'http://other.example:47900' });
+    expect(store.downloadServerUrl()).toBe(PUBLIC_URL);
+
+    await store.setConnectionMode('own');
+    expect(store.downloadServerUrl()).toBe('http://other.example:47900');
+
+    // The mode survives a reload.
+    await store.setConnectionMode('public');
+    const reloaded = bootWithPublic(storage, port);
+    await reloaded.ready();
+    expect(reloaded.connectionMode()).toBe('public');
+    expect(reloaded.downloadServerUrl()).toBe(PUBLIC_URL);
+  });
+
+  it('keeps the own server when the mode write fails', async () => {
+    const backing = createInMemoryStorage();
+    const { port } = fakeRemote();
+    const store = bootWithPublic(
+      storageWithFailingWrites(backing, new Set(['connectionMode'])),
+      port,
+    );
+    await store.ready();
+    await store.setDownloadServer({ url: 'http://own.example:47900' });
+
+    await expect(store.setConnectionMode('public')).rejects.toThrow('write failed');
+    expect(store.connectionMode()).toBe('own');
+    expect(store.downloadServerUrl()).toBe('http://own.example:47900');
+  });
+});
 
 const PHONE_LINK = buildPairingLink({ url: 'http://192.168.1.20:47900' });
 

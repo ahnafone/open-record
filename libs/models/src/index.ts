@@ -226,3 +226,4 @@ export interface Member {
 export * from './lib/pairing';
 export * from './lib/download-location';
 export * from './lib/session';
+export * from './lib/access';

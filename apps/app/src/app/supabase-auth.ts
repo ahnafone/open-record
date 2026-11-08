@@ -42,6 +42,17 @@ function isProject(value: unknown): value is AuthProjectConfig {
   return typeof v?.url === 'string' && typeof v.anonKey === 'string' && !!v.url && !!v.anonKey;
 }
 
+/**
+ * Access token of an invite link in the URL (web only): `type=invite` with both
+ * tokens present, else null. A bare `type=invite` proves nothing on its own.
+ */
+function inviteAccessToken(): string | null {
+  if (Capacitor.isNativePlatform() || typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  if (params.get('type') !== 'invite' || !params.get('refresh_token')) return null;
+  return params.get('access_token') || null;
+}
+
 function validUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -296,7 +307,13 @@ export class SupabaseAuth extends AuthPort {
       const { value } = await Preferences.get({ key: SERVER_PROJECT_KEY });
       const parsed = value ? (JSON.parse(value) as Partial<AuthProjectConfig> & { server?: unknown }) : null;
       if (parsed?.server !== serverUrl || !isProject(parsed)) return null;
-      return { url: parsed.url, anonKey: parsed.anonKey };
+      return {
+        url: parsed.url,
+        anonKey: parsed.anonKey,
+        ...(typeof parsed.turnstileSiteKey === 'string' && parsed.turnstileSiteKey
+          ? { turnstileSiteKey: parsed.turnstileSiteKey }
+          : {}),
+      };
     } catch {
       return null;
     }
@@ -360,6 +377,13 @@ export class SupabaseAuth extends AuthPort {
       // listener is attached). Never trust a bare `type=recovery` in the URL: on a
       // signed-in device it would unlock "set password" without the current one.
       // An event fired before the store listens is replayed by `onRecovery`.
+      // Invite links (`type=invite`) sign the user in with no PASSWORD_RECOVERY
+      // event, so read the link's tokens from the URL before the client consumes
+      // it. The flag is only honoured for the SIGNED_IN session that carries that
+      // link's access token, so a forged hash cannot unlock "set password".
+      // Native has no URL to read (detectSessionInUrl is web-only), so an
+      // invite there is not detected and the user sets a password from Account.
+      let inviteToken = inviteAccessToken();
       const client = createClient(project.url, project.anonKey, {
         auth: {
           storage: sessionStorage,
@@ -375,6 +399,11 @@ export class SupabaseAuth extends AuthPort {
       this.building = null;
       const { data } = client.auth.onAuthStateChange((event, session) => {
         if (event === 'PASSWORD_RECOVERY') this.notifyRecovery();
+        // An invite signs the user in: the first sign-in from that link asks for a password.
+        if (inviteToken && event === 'SIGNED_IN' && session?.access_token === inviteToken) {
+          inviteToken = null;
+          this.notifyRecovery();
+        }
         const user = toUser(session);
         for (const listener of this.listeners) listener(user);
       });

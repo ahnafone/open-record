@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { ServerConfig } from '../config';
 import type { VerifyToken } from '../plugins/auth';
+import type { AccessGate } from '../services/access-gate';
 import type { CastService } from '../services/cast';
 import type { MediaRelay } from '../services/media-relay';
 import type { SessionService } from '../services/session';
@@ -22,6 +23,8 @@ export interface RouteOptions {
   config: ServerConfig;
   /** Pre-bound: `verifyToken(value)` using the static token + Supabase verifier. */
   verifyToken?: VerifyToken;
+  /** Approval gate (public mode); the session websocket checks it at hello. Absent = no gate. */
+  accessGate?: AccessGate;
   /** Session state machine; absent when SESSION_ENABLED=false (routes answer 503). */
   sessions?: SessionService;
   // Phase 5 services; `relay` is null when casting is disabled.

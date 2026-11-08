@@ -8,7 +8,8 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import type { SupabaseAuthConfig } from '../config';
-import { clientKey } from '../services/client-ip';
+import { type AccessGate } from '../services/access-gate';
+import { clientAddress, clientKey } from '../services/client-ip';
 import { createFixedWindow } from '../services/fixed-window';
 
 declare module 'fastify' {
@@ -118,9 +119,11 @@ export async function verifyToken(
  * address. Keying unauthenticated requests on the presented header would let a
  * client mint a new bucket per header value.
  */
-export function rateLimitKey(request: Pick<FastifyRequest, 'userId' | 'ip'>): string {
+export function rateLimitKey(
+  request: Pick<FastifyRequest, 'userId' | 'ip' | 'headers' | 'socket'>,
+): string {
   if (request.userId) return `user:${request.userId}`;
-  return `ip:${clientKey(request.ip)}`;
+  return `ip:${clientKey(clientAddress(request))}`;
 }
 
 /**
@@ -188,8 +191,13 @@ export async function requireAccount(
  * but not counted, since clients send those during normal refresh. Past the
  * budget a counted client gets `429` with `Retry-After`. Verification runs
  * first, so a valid token is never refused or counted.
+ *
+ * Approval gate (public mode, `REQUIRE_APPROVAL`): a verified Supabase user the
+ * gate refuses gets `403 access-not-approved`. That is not a credential
+ * failure, so it is neither counted nor answered with `WWW-Authenticate`. The
+ * static token (`userId: null`) skips the gate.
  */
-export function registerAuth(app: FastifyInstance, verify: VerifyToken): void {
+export function registerAuth(app: FastifyInstance, verify: VerifyToken, gate?: AccessGate): void {
   app.decorateRequest('userId', null);
   app.decorateRequest('userExp', null);
   const failedAuth = createFixedWindow({
@@ -205,12 +213,15 @@ export function registerAuth(app: FastifyInstance, verify: VerifyToken): void {
     const presented = match?.[1].trim() ?? '';
     const verified = presented ? await verify(presented) : null;
     if (verified) {
+      if (gate && verified.userId !== null && !(await gate(verified.userId))) {
+        return reply.code(403).send({ error: 'access-not-approved' });
+      }
       request.userId = verified.userId;
       request.userExp = verified.exp ?? null;
       return;
     }
     if (presented && !isExpiredJwt(presented)) {
-      const retryAfter = failedAuth(clientKey(request.ip));
+      const retryAfter = failedAuth(clientKey(clientAddress(request)));
       if (retryAfter > 0) {
         reply.header('Retry-After', String(retryAfter));
         return reply.code(429).send({ error: 'too-many-requests' });

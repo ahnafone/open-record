@@ -14,7 +14,6 @@ import { CatalogProvider } from '@open-record/providers/catalog';
 import { LocalProvider, createDefaultFileStore, pickTextFile } from '@open-record/providers/local';
 import {
   REMOTE_PROVIDER_ID,
-  RemoteClient,
   RemoteProvider,
   createDefaultTransport,
 } from '@open-record/providers/remote';
@@ -29,6 +28,7 @@ import {
   LocalMediaPort,
   METADATA_FETCH,
   NetworkStatusPort,
+  PUBLIC_SERVER,
   PairingScannerPort,
   PlayCountsPort,
   RemoteServerPort,
@@ -48,6 +48,7 @@ import { createDeviceStorage } from './device-storage';
 import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
+import { PUBLIC_SERVER_URL } from './public-server.config';
 import {
   createCastFiles,
   createCastUploads,
@@ -87,10 +88,28 @@ const supabase = new SupabaseAuth(SUPABASE_BUILD_CONFIG, {
     return settings?.downloadServerUrl() ?? '';
   },
   fetchConfig: async (serverUrl) => {
-    const config = await new RemoteClient({ baseUrl: serverUrl }, createDefaultTransport()).appConfig();
-    return config.supabaseUrl && config.supabaseAnonKey
-      ? { url: config.supabaseUrl, anonKey: config.supabaseAnonKey }
-      : null;
+    // Read the body directly: `RemoteClient.appConfig()` drops `turnstileSiteKey`
+    // (the public server's Request-access widget key).
+    const res = await createDefaultTransport().request({
+      method: 'GET',
+      url: `${serverUrl.replace(/\/+$/, '')}/app-config`,
+      headers: { accept: 'application/json' },
+      timeoutMs: 10_000,
+    });
+    if (res.status < 200 || res.status >= 300)
+      throw new Error(`Server app-config failed (${res.status}).`);
+    const data = (res.data ?? {}) as {
+      supabaseUrl?: unknown;
+      supabaseAnonKey?: unknown;
+      turnstileSiteKey?: unknown;
+    };
+    const url = typeof data.supabaseUrl === 'string' ? data.supabaseUrl : '';
+    const anonKey = typeof data.supabaseAnonKey === 'string' ? data.supabaseAnonKey : '';
+    const turnstileSiteKey =
+      typeof data.turnstileSiteKey === 'string' && data.turnstileSiteKey
+        ? data.turnstileSiteKey
+        : undefined;
+    return url && anonKey ? { url, anonKey, turnstileSiteKey } : null;
   },
 });
 sources.register(new CatalogProvider());
@@ -134,6 +153,9 @@ function sessionOptions(): ServerSessionOptions & {
     accessToken: () => auth?.accessToken() ?? Promise.resolve(null),
     refreshAccessToken: () => auth?.refreshAccessToken() ?? Promise.resolve(null),
     native: Capacitor.isNativePlatform(),
+    // Public server: a session 403 `access-not-approved` shows the denied state
+    // (sessions never refresh the token for it).
+    onAccessDenied: () => auth?.markAccessDenied(),
   };
 }
 
@@ -198,6 +220,8 @@ export const appConfig: ApplicationConfig = {
     { provide: ImportFilePort, useValue: { pickTextFile } },
     { provide: METADATA_FETCH, useValue: metadataFetch },
     { provide: RemoteServerPort, useValue: remote },
+    // The public Open Record server's URL (Settings > public server switch).
+    { provide: PUBLIC_SERVER, useValue: PUBLIC_SERVER_URL },
     { provide: PairingScannerPort, useValue: new PlatformPairingScanner() },
     { provide: StreamResolverPort, useValue: remote.streams },
     { provide: NetworkStatusPort, useFactory: createNetworkStatus },

@@ -1,7 +1,55 @@
+import type { IncomingHttpHeaders } from 'node:http';
 import { isIP } from 'node:net';
 
 const IPV4_MAPPED = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i;
 const IPV4_TAIL = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+/** Minimal shape of a request: what `clientAddress` reads. */
+export interface AddressedRequest {
+  ip: string;
+  headers: IncomingHttpHeaders;
+  socket: { remoteAddress?: string | undefined };
+}
+
+/** True for IPv4 127.0.0.0/8, IPv6 ::1 and their IPv4-mapped forms. */
+function isLoopback(address: string): boolean {
+  const mapped = IPV4_MAPPED.exec(address);
+  const v4 = mapped?.[1] ?? address;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4)) return true;
+  return v4 === '::1';
+}
+
+/**
+ * Whether `CF-Connecting-IP` may name the client. Off by default: only enable
+ * (TRUST_CF_CONNECTING_IP=true) when cloudflared is the sole path to the origin.
+ * Set once by `buildApp` from config; module state, like `configureResolveLimits`.
+ */
+let trustCfConnectingIp = false;
+
+export function configureClientIp(options: { trustCfConnectingIp: boolean }): void {
+  trustCfConnectingIp = options.trustCfConnectingIp;
+}
+
+/**
+ * The address a client is counted under. Behind a Cloudflare Tunnel every
+ * request arrives from loopback (cloudflared), so `request.ip` is 127.0.0.1 and
+ * all users would share one budget. When `trustCfConnectingIp` is enabled and
+ * the TCP peer is loopback (the local tunnel) with a valid IP in
+ * `CF-Connecting-IP` (overwritten by Cloudflare), that header is used. A
+ * non-loopback peer never gets this treatment, so it cannot spoof its address.
+ * Otherwise `request.ip` (TRUST_PROXY) applies, exactly as before.
+ */
+export function clientAddress(request: AddressedRequest): string {
+  if (trustCfConnectingIp) {
+    const peer = request.socket.remoteAddress ?? '';
+    const header = request.headers['cf-connecting-ip'];
+    if (typeof header === 'string' && isLoopback(peer)) {
+      const ip = header.trim();
+      if (isIP(ip)) return ip;
+    }
+  }
+  return request.ip;
+}
 
 /**
  * Expands an IPv6 address to its eight 16-bit groups. A dotted IPv4 tail is

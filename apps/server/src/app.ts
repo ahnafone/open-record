@@ -7,7 +7,7 @@ import Fastify, {
   type FastifyPluginAsync,
   type FastifyServerOptions,
 } from 'fastify';
-import type { ServerConfig } from './config';
+import { ConfigError, type ServerConfig } from './config';
 import {
   createSupabaseVerifier,
   rateLimitKey,
@@ -17,6 +17,8 @@ import {
 } from './plugins/auth';
 import { hasWebApp, registerWebApp } from './plugins/web';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
+import { type AccessGate, createAccessGate } from './services/access-gate';
+import { configureClientIp } from './services/client-ip';
 import { CastService } from './services/cast';
 import { CastDiscovery } from './services/cast-discovery';
 import { loadOrCreateCastSecret, MediaRelay } from './services/media-relay';
@@ -44,6 +46,12 @@ export interface BuildAppOptions {
    * inject fakes (the caller then owns their disposal), or `false` to disable.
    */
   cast?: CastServices | false;
+  /**
+   * Test seam for the approval gate (`REQUIRE_APPROVAL`). Omit to build the
+   * real Supabase-backed gate from config; `fetchImpl` swaps only its HTTP call.
+   */
+  accessGate?: AccessGate;
+  fetchImpl?: typeof fetch;
 }
 
 /** Builds the Fastify instance: CORS, rate limit, bearer auth, then route plugins. */
@@ -55,6 +63,7 @@ export async function buildApp(
     logger: options.logger ?? false,
     trustProxy: config.trustProxy,
   });
+  configureClientIp({ trustCfConnectingIp: config.trustCfConnectingIp });
 
   // Order matters: CORS answers preflights. The auth hook is an instance
   // onRequest hook, and the rate limiter is added as a route-level onRequest
@@ -78,7 +87,23 @@ export async function buildApp(
   // Pre-bind the credential helper so routes never see the static token.
   const verifyJwt = config.supabase ? createSupabaseVerifier(config.supabase) : undefined;
   const verify: VerifyToken = (value) => verifyToken(value, config.token, verifyJwt);
-  registerAuth(app, verify);
+  // Public mode only: self-hosted instances (REQUIRE_APPROVAL unset) get no gate.
+  let accessGate: AccessGate | undefined;
+  if (config.requireApproval) {
+    if (options.accessGate) {
+      accessGate = options.accessGate;
+    } else if (config.supabaseUrl && config.supabaseServiceRoleKey) {
+      accessGate = createAccessGate({
+        supabaseUrl: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey,
+        adminUserId: config.adminUserId,
+        fetchImpl: options.fetchImpl,
+      });
+    } else {
+      throw new ConfigError('REQUIRE_APPROVAL=true needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+    }
+  }
+  registerAuth(app, verify, accessGate);
   configureResolveLimits(config.maxConcurrentResolves);
 
   // Sessions are in-memory, so they only exist when enabled. `start()` uses an
@@ -159,6 +184,7 @@ export async function buildApp(
   const routeOptions: RouteOptions = {
     config,
     verifyToken: verify,
+    accessGate,
     sessions: sessions ?? undefined,
     relay: castServices?.relay ?? null,
     cast: castServices?.cast ?? null,

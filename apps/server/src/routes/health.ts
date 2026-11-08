@@ -13,12 +13,13 @@ export const pingRoutes: FastifyPluginAsync = async (app) => {
 
 /**
  * Public client config (no token): the Supabase URL and anon key the web app
- * signs in with. Both are public values; the JWT secret is never included.
+ * signs in with, and the Turnstile site key. All are public values; the JWT
+ * secret and the service-role key are never included.
  */
 export const appConfigRoutes: FastifyPluginAsync<RouteOptions> = async (app, { config }) => {
   app.get('/app-config', { config: { public: true } }, async (_request, reply) => {
     reply.header('cache-control', 'no-store');
-    const { supabaseUrl, supabaseAnonKey } = config.appConfig;
-    return { supabaseUrl, supabaseAnonKey };
+    const { supabaseUrl, supabaseAnonKey, turnstileSiteKey } = config.appConfig;
+    return { supabaseUrl, supabaseAnonKey, turnstileSiteKey };
   });
 };

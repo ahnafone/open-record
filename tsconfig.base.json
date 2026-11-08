@@ -44,7 +44,8 @@
       ],
       "@open-record/features/account": [
         "./libs/features/account/src/index.ts"
-      ]
+      ],
+      "@open-record/features/admin": ["./libs/features/admin/src/index.ts"],
     }
   },
   "exclude": ["node_modules", "tmp"]

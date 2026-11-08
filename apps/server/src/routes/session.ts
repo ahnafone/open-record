@@ -16,7 +16,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { requireAccount, unverifiedExpiry } from '../plugins/auth';
-import { clientKey } from '../services/client-ip';
+import { clientAddress, clientKey } from '../services/client-ip';
 import type { SessionConnection } from '../services/session';
 import type { RouteOptions } from './index';
 
@@ -197,7 +197,7 @@ interface ReportBody {
  */
 export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
   app,
-  { sessions, verifyToken },
+  { sessions, verifyToken, accessGate },
 ) => {
   // Public-route abuse counters (§1.7). In-memory because rooms are too.
   const preHelloByIp = new Map<string, number>();
@@ -206,7 +206,7 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
 
   const ipFor = (request: FastifyRequest): string => {
     try {
-      return clientKey(request.ip || 'unknown');
+      return clientKey(clientAddress(request) || 'unknown');
     } catch {
       return 'unknown';
     }
@@ -305,6 +305,29 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
       }, HELLO_DEADLINE_MS);
       deadline.unref?.();
 
+      /**
+       * Approval gate for an open socket: a revoked user must not keep control.
+       * A gate error counts as refused (fail closed).
+       */
+      const stillApproved = async (uid: string): Promise<boolean> => {
+        if (!accessGate) return true;
+        try {
+          return await accessGate(uid);
+        } catch {
+          return false;
+        }
+      };
+
+      let gateChecking = false;
+      const recheckAccess = (): void => {
+        if (!accessGate || !userId || gateChecking) return;
+        gateChecking = true;
+        void stillApproved(userId).then((approved) => {
+          gateChecking = false;
+          if (!approved) reject(CLOSE_REFUSED, 'access not approved');
+        });
+      };
+
       const handleCommand = async (frame: Record<string, unknown>): Promise<void> => {
         if (!sessions || !userId || !device) return;
         const now = Date.now();
@@ -314,6 +337,12 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
           return;
         }
         commandTimes.push(now);
+        // Cached per user (60 s), so this is normally a map lookup.
+        if (!(await stillApproved(userId))) {
+          reject(CLOSE_REFUSED, 'access not approved');
+          return;
+        }
+        if (closed) return;
 
         const id =
           typeof frame['id'] === 'string' && frame['id'].length <= MAX_ID_LEN ? frame['id'] : '';
@@ -366,6 +395,13 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
           reject(CLOSE_EXPIRED, 'token expired');
           return;
         }
+        // Approval gate (public mode): the same check the REST routes get in
+        // onRequest. Refused for good (4403), not expired, so no refresh loop.
+        if (accessGate && !(await accessGate(verified.userId))) {
+          reject(CLOSE_REFUSED, 'access not approved');
+          return;
+        }
+        if (closed) return;
         const pendingForUser = authByUser.get(verified.userId) ?? 0;
         if (pendingForUser >= MAX_AUTH_SOCKETS_PER_USER) {
           reject(CLOSE_REFUSED, 'too many connections');
@@ -416,6 +452,7 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
 
         pingTimer = setInterval(() => {
           if (closed) return;
+          recheckAccess();
           const now = Date.now();
           if (now - lastActivity >= WS_SILENCE_CLOSE_MS) {
             reject(CLOSE_POLICY, 'idle');

@@ -36,6 +36,13 @@ async function main(): Promise<void> {
   // own ~/.config/open-record/cookies.txt happens to exist.
   configureCookies(config.ytdlpCookiesFile, join(config.dataDir, 'cookies.txt'));
 
+  // Names only: the service-role key and admin id are never printed.
+  if (config.requireApproval) {
+    console.log(
+      'open-record-server: approval gate on (REQUIRE_APPROVAL): Supabase users need an approved access request',
+    );
+  }
+
   // Computed once: the banner prints it and the cast speaker is told to use it.
   const publicUrl = process.env['PUBLIC_URL']?.trim() || undefined;
   const picked = pickLanUrl({

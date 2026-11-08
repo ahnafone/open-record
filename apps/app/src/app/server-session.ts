@@ -126,6 +126,21 @@ export interface SessionHttpOptions {
    * refresh itself fails): the caller stops polling until the next auth change.
    */
   onUnauthorized?: () => void;
+  /**
+   * Called on `403 access-not-approved` (public server: the account has no
+   * approved access). Never refreshes the token: a refresh cannot fix it.
+   */
+  onAccessDenied?: () => void;
+}
+
+/** True for the public server's `403` body when the account is not approved. */
+export function isAccessNotApproved(status: number, data: unknown): boolean {
+  return (
+    status === 403 &&
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { error?: unknown }).error === 'access-not-approved'
+  );
 }
 
 export interface SessionHttpResult<T> {
@@ -207,6 +222,10 @@ export class SessionHttp {
     }
 
     const response = await this.send<T>(method, path, token, opts);
+    if (isAccessNotApproved(response.status, response.data)) {
+      this.options.onAccessDenied?.();
+      return response;
+    }
     if (response.status !== 401) return response;
 
     // One refresh per request. A retried request that is still 401 gives up.
@@ -338,6 +357,8 @@ export interface ServerSessionOptions {
   /** Overrides platform detection (tests). */
   native?: boolean;
   fetchImpl?: typeof fetch;
+  /** The account is not approved on this server (`403 access-not-approved`). */
+  onAccessDenied?: () => void;
   /** Overrides the global WebSocket (tests). */
   webSocket?: typeof WebSocket;
   now?: () => number;
@@ -806,6 +827,7 @@ export class NativeSession extends BaseSession {
       onUnauthorized: () => {
         if (this.generation === generation && this.active) this.halt('off');
       },
+      onAccessDenied: this.options.onAccessDenied,
     });
     this.setConnection('connecting');
     this.installVisibilityListener();
@@ -1164,6 +1186,8 @@ export interface ServerCastOptions {
   clientId?: () => string;
   native?: boolean;
   fetchImpl?: typeof fetch;
+  /** The account is not approved on this server (`403 access-not-approved`). */
+  onAccessDenied?: () => void;
 }
 
 interface UploadResult {
@@ -1192,6 +1216,7 @@ export class ServerCastUploads extends CastUploadPort {
       refreshAccessToken: options.refreshAccessToken,
       native: this.native,
       fetchImpl: options.fetchImpl,
+      onAccessDenied: options.onAccessDenied,
     });
   }
 

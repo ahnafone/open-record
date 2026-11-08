@@ -104,6 +104,16 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       </a>
     }
 
+    @if (publicAvailable && !desktopApp) {
+      <or-section-head heading="Public server" />
+      <or-switch
+        label="Use the public Open Record server"
+        description="Connect to the public server instead of your own. Sign in there, or request access."
+        [checked]="publicMode()"
+        (checkedChange)="setPublicServer($event)"
+      />
+    }
+
     <or-section-head heading="Stream server" />
     <p class="lede">
       Connect your self-hosted Open Record server to search sites and stream
@@ -111,7 +121,16 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       Scan the QR code the server shows, or enter its address. Sign in to your
       account to use it.
     </p>
-    @if (settings.serverAvailable) {
+    @if (publicMode()) {
+      <p class="note">
+        Using the public Open Record server. Your own server address is kept and
+        comes back when you turn this off.
+      </p>
+      <a class="fix-row" routerLink="/account">
+        <or-icon name="users" [size]="20" />
+        <span class="fix-txt">Account: sign in or request access</span>
+      </a>
+    } @else if (settings.serverAvailable) {
       <form class="server" (submit)="saveServer($event)">
         @if (canScan()) {
           <or-button
@@ -736,6 +755,11 @@ export class SettingsPage {
   protected readonly serverDirty = computed(
     () => this.serverUrl().trim() !== this.settings.downloadServerUrl(),
   );
+  /** The public server is the one in use (the own-server form is hidden). */
+  protected readonly publicMode = computed(
+    () => this.settings.connectionMode() === 'public',
+  );
+  protected readonly publicAvailable = this.settings.publicServerAvailable;
   protected readonly savingServer = signal(false);
   /** QR scanning is offered only where the app provides a pairing scanner. */
   protected readonly canScan = signal(false);
@@ -945,6 +969,11 @@ export class SettingsPage {
     } catch {
       this.toast.show('Could not save that setting. Try again.');
     }
+  }
+
+  /** Switch between the own server and the public server (see SettingsStore). */
+  protected async setPublicServer(on: boolean): Promise<void> {
+    await this.saveSetting(() => this.settings.setConnectionMode(on ? 'public' : 'own'));
   }
 
   protected async testServer(): Promise<void> {

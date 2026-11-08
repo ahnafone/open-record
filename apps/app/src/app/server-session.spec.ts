@@ -387,6 +387,35 @@ describe('SessionHttp', () => {
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(unauthorized).toHaveBeenCalledTimes(1);
   });
+
+  it('does not refresh on 403 access-not-approved, and reports it once', async () => {
+    const refresh = vi.fn(async () => 'new-token');
+    const denied = vi.fn();
+    const unauthorized = vi.fn();
+    const fetchImpl = vi.fn(async () =>
+      fakeResponse(403, { error: 'access-not-approved' }),
+    ) as unknown as typeof fetch;
+
+    const http = new SessionHttp({
+      baseUrl: () => 'http://host',
+      clientId: () => 'c1',
+      accessToken: async () => 'old-token',
+      refreshAccessToken: refresh,
+      native: false,
+      fetchImpl,
+      onUnauthorized: unauthorized,
+      onAccessDenied: denied,
+    });
+
+    await expect(http.get('session/state')).resolves.toEqual({
+      status: 403,
+      data: { error: 'access-not-approved' },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(denied).toHaveBeenCalledTimes(1);
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
 });
 
 describe('cast uploads', () => {

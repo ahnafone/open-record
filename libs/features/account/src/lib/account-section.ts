@@ -10,6 +10,7 @@ import {
 import { NgTemplateOutlet } from '@angular/common';
 import { AuthStore, SyncStore } from '@open-record/state';
 import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-record/ui';
+import { RequestAccessForm } from './request-access-form';
 
 /**
  * Account sign-in form: Supabase email/password sign-in, sign-up, password
@@ -20,7 +21,7 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
  */
 @Component({
   selector: 'or-account-section',
-  imports: [NgTemplateOutlet, OrButton, OrIcon, OrSectionHead, OrSpinner],
+  imports: [NgTemplateOutlet, OrButton, OrIcon, OrSectionHead, OrSpinner, RequestAccessForm],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (!compact()) {
@@ -48,6 +49,8 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
         <or-button size="sm" (click)="auth.refresh()">Try again</or-button>
       }
       @case ('recovery') {
+        <h3 class="sub-head">Set your password</h3>
+        <p class="note">Choose a password to finish signing in.</p>
         <form class="form" (submit)="saveNewPassword($event)">
           <label class="field-label" for="or-auth-new-password">New password</label>
           <div class="pw">
@@ -82,6 +85,9 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
         </form>
       }
       @case ('signedOut') {
+        @if (requesting()) {
+          <or-request-access-form (backToSignIn)="requesting.set(false)" />
+        } @else {
         <form class="form" (submit)="signIn($event)">
           <label class="field-label" for="or-auth-email">Email</label>
           <input
@@ -129,6 +135,14 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
               <or-button [disabled]="auth.busy()" (click)="setCreating(false)"
                 >I have an account</or-button
               >
+            } @else if (auth.publicServer()) {
+              <!-- Public server: sign-up is closed; new people ask for access. -->
+              <or-button type="submit" variant="primary" [disabled]="auth.busy()"
+                >Sign in</or-button
+              >
+              <or-button [disabled]="auth.busy()" (click)="requestAccess()"
+                >Request access</or-button
+              >
             } @else {
               <or-button type="submit" variant="primary" [disabled]="auth.busy()"
                 >Sign in</or-button
@@ -152,6 +166,7 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
             </button>
           }
         </div>
+        }
       }
       @case ('signedIn') {
         <div class="signed-in">
@@ -191,6 +206,11 @@ import { OrButton, OrIcon, OrSectionHead, OrSpinner, OrToast } from '@open-recor
     .note {
       margin: var(--spacing-sm) 0 0;
       font-size: 12px;
+    }
+    .sub-head {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
     }
     .form {
       display: grid;
@@ -330,6 +350,8 @@ export class AccountSection {
   protected readonly password = signal('');
   protected readonly creating = signal(false);
   protected readonly showPassword = signal(false);
+  /** Public server only: the "Request access" form is showing. */
+  protected readonly requesting = signal(false);
   /** Form only (no heading or lede), for the "Sign in to continue" modal. */
   readonly compact = input(false, { transform: booleanAttribute });
 
@@ -348,6 +370,12 @@ export class AccountSection {
   protected setCreating(on: boolean): void {
     this.creating.set(on);
     this.auth.clearMessages();
+  }
+
+  /** Public server: show the Request-access form in place of sign-in. */
+  protected requestAccess(): void {
+    this.auth.clearMessages();
+    this.requesting.set(true);
   }
 
   protected async signIn(event: Event): Promise<void> {

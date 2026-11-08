@@ -1,4 +1,5 @@
 import {
+  WS_PING_MS,
   type SessionDevice,
   type SessionReportMessage,
   type SessionServerMessage,
@@ -8,6 +9,7 @@ import {
 } from '@open-record/models';
 import type { FastifyInstance } from 'fastify';
 import { SignJWT } from 'jose';
+import { vi } from 'vitest';
 import { buildApp } from '../app';
 import { loadConfig } from '../config';
 
@@ -508,5 +510,128 @@ describe('session routes', () => {
     const token = await sign('frame-user');
     const ok = await openClient(app, token, 'frame-ok');
     expect(ok.welcome.devices.map((row) => row.id)).toContain('frame-ok');
+  });
+});
+
+describe('session approval gate', () => {
+  const APPROVED = '11111111-1111-4111-8111-111111111111';
+  const REVOKED = '44444444-4444-4444-8444-444444444444';
+  const SERVICE_KEY = 'service-role-key-never-leaves-the-server';
+
+  /** Users the injected gate currently approves; tests flip it to revoke. */
+  let approved = new Set<string>();
+  const apps: FastifyInstance[] = [];
+  const clients: WsClient[] = [];
+
+  const gatedApp = async (): Promise<FastifyInstance> => {
+    const app = await buildApp(
+      loadConfig({
+        OPEN_RECORD_TOKEN: TOKEN,
+        SUPABASE_JWT_SECRET: SECRET,
+        REQUIRE_APPROVAL: 'true',
+        SUPABASE_URL: 'https://proj.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+      }),
+      { accessGate: async (userId) => approved.has(userId) },
+    );
+    apps.push(app);
+    await app.ready();
+    return app;
+  };
+
+  /** Polls on real time (only setInterval is faked in these tests), up to 3 s. */
+  const until = async (done: () => boolean): Promise<void> => {
+    for (let i = 0; i < 600 && !done(); i++) await sleep(5);
+    expect(done()).toBe(true);
+  };
+
+  beforeEach(() => {
+    approved = new Set([APPROVED]);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    for (const client of clients.splice(0)) {
+      try {
+        client.ws.terminate();
+      } catch {
+        // Already closed by the server.
+      }
+    }
+    for (const app of apps.splice(0)) await app.close();
+  });
+
+  it('refuses hello for an unapproved user with 4403 and admits an approved one', async () => {
+    const app = await gatedApp();
+
+    const denied = await app.injectWS('/session');
+    const deniedClient = track(denied);
+    clients.push(deniedClient);
+    denied.send(
+      JSON.stringify({ type: 'hello', token: await sign(REVOKED), device: device('gate-denied') }),
+    );
+    await expectClose(deniedClient, 4403);
+    expect((await deniedClient.closed).reason).toBe('access not approved');
+
+    const okClient = track(await app.injectWS('/session'));
+    clients.push(okClient);
+    okClient.ws.send(
+      JSON.stringify({ type: 'hello', token: await sign(APPROVED), device: device('gate-ok') }),
+    );
+    const welcome = await waitFor(okClient, (message) => message.type === 'welcome');
+    expect(welcome.type).toBe('welcome');
+
+    // The static token is not an account: it is still refused by the account rule.
+    const staticClient = track(await app.injectWS('/session'));
+    clients.push(staticClient);
+    staticClient.ws.send(
+      JSON.stringify({ type: 'hello', token: TOKEN, device: device('gate-static') }),
+    );
+    await expectClose(staticClient, 4403);
+    expect((await staticClient.closed).reason).toBe('account required');
+  });
+
+  it('closes an open socket with 4403 once the gate stops approving its user', async () => {
+    const jwt = await sign(APPROVED);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const app = await gatedApp();
+    const ws = await app.injectWS('/session');
+    const client = track(ws);
+    clients.push(client);
+    ws.send(JSON.stringify({ type: 'hello', token: jwt, device: device('gate-open') }));
+    await until(() => client.messages.some((message) => message.type === 'welcome'));
+
+    let result: { code: number; reason: string } | undefined;
+    void client.closed.then((value) => {
+      result = value;
+    });
+    approved.delete(APPROVED);
+    // The per-socket ping timer re-checks the gate; advance one full interval.
+    vi.advanceTimersByTime(WS_PING_MS);
+    await until(() => result !== undefined);
+    expect(result).toEqual({ code: 4403, reason: 'access not approved' });
+  });
+
+  it('refuses a command from a user the gate stopped approving', async () => {
+    const jwt = await sign(APPROVED);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const app = await gatedApp();
+    const ws = await app.injectWS('/session');
+    const client = track(ws);
+    clients.push(client);
+    ws.send(JSON.stringify({ type: 'hello', token: jwt, device: device('gate-cmd') }));
+    await until(() => client.messages.some((message) => message.type === 'welcome'));
+
+    let result: { code: number; reason: string } | undefined;
+    void client.closed.then((value) => {
+      result = value;
+    });
+    approved.delete(APPROVED);
+    ws.send(JSON.stringify({ type: 'command', id: 'pause-x', command: { type: 'pause' } }));
+    await until(() => result !== undefined);
+    expect(result).toEqual({ code: 4403, reason: 'access not approved' });
+    expect(client.messages.some((message) => message.type === 'ack' && message.id === 'pause-x')).toBe(
+      false,
+    );
   });
 });

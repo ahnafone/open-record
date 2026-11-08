@@ -1,4 +1,5 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
+import { probeAdmin } from './access-api';
 import { AuthPort, type AuthProfile, type AuthProjectConfig, type AuthUser } from './ports';
 
 /**
@@ -33,6 +34,12 @@ export class AuthStore {
   private readonly _prompt = signal<string | null>(null);
   private readonly _recovering = signal(false);
   private readonly _profile = signal<AuthProfile | null>(null);
+  private readonly _publicServer = signal(false);
+  private readonly _isAdmin = signal(false);
+  private adminProbe: Promise<void> = Promise.resolve();
+  private readonly _accessDenied = signal(false);
+  /** The user id the admin probe last ran for (one probe per sign-in). */
+  private adminProbedFor: string | null = null;
   private started?: Promise<void>;
   private unsubscribe?: () => void;
   private unsubscribeRecovery?: () => void;
@@ -59,6 +66,22 @@ export class AuthStore {
   readonly recovering = this._recovering.asReadonly();
   /** Server details of the signed-in account, once `loadProfile` has run (null otherwise). */
   readonly profile = this._profile.asReadonly();
+  /**
+   * The app is connected to the public Open Record server: sign-up is closed
+   * there (access is requested instead). Set by `SettingsStore`.
+   */
+  readonly publicServer = this._publicServer.asReadonly();
+  /**
+   * The signed-in account is the server's admin (probed once per sign-in on
+   * the public server; false elsewhere, and whenever the probe fails).
+   */
+  readonly isAdmin = this._isAdmin.asReadonly();
+  /**
+   * The server refused the signed-in account's API calls with
+   * `403 access-not-approved` (not approved, or revoked). Not an expired
+   * session: nothing retries it. Cleared on sign-out or a different account.
+   */
+  readonly accessDenied = this._accessDenied.asReadonly();
 
   /** Restore the session once (called at app start; safe to call again). */
   start(): Promise<void> {
@@ -96,6 +119,12 @@ export class AuthStore {
   }
 
   async signUp(email: string, password: string): Promise<boolean> {
+    // The public server admits accounts by invitation only (see `AccessRequestService`).
+    if (this._publicServer()) {
+      this.clearMessages();
+      this._error.set('Accounts on this server are by invitation. Request access instead.');
+      return false;
+    }
     if (!this.validate(email, password)) return false;
     return this.run(async (port) => {
       const { needsConfirmation } = await port.signUp(email.trim(), password);
@@ -251,6 +280,29 @@ export class AuthStore {
     this._notice.set(null);
   }
 
+  /**
+   * Called by `SettingsStore` when the connection mode changes. On the public
+   * server a signed-in account gets its admin probe (once per sign-in).
+   */
+  setPublicServer(on: boolean): void {
+    if (this._publicServer() === on) return;
+    this._publicServer.set(on);
+    // Admin and denial are per server: a new connection starts clean.
+    this.adminProbedFor = null;
+    this._isAdmin.set(false);
+    this._accessDenied.set(false);
+    const user = this._user();
+    if (on && user) this.checkAdmin(user.id);
+  }
+
+  /**
+   * The server answered `403 access-not-approved` to this session's request.
+   * Sessions call this instead of refreshing the token.
+   */
+  markAccessDenied(): void {
+    if (this._user()) this._accessDenied.set(true);
+  }
+
   private async restore(): Promise<void> {
     const port = this.port;
     if (!port) return;
@@ -288,9 +340,48 @@ export class AuthStore {
     if (user?.id !== this._profile()?.id) this._profile.set(null);
     // Recovery belongs to the reset-link session; it ends when that session does.
     if (!user && this._user()) this._recovering.set(false);
+    // Denial and admin status belong to one account; a token refresh keeps them.
+    if (user?.id !== this._user()?.id) {
+      this._accessDenied.set(false);
+      this._isAdmin.set(false);
+      this.adminProbedFor = null;
+    }
     this._user.set(user);
     this._status.set(user ? 'signedIn' : 'signedOut');
     if (user) this._prompt.set(null);
+    if (user) this.checkAdmin(user.id);
+  }
+
+  /** Admin probe for the public server: `list-access` answers 200 only for the admin. */
+  private checkAdmin(userId: string): void {
+    if (!this._publicServer() || this.adminProbedFor === userId) return;
+    this.adminProbedFor = userId;
+    this.adminProbe = this.probeAdminFor(userId);
+  }
+
+  /** Resolves once the admin probe for the current sign-in has finished (immediately when none is running). */
+  whenAdminResolved(): Promise<void> {
+    return this.adminProbe;
+  }
+
+  private async probeAdminFor(userId: string): Promise<void> {
+    let project: AuthProjectConfig | null = null;
+    let token: string | null = null;
+    try {
+      // The current project (the connection mode may have just changed).
+      project = (await this.port?.activeProject()) ?? null;
+      token = (await this.port?.accessToken()) ?? null;
+    } catch {
+      token = null;
+    }
+    if (!project || !token) {
+      // Nothing to ask with yet: let a later sign-in or restore probe again.
+      if (this.adminProbedFor === userId) this.adminProbedFor = null;
+      return;
+    }
+    const admin = await probeAdmin(project, token);
+    // Stale if the account changed or the public mode was switched off meanwhile.
+    if (this._user()?.id === userId && this._publicServer()) this._isAdmin.set(admin);
   }
 
   private validate(email: string, password: string): boolean {

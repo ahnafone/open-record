@@ -1,6 +1,14 @@
-import { inject } from '@angular/core';
-import { type CanActivateFn, Route, Router } from '@angular/router';
+import { EnvironmentInjector, inject, runInInjectionContext } from '@angular/core';
+import { type CanActivateFn, Route, Router, type UrlTree } from '@angular/router';
 import { AuthStore } from '@open-record/state';
+
+/** Lazy wrapper: the admin lib (and its guard) load only when /admin is visited. */
+const adminGuard: CanActivateFn = async (route, state) => {
+  const injector = inject(EnvironmentInjector);
+  const { adminGuard: guard } = await import('@open-record/features/admin');
+  // The admin guard is always an async function, never an Observable.
+  return runInInjectionContext(injector, () => guard(route, state)) as Promise<boolean | UrlTree>;
+};
 
 /** Import is account-only: signed out, open the sign-in prompt and stay put. */
 const requireAccount: CanActivateFn = async () => {
@@ -106,6 +114,19 @@ export const appRoutes: Route[] = [
     } satisfies ScreenData,
     loadComponent: () =>
       import('@open-record/features/account').then((m) => m.AccountPage),
+  },
+  {
+    path: 'admin',
+    title: 'Admin · Open Record',
+    data: {
+      screen: 'account',
+      root: false,
+      title: 'Admin',
+    } satisfies ScreenData,
+    // UX gate only: the server must enforce admin rights on every access-request call.
+    canActivate: [adminGuard],
+    loadComponent: () =>
+      import('@open-record/features/admin').then((m) => m.AdminPage),
   },
   {
     path: 'desktop',

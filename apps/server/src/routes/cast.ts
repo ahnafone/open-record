@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { MediaRelay, RelayEntry } from '../services/media-relay';
 import { catalogAudioPath } from '../services/media-plan';
-import { clientKey } from '../services/client-ip';
+import { clientAddress, clientKey } from '../services/client-ip';
 import { createFixedWindow } from '../services/fixed-window';
 import { createResolveCache, type ResolveCache } from '../services/stream-cache';
 import {
@@ -523,7 +523,7 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
         rateLimit: {
           max: RELAY_RATE_LIMIT_MAX,
           timeWindow: '1 minute',
-          keyGenerator: (request: FastifyRequest) => clientKey(request.ip),
+          keyGenerator: (request: FastifyRequest) => clientKey(clientAddress(request)),
         },
       },
       logLevel: 'silent',
@@ -546,7 +546,7 @@ export const castRoutes: FastifyPluginAsync<RouteOptions> = async (app, options)
       const entry = relay.verify(request.params.token);
       if (!entry) {
         // Never echo the token: an invalid guess gets the same 404 as an expired one.
-        if (invalidToken(clientKey(request.ip)) > 0) {
+        if (invalidToken(clientKey(clientAddress(request))) > 0) {
           return reply.code(429).send({ error: 'too-many-requests' });
         }
         return reply.code(404).send({ error: 'not-found' });

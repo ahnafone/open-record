@@ -27,3 +27,4 @@ export * from './lib/background-work';
 export * from './lib/battery-exemption.store';
 export * from './lib/track-art';
 export * from './lib/queue-window';
+export * from './lib/access.service';

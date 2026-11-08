@@ -25,6 +25,13 @@ export interface ServerConfig {
    * hop, a string limits it to those proxy IPs / CIDRs (comma list).
    */
   trustProxy: boolean | string;
+  /**
+   * Opt-in: honour `CF-Connecting-IP` when the TCP peer is loopback and the
+   * header is a valid IP. Only safe when cloudflared is the sole path to the
+   * origin: a same-host proxy that forwards unknown headers would let any client
+   * pick its own rate-limit bucket. Default false.
+   */
+  trustCfConnectingIp: boolean;
   /** Max yt-dlp processes running at once (search, resolve, stream). */
   maxConcurrentResolves: number;
   /** Seconds a resolved stream link is cached (capped by its own expiry). 0 disables. */
@@ -67,12 +74,29 @@ export interface ServerConfig {
    * SUPABASE_URL and SUPABASE_ANON_KEY are set. Never holds the JWT secret.
    */
   appConfig: AppConfig;
+  /** Supabase project URL (no trailing slash); null when SUPABASE_URL is unset. */
+  supabaseUrl: string | null;
+  /**
+   * Admin approval gate (public mode). When true, a Supabase user may use the
+   * API only with an `approved` row in `public.access_requests` or as
+   * `adminUserId`. Default false: self-hosters are unaffected.
+   */
+  requireApproval: boolean;
+  /**
+   * Service-role key, used only server-side to read `access_requests`. Never
+   * sent to clients, never logged. Required when `requireApproval` is true.
+   */
+  supabaseServiceRoleKey: string | null;
+  /** Supabase user id (UUID, lowercase) that bypasses the approval gate. */
+  adminUserId: string | null;
 }
 
 /** Body of GET /app-config: what the web app needs to sign in with Supabase. */
 export interface AppConfig {
   supabaseUrl: string | null;
   supabaseAnonKey: string | null;
+  /** Public Cloudflare Turnstile site key; null when TURNSTILE_SITE_KEY is unset. */
+  turnstileSiteKey: string | null;
 }
 
 export interface SupabaseAuthConfig {
@@ -120,6 +144,16 @@ function trustProxy(raw: string | undefined): boolean | string {
   return value;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Optional UUID, lowercased. Invalid values are a config error. */
+function uuid(env: Env, key: string): string | null {
+  const raw = env[key]?.trim();
+  if (!raw) return null;
+  if (!UUID.test(raw)) throw new ConfigError(`${key} must be a UUID`);
+  return raw.toLowerCase();
+}
+
 /** Optional http(s) URL, trailing slashes trimmed. Invalid values are a config error. */
 function httpUrl(env: Env, key: string, fallback: string | null): string | null {
   const raw = env[key]?.trim().replace(/\/+$/, '');
@@ -165,6 +199,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     // T1.6 re-keys this by user/token/IP; per-route limits still apply.
     rateLimitMax: int(env, 'RATE_LIMIT_MAX', 600, 1, 100_000),
     trustProxy: trustProxy(env['TRUST_PROXY']),
+    trustCfConnectingIp: bool(env, 'TRUST_CF_CONNECTING_IP', false),
     maxConcurrentResolves: int(env, 'MAX_CONCURRENT_RESOLVES', 2, 1, 16),
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
@@ -183,7 +218,28 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     supabase: supabaseConfig(env),
     webDir: env['WEB_DIR']?.trim() || null,
     appConfig: appConfig(env),
+    supabaseUrl: supabaseUrl(env) ?? null,
+    ...approvalConfig(env),
   };
+}
+
+/**
+ * Public-mode approval gate. Every missing-value error names the variable only,
+ * never its value: the service-role key must not reach logs or error output.
+ */
+function approvalConfig(env: Env): Pick<
+  ServerConfig,
+  'requireApproval' | 'supabaseServiceRoleKey' | 'adminUserId'
+> {
+  const requireApproval = bool(env, 'REQUIRE_APPROVAL', false);
+  const supabaseServiceRoleKey = env['SUPABASE_SERVICE_ROLE_KEY']?.trim() || null;
+  const adminUserId = uuid(env, 'ADMIN_USER_ID');
+  if (requireApproval && (!supabaseUrl(env) || !supabaseServiceRoleKey)) {
+    throw new ConfigError(
+      'REQUIRE_APPROVAL=true needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY',
+    );
+  }
+  return { requireApproval, supabaseServiceRoleKey, adminUserId };
 }
 
 const supabaseUrl = (env: Env): string | undefined => {
@@ -205,9 +261,10 @@ function appConfig(env: Env): AppConfig {
   if (anonKey && !url) {
     throw new ConfigError('SUPABASE_ANON_KEY needs SUPABASE_URL');
   }
+  const turnstileSiteKey = env['TURNSTILE_SITE_KEY']?.trim() || null;
   return url && anonKey
-    ? { supabaseUrl: url, supabaseAnonKey: anonKey }
-    : { supabaseUrl: null, supabaseAnonKey: null };
+    ? { supabaseUrl: url, supabaseAnonKey: anonKey, turnstileSiteKey }
+    : { supabaseUrl: null, supabaseAnonKey: null, turnstileSiteKey };
 }
 
 function supabaseConfig(env: Env): SupabaseAuthConfig | null {

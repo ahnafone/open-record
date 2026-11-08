@@ -19,7 +19,7 @@ major_version = 17
 enabled = true
 port = 54323
 
-# Local email testing UI (confirmation and password reset emails land here).
+# Local email testing UI (invite and password reset emails land here).
 [inbucket]
 enabled = true
 port = 54324
@@ -31,11 +31,38 @@ site_url = "http://localhost:4200"
 additional_redirect_urls = ["http://localhost:4200", "capacitor://localhost", "http://localhost"]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
-enable_signup = true
+# Public self sign-up is OFF: access is approval-gated (see access_requests and
+# the request-access / decide-access functions). Admin invites still work with
+# this off. Local dev: create test users in Studio (Authentication > Users) or
+# invite them through decide-access; the sign-up form will not create accounts.
+enable_signup = false
 enable_anonymous_sign_ins = false
 minimum_password_length = 6
 
 [auth.email]
-enable_signup = true
-# Local only: sign in straight after sign-up. Turn on for hosted projects.
+# Same as above, for the email provider. Keep off on hosted projects too.
+# This also blocks email OTP / magic link with create_user=true: with it off,
+# POST /auth/v1/otp for an unknown address creates nothing. Do not turn it on.
+enable_signup = false
+# Local only: sign in straight after sign-up. Hosted projects MUST have this on
+# (dashboard: Authentication > Sign In / Providers > Email > Confirm email), since
+# decide-access treats an account without email_confirmed_at as unconfirmed.
 enable_confirmations = false
+
+# OAuth providers (Google, GitHub, ...) and anonymous sign-ins must stay disabled:
+# either would create accounts without an approval. Nothing under [auth.external.*]
+# is enabled here; keep it that way.
+# enable_anonymous_sign_ins is set to false in [auth] above.
+
+# Edge Functions (supabase/functions/<name>). request-access is called by
+# anonymous visitors, so it skips the gateway JWT check and does its own
+# Turnstile verification. The admin functions require a valid signed-in JWT;
+# the function itself then checks the caller is ADMIN_USER_ID.
+[functions.request-access]
+verify_jwt = false
+
+[functions.list-access]
+verify_jwt = true
+
+[functions.decide-access]
+verify_jwt = true

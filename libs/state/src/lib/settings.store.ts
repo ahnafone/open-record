@@ -21,8 +21,17 @@ import {
   defaultDeviceName,
   ensureDeviceId,
 } from './device-identity';
-import { RemoteServerPort } from './ports';
+import { PUBLIC_SERVER, RemoteServerPort } from './ports';
 import { isAbort, remoteErrorMessage } from './remote-errors';
+
+/**
+ * `own`: talk to the server the user entered. `public`: talk to the public
+ * Open Record server (sign in or request access there).
+ */
+export type ConnectionMode = 'own' | 'public';
+
+/** Settings key for the connection mode (the own server stays under `downloadServer`). */
+const CONNECTION_MODE_KEY = 'connectionMode';
 
 /** The self-hosted download server the app talks to. */
 export interface DownloadServerSettings {
@@ -101,9 +110,15 @@ export class SettingsStore {
   protected readonly storage = inject(StoragePort);
   private readonly remote = inject(RemoteServerPort, { optional: true });
   private readonly auth = inject(AuthStore);
+  /** Public server URL for this build ('' hides the option). */
+  private readonly publicUrl = (inject(PUBLIC_SERVER, { optional: true }) ?? '').trim();
 
   private readonly _hydrated = signal(false);
+  /** The effective server: the public one in public mode, else the own one. */
   private readonly _server = signal<DownloadServerSettings>(NO_SERVER);
+  /** The own server the user entered (kept while in public mode). */
+  private readonly _own = signal<DownloadServerSettings>(NO_SERVER);
+  private readonly _mode = signal<ConnectionMode>('own');
   private readonly _serverReady = signal(false);
   private readonly _connection = signal<ConnectionState>({ status: 'idle' });
   private readonly _quality = signal<AudioQualitySettings>(DEFAULT_QUALITY_SETTINGS);
@@ -128,6 +143,12 @@ export class SettingsStore {
   readonly downloadServerToken = computed(() => this._server().token);
   /** A valid server URL is saved and applied, so search and downloads can run. */
   readonly downloadServerConfigured = this._serverReady.asReadonly();
+  /** The own server's URL (kept while the public server is in use). */
+  readonly ownServerUrl = computed(() => this._own().url);
+  /** Which server the app talks to. */
+  readonly connectionMode = this._mode.asReadonly();
+  /** This build offers the public server (its URL is set). */
+  readonly publicServerAvailable = !!this.publicUrl;
   /** Settings "Test connection" state. */
   readonly connection = this._connection.asReadonly();
 
@@ -187,7 +208,7 @@ export class SettingsStore {
     token?: string;
   }): Promise<void> {
     await this.loaded;
-    const before = this._server();
+    const before = this._own();
     const url = next.url.trim();
     const value: DownloadServerSettings = {
       url,
@@ -195,7 +216,11 @@ export class SettingsStore {
         next.token?.trim() ?? (url === before.url ? before.token : ''),
     };
     if (value.url === before.url && value.token === before.token) return;
-    this.apply(value, true);
+    const live = this._mode() === 'own';
+    // In public mode the own server is only saved; the app keeps talking to
+    // the public server until the user switches back.
+    if (live) this.apply(value, true);
+    this._own.set(value);
     this._connection.set({ status: 'idle' });
     try {
       if (value.url)
@@ -205,9 +230,41 @@ export class SettingsStore {
         });
       else await this.storage.settings.delete(SETTINGS_KEYS.downloadServer);
     } catch (err) {
-      this.apply(before, false);
+      this._own.set(before);
+      if (live) this.apply(before, false);
       throw err;
     }
+  }
+
+  /**
+   * Switch between the own server and the public server. The own server's
+   * saved address is kept either way. Persists the mode and rolls back if the
+   * write fails.
+   */
+  async setConnectionMode(mode: ConnectionMode): Promise<void> {
+    await this.loaded;
+    if (mode === 'public' && !this.publicUrl)
+      throw new Error('The public server is not available in this build.');
+    const before = this._mode();
+    if (mode === before) return;
+    this._mode.set(mode);
+    this.auth.setPublicServer(mode === 'public');
+    this.apply(this.effectiveServer(), false);
+    this._connection.set({ status: 'idle' });
+    try {
+      await this.storage.settings.set(CONNECTION_MODE_KEY, mode);
+    } catch (err) {
+      this._mode.set(before);
+      this.auth.setPublicServer(before === 'public');
+      this.apply(this.effectiveServer(), false);
+      throw err;
+    }
+  }
+
+  /** The server the app should talk to for the current mode. */
+  private effectiveServer(): DownloadServerSettings {
+    if (this._mode() === 'public') return { url: this.publicUrl, token: '' };
+    return this._own();
   }
 
   /** Change quality settings; persists, rolling back if the write fails. */
@@ -302,6 +359,11 @@ export class SettingsStore {
     const link = parsePairingLink(text);
     if (!link)
       return { ok: false, message: 'That is not an Open Record pairing link.' };
+    if (this._mode() === 'public')
+      return {
+        ok: false,
+        message: 'Turn off the public server in Settings to pair with your own server.',
+      };
     try {
       await this.setDownloadServer({ url: link.url });
     } catch (err) {
@@ -420,6 +482,7 @@ export class SettingsStore {
       deviceId,
       deviceName,
       sessionPrefs,
+      mode,
     ] = await Promise.all([
       this.readServer(),
       this.readQuality(),
@@ -428,8 +491,12 @@ export class SettingsStore {
       ensureDeviceId(this.storage),
       this.readDeviceName(),
       this.readSessionPrefs(),
+      this.readConnectionMode(),
     ]);
-    this.apply(server, false);
+    this._own.set(server);
+    this._mode.set(mode);
+    this.auth.setPublicServer(mode === 'public');
+    this.apply(this.effectiveServer(), false);
     this._quality.set(quality);
     this._autoDownload.set(autoDownload);
     this._downloadLocation.set(downloadLocation);
@@ -451,6 +518,17 @@ export class SettingsStore {
       // Unreadable settings fall back to defaults.
     }
     return NO_SERVER;
+  }
+
+  private async readConnectionMode(): Promise<ConnectionMode> {
+    try {
+      const raw = await this.storage.settings.get<string>(CONNECTION_MODE_KEY);
+      // Public mode only sticks when this build has a public server.
+      if (raw === 'public' && this.publicUrl) return 'public';
+    } catch {
+      // Unreadable settings fall back to the own server.
+    }
+    return 'own';
   }
 
   private async readQuality(): Promise<AudioQualitySettings> {

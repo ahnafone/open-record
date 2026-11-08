@@ -153,7 +153,8 @@ is already set.
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
 | `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit sets it explicitly. |
-| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list. Behind a proxy (Caddy, a tunnel) set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list (`127.0.0.1/8,::1` works). Behind a proxy (Caddy, a tunnel) set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `TRUST_CF_CONNECTING_IP` | `false` | Opt-in. When `true`, a loopback TCP peer that sends a valid `CF-Connecting-IP` is keyed by that address (per-client limits see the real visitor behind a Cloudflare Tunnel). Set it **only** when cloudflared is the sole path to the origin (no Caddy or other same-host proxy in front). A same-host proxy that forwards unknown headers would let any client choose its own rate-limit bucket. When `false` (default), `CF-Connecting-IP` is ignored entirely and `TRUST_PROXY` alone decides the address. |
 | `LOG_LEVEL`         | `info`       | pino level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`). Relay URLs in request logs are redacted. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
@@ -170,6 +171,10 @@ is already set.
 | `SUPABASE_JWT_SECRET` | (unset) | Optional. Also accept signed-in users' Supabase access tokens (HS256, shared-secret projects; at least 32 characters). Local stack: "JWT secret" from `supabase status`. |
 | `SUPABASE_URL`      | (unset)      | Optional. Verifies asymmetric (ES256/RS256) Supabase tokens via `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, and is served at `GET /app-config` when `SUPABASE_ANON_KEY` is set. Must be `http(s)`. |
 | `SUPABASE_ANON_KEY` | (unset)      | Optional, public. With `SUPABASE_URL`, served at `GET /app-config` so the web app can sign in. Setting it without `SUPABASE_URL` is a startup error. |
+| `REQUIRE_APPROVAL`  | `false`      | Public mode: Supabase users may use the API only once approved (see [Public mode](#public-mode)). Needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, or startup fails. |
+| `SUPABASE_SERVICE_ROLE_KEY` | (unset) | Server-side only, for the approval lookup. Never sent to clients, never logged, never printed by the banner. Keep it in `apps/server/.env` (mode 600). |
+| `ADMIN_USER_ID`     | (unset)      | Supabase user id (UUID) that is always allowed, without an approved access request. |
+| `TURNSTILE_SITE_KEY` | (unset)     | Optional, public Cloudflare Turnstile site key, served at `GET /app-config` as `turnstileSiteKey` for the web app's sign-up challenge. Not a secret. |
 | `WEB_DIR`           | (unset)      | Optional. Host path of a built web app (`dist/apps/app/browser`) served at `/` without a token, with SPA fallback to `index.html` for HTML GETs. API routes keep their auth and are never shadowed. Unset (or no `index.html`) = API only. |
 | `YTDLP_PATH`        | `yt-dlp`     | yt-dlp binary to run.                                                 |
 | `YTDLP_COOKIES_FILE` | `<data dir>/cookies.txt` when present | Optional Netscape `cookies.txt` on this machine, e.g. `/home/you/cookies.txt`. Every request goes out without cookies first; only a video refused for sign-in (age gate, private, members-only, bot check) is retried once with them, so those songs take two yt-dlp runs. When unset, `<OPEN_RECORD_DATA_DIR>/cookies.txt` is used if that file exists; when neither exists the server has no cookies at all (no warning). An explicit path always wins, even when it is broken. A path that is unreadable, empty or not a Netscape file only logs a warning and a banner note; it never stops the server, and requests run anonymously. See [Age-restricted videos (cookies)](#age-restricted-videos-cookies). |
@@ -198,7 +203,7 @@ StreamResponse = {
 | Endpoint | Body / query | Response |
 | --- | --- | --- |
 | `GET /health` | | `{ status: "ok" }` (no auth; liveness check) |
-| `GET /app-config` | | `{ supabaseUrl: string \| null, supabaseAnonKey: string \| null }` (no auth, `cache-control: no-store`); both null unless `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set |
+| `GET /app-config` | | `{ supabaseUrl: string \| null, supabaseAnonKey: string \| null, turnstileSiteKey: string \| null }` (no auth, `cache-control: no-store`); the Supabase pair is null unless `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set, `turnstileSiteKey` is null unless `TURNSTILE_SITE_KEY` is set |
 | `GET /ping` | | `{ status: "ok" }`; the app's "Test connection" uses it to check the token |
 | `GET /search?q=&source=` | `source`: `youtube` (default), `ytmusic`, `soundcloud`, `bandcamp`, `audiomack`, `mixcloud`; `q` max 200 chars | `{ results: SearchResult[] }` (max 15) |
 | `POST /resolve` | `{ url }` | `SearchResult` (metadata only, `yt-dlp -J --no-playlist`) |
@@ -377,6 +382,47 @@ the loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only sa
 when 8787 is bound to loopback and nothing else can reach it; never use `true`
 while 8787 is reachable from the LAN, or clients can spoof their address. Scan
 the QR code (or enter the URL) in the app under Settings, Stream server.
+
+## Public mode
+
+Public mode runs the server on the internet behind a Cloudflare Tunnel (or Caddy)
+with an admin-approval gate: a person can sign in with Supabase, but may use the
+API only after an admin approves them. Self-hosters leave `REQUIRE_APPROVAL`
+unset and nothing here applies. Full setup: [`docs/public-hosting.md`](../../docs/public-hosting.md).
+
+| Variable | Notes |
+| --- | --- |
+| `REQUIRE_APPROVAL` | `true` turns the gate on. Startup fails unless `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Lets the server read `public.access_requests`. It bypasses Row Level Security, so it stays on the server only. Do not put it in the web app, the desktop app, a log, or a commit. |
+| `ADMIN_USER_ID` | The admin's Supabase user id. Always allowed, even with no request row. |
+| `TURNSTILE_SITE_KEY` | Public site key for the Turnstile widget, returned by `GET /app-config`. |
+
+How the gate decides, for a request carrying a valid Supabase access token:
+
+- The user is allowed when `ADMIN_USER_ID` matches, or `public.access_requests`
+  holds a row with `user_id` = the token's `sub` and `status = 'approved'`.
+- Anything else (no row, `pending`, `denied`, `revoked`, or a failed lookup)
+  gets `403 {"error":"access-not-approved"}`. It is not a `401`, so the app does
+  not treat it as an expired token, and it does not count toward the failed
+  sign-in limit. The static token (owner) is never gated.
+- The session websocket checks the same rule at `hello`, again every 10 s while
+  the socket is open, and before each command. A user who fails the check on an
+  open socket is closed with `4403` (`access not approved`).
+- Results are cached per user for 60 seconds, so a revoked user keeps access for
+  up to a minute. Failed lookups fail closed and are retried after at most 3 seconds.
+- The lookup has a 3-second timeout and sends only the user id (validated as a
+  UUID) to `<SUPABASE_URL>/rest/v1/access_requests`.
+
+Behind a Cloudflare Tunnel, cloudflared connects from loopback, so every request
+looks like `127.0.0.1`. Set `TRUST_CF_CONNECTING_IP=true` to key per-client limits
+by the visitor's address from `CF-Connecting-IP` (Cloudflare overwrites it, so
+visitors cannot set it). This is off by default and is not automatic: with it off,
+every tunnelled visitor shares one loopback bucket unless `TRUST_PROXY` is set to
+handle `X-Forwarded-For`. Enable it only when cloudflared is the sole path to the
+origin (for example `HOST=127.0.0.1` with no Caddy in front). Behind a same-host
+Caddy, leave it `false`: Caddy forwards unknown headers, so a client could pick its
+own bucket. A non-loopback peer is never trusted this way. Set
+`TRUST_PROXY=127.0.0.1` as well when a same-host proxy adds `X-Forwarded-For`.
 
 ## Updating yt-dlp
 

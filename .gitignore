@@ -92,3 +92,9 @@ GoogleService-Info.plist
 *.p8
 *.mobileprovision
 supabase/.temp/
+# Supabase / Edge Functions secrets: real values never committed. The templates
+# (.env.example) stay tracked.
+supabase/.env*
+supabase/functions/.env*
+!supabase/.env.example
+!supabase/functions/.env.example

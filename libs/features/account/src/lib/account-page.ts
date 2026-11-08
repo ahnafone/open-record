@@ -8,6 +8,7 @@ import {
   untracked,
 } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import {
   AuthStore,
   ImportStore,
@@ -46,15 +47,33 @@ type Action = 'password' | 'email' | 'signOut' | 'delete';
     OrIcon,
     OrSectionHead,
     OrSpinner,
+    RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (!auth.available) {
       <or-section-head heading="Account" />
       <p class="lede">Accounts are not part of this app. Everything works without one.</p>
+    } @else if (auth.signedIn() && auth.accessDenied() && !auth.recovering()) {
+      <!-- Public server: the account exists but is not approved (or was revoked). -->
+      <or-section-head heading="Access not approved" />
+      <p class="lede">
+        This account isn't approved on this server, or its access was revoked.
+        Sign out, or ask the server admin to approve it.
+      </p>
+      <div class="actions">
+        <or-button variant="primary" (click)="signOutDenied()">Sign out</or-button>
+      </div>
     } @else if (!auth.signedIn() || auth.recovering()) {
       <or-account-section />
     } @else {
+      @if (auth.isAdmin()) {
+        <or-section-head heading="Server" />
+        <p class="lede">You administer this server.</p>
+        <p class="actions">
+          <a class="admin-link" routerLink="/admin">Manage access requests</a>
+        </p>
+      }
       <or-section-head heading="Profile" />
       <dl class="rows">
         <div class="row">
@@ -394,6 +413,20 @@ type Action = 'password' | 'email' | 'signOut' | 'delete';
       display: grid;
       margin-top: var(--spacing-sm);
     }
+    .admin-link {
+      display: inline-flex;
+      align-items: center;
+      min-block-size: var(--spacing-touch);
+      font-size: 14px;
+      color: var(--color-text);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      border-radius: var(--rounded-md);
+    }
+    .admin-link:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
     .stack {
       display: grid;
       gap: var(--spacing-sm);
@@ -526,6 +559,11 @@ export class AccountPage {
   protected openDelete(): void {
     this.begin('delete');
     this.deleteOpen.set(true);
+  }
+
+  /** Denied account: signing out is the only action on this server. */
+  protected async signOutDenied(): Promise<void> {
+    await this.auth.signOut();
   }
 
   protected async deleteAccount(): Promise<void> {

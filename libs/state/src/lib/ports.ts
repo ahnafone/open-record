@@ -226,7 +226,15 @@ export abstract class NetworkStatusPort {
 export interface AuthProjectConfig {
   url: string;
   anonKey: string;
+  /** Cloudflare Turnstile site key for the access request form (null when the server has none). */
+  turnstileSiteKey?: string | null;
 }
+
+/**
+ * URL of the public Open Record server (`''` when this build has none). Provided
+ * by the app; Settings offers "Use the public Open Record server" only when set.
+ */
+export const PUBLIC_SERVER = new InjectionToken<string>('PUBLIC_SERVER');
 
 /** The signed-in account. */
 export interface AuthUser {
