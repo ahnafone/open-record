@@ -864,6 +864,115 @@ describe('SessionStore', () => {
     expect(port.commands).toHaveLength(before);
   });
 
+  it('starts a fresh track at 0 instead of seeking to its stale anchor', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    // Just started by a command: the anchor is at 0 and fresh at receipt.
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          positionSec: 0,
+          updatedAt: Date.now(),
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(engine.seekIfDrifted).not.toHaveBeenCalled();
+    // The fresh start re-bases the server anchor with a forced tick.
+    expect(port.reports()).toContainEqual(
+      expect.objectContaining({ reason: 'tick' }),
+    );
+  });
+
+  it('seeks to the live position when the anchor at 0 is stale', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    // Anchored at 0 but 30 s old: the song has been playing, so this is a join.
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          positionSec: 0,
+          updatedAt: Date.now() - 30_000,
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(engine.seekIfDrifted).toHaveBeenCalledWith(
+      30,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('seeks a join whose anchor at 0 was already 8 s old on receipt, with no forced tick', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          positionSec: 0,
+          updatedAt: Date.now() - 8000,
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(engine.seekIfDrifted).toHaveBeenCalledWith(
+      8,
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(port.reports().some((r) => r.reason === 'tick')).toBe(false);
+  });
+
+  it('keeps a fresh command start at 0 when the load takes 6 s after receipt', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    // Fresh at receipt; the slow load then ages the anchor past any bound.
+    const base = engine.applyOrder.getMockImplementation();
+    if (!base) throw new Error('fake engine has no applyOrder');
+    engine.applyOrder.mockImplementationOnce(async (order, cursor, opts) => {
+      vi.advanceTimersByTime(6000);
+      return base(order, cursor, opts);
+    });
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          positionSec: 0,
+          updatedAt: Date.now(),
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(engine.seekIfDrifted).not.toHaveBeenCalled();
+    expect(port.reports()).toContainEqual(
+      expect.objectContaining({ reason: 'tick' }),
+    );
+  });
+
   it('reports a local seek at once and ignores in-flight stale ticks', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000_000);
@@ -880,6 +989,8 @@ describe('SessionStore', () => {
       ),
     );
     await settle();
+    // The fresh start re-bases the anchor with a report: clear its throttle.
+    vi.advanceTimersByTime(2001);
     port.sent.length = 0;
 
     engine.status.set('playing');
@@ -917,6 +1028,8 @@ describe('SessionStore', () => {
       ),
     );
     await settle();
+    // The fresh start re-bases the anchor with a report: clear its throttle.
+    vi.advanceTimersByTime(2001);
     port.sent.length = 0;
 
     engine.status.set('playing');

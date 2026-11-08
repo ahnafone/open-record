@@ -22,6 +22,8 @@ class FakeEngine implements AudioEngine {
   loaded: string[] = [];
   /** Neighbour windows passed to each `load`, for native-window tests. */
   neighbours: (EngineNeighbours | undefined)[] = [];
+  /** Neighbour windows passed to each `preload` (web engines). */
+  preloads: EngineNeighbours[] = [];
   seeks: number[] = [];
   failOn = new Set<string>();
   /** Engine error code reported by `play` for ids in `failOn`. */
@@ -54,6 +56,9 @@ class FakeEngine implements AudioEngine {
   }
   async pause(): Promise<void> {
     this.listener?.onPaused();
+  }
+  preload(neighbours: EngineNeighbours): void {
+    this.preloads.push(neighbours);
   }
   async seek(sec: number): Promise<void> {
     this.seeks.push(sec);
@@ -837,8 +842,11 @@ describe('PlayerEngine', () => {
         let resolves = 0;
         const { player, ids } = setup({
           resolve: async (t) => {
-            resolves++;
-            if (resolves <= 3) throw networkError();
+            // Only `a` counts: a playing `a` also resolves neighbour `b` (preload).
+            if (t.id === 'a') {
+              resolves++;
+              if (resolves <= 3) throw networkError();
+            }
             return { url: `/${t.id}.mp3`, kind: 'bundled' };
           },
         });
@@ -1047,6 +1055,194 @@ describe('PlayerEngine', () => {
     });
   });
 
+  describe('web preload', () => {
+    it('preloads both neighbours once the current track plays', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('a');
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+    });
+
+    it('re-preloads the window after moving on, and drops next in repeat one', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      await flush();
+
+      await player.next();
+      await flush();
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('a');
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+
+      player.setRepeat('one');
+      await flush();
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('a');
+      expect(fake.preloads.at(-1)?.next).toBeUndefined();
+    });
+
+    it('does not re-preload on pause and resume of the same window', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+      const count = fake.preloads.length;
+
+      await player.pause();
+      await player.play();
+      await flush();
+
+      expect(fake.preloads.length).toBe(count);
+    });
+
+    it('does not re-resolve a track it already holds when it becomes a neighbour again', async () => {
+      const resolved: string[] = [];
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          resolved.push(t.id);
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 1 });
+      await flush();
+      await player.next();
+      await flush();
+
+      // `b` (the track we left) is now the previous neighbour: reused, not resolved.
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('b');
+      expect(resolved.filter((id) => id === 'b')).toHaveLength(1);
+    });
+
+    it('re-preloads when the queue changes under it (play next, remove, add, shuffle, new queue)', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+
+      // "Play next" puts a new track straight after the current one.
+      player.playNext([track('z')]);
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('z');
+
+      // Removing it brings the old next track back.
+      player.removeUpcoming(player.upcomingEntries()[0].queueIndex);
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+
+      // Appending past the end of a one-track-after window fills the gap.
+      await player.next();
+      await player.next();
+      await flush();
+      expect(fake.preloads.at(-1)?.next).toBeUndefined();
+      player.add([track('y')]);
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('y');
+
+      // Shuffle changes what is next; the window follows the new order.
+      player.setShuffle(true);
+      await flush();
+      const shuffledNext = player.upcoming()[0]?.id;
+      expect(fake.preloads.at(-1)?.next?.id).toBe(shuffledNext);
+      player.setShuffle(false);
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe(player.upcoming()[0]?.id);
+
+      // A whole new queue (new playlist) starts a fresh window.
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      await flush();
+      expect(fake.preloads.at(-1)?.previous).toBeUndefined();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('b');
+    });
+
+    it('never preloads for a native engine', async () => {
+      const { player, fake } = setup({ wantsNeighbours: true });
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+      player.setRepeat('all');
+      await flush();
+
+      expect(fake.preloads).toEqual([]);
+    });
+
+    it('drops a preload whose window went stale while resolving', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let held = false;
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          // Hold only the first resolve of `c`: the preload for `b`'s window.
+          if (t.id === 'c' && !held) {
+            held = true;
+            await gate;
+          }
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 1 });
+      await flush();
+      await player.next();
+      release();
+      await flush();
+
+      // The `b` window (previous a) was resolved while the token moved on.
+      expect(fake.preloads.some((p) => p.previous?.id === 'a')).toBe(false);
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('b');
+    });
+
+    it('resolves a cached neighbour again when its art changed', async () => {
+      const resolved: string[] = [];
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          resolved.push(t.id);
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 1 });
+      await flush();
+      await player.next();
+      await flush();
+      resolved.length = 0;
+
+      player.replaceUpcoming('b', { ...track('b'), artUrl: 'art.jpg' });
+      await flush();
+
+      expect(resolved).toContain('b');
+      expect(fake.preloads.at(-1)?.previous?.artUrl).toBe('art.jpg');
+    });
+
+    it('retries a neighbour that failed to resolve on the next play', async () => {
+      let failC = true;
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          if (t.id === 'c' && failC) throw networkError();
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+      expect(fake.preloads.at(-1)?.next).toBeUndefined();
+
+      failC = false;
+      await player.pause();
+      await player.play();
+      await flush();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+    });
+
+    it('leaves a gap for a neighbour that fails to resolve', async () => {
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          if (t.id === 'a') throw new Error('offline');
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+
+      expect(fake.preloads.at(-1)?.previous).toBeUndefined();
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+    });
+  });
+
   describe('seekIfDrifted', () => {
     it('does not scrub within the tolerance, but does beyond it', async () => {
       const { player, fake } = setup();
@@ -1065,6 +1261,40 @@ describe('PlayerEngine', () => {
       const { player, fake } = setup();
       await player.seekIfDrifted(50);
       expect(fake.seeks).toEqual([]);
+    });
+
+    it('does not move the audio while the next track is still loading', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          if (t.id === 'b') await gate;
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue([track('a'), track('b')]);
+      fake.listener?.onTime(10);
+
+      const pending = player.next();
+      expect(player.status()).toBe('loading');
+      // A session anchor near 0 for the new track must not seek the old audio.
+      await player.seekIfDrifted(0);
+      expect(fake.seeks).toEqual([]);
+
+      release();
+      await pending;
+      expect(player.status()).toBe('playing');
+      await player.seekIfDrifted(40);
+      expect(fake.seeks.at(-1)).toBe(40);
+    });
+
+    it('ignores an anchor for a track that is not the current one', async () => {
+      const { player, fake } = setup();
+      await player.setQueue([track('a'), track('b')]);
+      await player.seekIfDrifted(30, 2, 'b');
+      expect(fake.seeks).toEqual([]);
+      await player.seekIfDrifted(30, 2, 'a');
+      expect(fake.seeks.at(-1)).toBe(30);
     });
   });
 

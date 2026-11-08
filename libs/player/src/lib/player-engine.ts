@@ -105,11 +105,14 @@ export interface SetQueueOptions {
   history?: 'before-start';
 }
 
+/** Media resolved for a track, plus the identity it was resolved for. */
+interface ResolvedMedia {
+  media: EngineMedia;
+  key: string;
+}
+
 /** Seconds into a track after which "previous" restarts it instead. */
 export const RESTART_THRESHOLD_SEC = 3;
-
-/** Seconds before the end of a track at which the next one is pre-resolved. */
-export const PRELOAD_LEAD_SEC = 15;
 
 /** Largest time gap between ticks that still counts as listened time. */
 export const MAX_LISTEN_TICK_SEC = 3;
@@ -239,8 +242,12 @@ export class PlayerEngine {
   private lastTick = 0;
   /** Listened seconds since the current play instance began. */
   private listenedSec = 0;
-  /** `${loadToken}|${trackId}` of the last preload, so it runs once per track. */
+  /** `${loadToken}|${neighbourKey}` of the last web preload; skips repeats. */
   private preloadKey = '';
+  /** Media of the loaded track, for web preload reuse (see preloadNeighbours). */
+  private loadedMedia: ResolvedMedia | null = null;
+  /** Media last sent to a web engine (window + loaded), keyed by track id. */
+  private preloadedMedia = new Map<string, ResolvedMedia>();
   private readonly transientError?: (err: unknown) => string | undefined;
   /** Neighbour window the engine was last given; skips identical refreshes. */
   private neighbourSignature = '';
@@ -262,13 +269,13 @@ export class PlayerEngine {
         this.startedToken = this.loadToken;
         this._error.set(null);
         this._status.set('playing');
+        this.preloadNeighbours();
       },
       onPaused: () => {
         if (this._status() === 'playing') this._status.set('paused');
       },
       onTime: (sec) => {
         this._position.set(sec);
-        this.maybePreload(sec);
         // Only a small forward step is real listening; a seek earns nothing.
         const delta = sec - this.lastTick;
         if (delta > 0 && delta <= MAX_LISTEN_TICK_SEC) {
@@ -322,6 +329,7 @@ export class PlayerEngine {
     this._order.update((o) =>
       this._shuffle() ? [...o, ...this.shuffled(added)] : [...o, ...added],
     );
+    this.preloadNeighbours();
   }
 
   /**
@@ -468,6 +476,8 @@ export class PlayerEngine {
     this.loadedSourceKind = undefined;
     this.playIntent = false;
     this.neighbourSignature = '';
+    this.loadedMedia = null;
+    this.preloadedMedia = new Map();
     this._queue.set([]);
     this._order.set([]);
     this._cursor.set(-1);
@@ -545,11 +555,36 @@ export class PlayerEngine {
   }
 
   /**
-   * Seek only when the difference exceeds `tolerance` (the 30 s keepalives must
-   * not scrub). No-op without a current track.
+   * True once the current track has finished loading and is playing, paused
+   * or ended. While buffering (or after a failure) the engine has no reliable
+   * position for it, so position-based corrections must wait.
    */
-  async seekIfDrifted(positionSec: number, tolerance = 2): Promise<void> {
-    if (!this.current()) return;
+  get settled(): boolean {
+    const status = this._status();
+    return (
+      this.current() !== null &&
+      this.loadedToken === this.loadToken &&
+      status !== 'loading' &&
+      status !== 'idle' &&
+      status !== 'error'
+    );
+  }
+
+  /**
+   * Seek only when the difference exceeds `tolerance` (the 30 s keepalives must
+   * not scrub). No-op unless the track is `settled`, and when `expectedTrackId`
+   * is given, unless that is the current track (a stale anchor for the previous
+   * track must not scrub the audio that is still playing).
+   */
+  async seekIfDrifted(
+    positionSec: number,
+    tolerance = 2,
+    expectedTrackId?: string,
+  ): Promise<void> {
+    if (!this.settled) return;
+    if (expectedTrackId !== undefined && this.current()?.id !== expectedTrackId) {
+      return;
+    }
     if (Math.abs(this._position() - positionSec) > tolerance) {
       await this.seek(positionSec);
     }
@@ -968,6 +1003,7 @@ export class PlayerEngine {
       await this.engine.load(media, neighbours);
       if (token !== this.loadToken) return;
       this.loadedToken = token;
+      this.loadedMedia = { media, key: this.trackMediaKey(track) };
       this.neighbourSignature = this.neighbourKey();
       if (this.playIntent) await this.startEngine();
       else this._status.set('paused');
@@ -1071,13 +1107,23 @@ export class PlayerEngine {
     }
   }
 
-  /** Neighbours for native engines; failures just leave a gap. */
-  private async resolveNeighbours(): Promise<EngineNeighbours> {
+  /**
+   * Neighbours for native engines; failures just leave a gap. `known` lets
+   * web preload reuse media already resolved for a track, but only while the
+   * track's source and art identity are unchanged.
+   */
+  private async resolveNeighbours(
+    known?: ReadonlyMap<string, ResolvedMedia>,
+  ): Promise<EngineNeighbours> {
     const at = (cursor: number): Track | undefined =>
       cursor === -1 ? undefined : this._queue()[this._order()[cursor]];
     const safe = async (t?: Track) => {
       if (!t) return undefined;
+      const cached = known?.get(t.id);
+      if (cached && cached.key === this.trackMediaKey(t)) return cached.media;
       try {
+        // neighbourResolver must agree with resolve for the same track, or spare
+        // adoption will miss (the spare is keyed by the resolved URL).
         const neighbour = this.neighbourResolver ?? ((x: Track) => this.resolve(x));
         const source = await neighbour(t);
         return source ? await this.mediaFor(t, source) : undefined;
@@ -1095,41 +1141,76 @@ export class PlayerEngine {
   }
 
   /**
-   * Near the end of the current track, resolve the next one (warming the
-   * resolver's link cache) and hint the engine to buffer it. Skipped in
-   * repeat-one and for native engines, which already get the next item in
-   * their neighbour window. Stale results (queue/track changed) are dropped.
+   * Web engines: once the current item is playing, resolve both neighbours and
+   * hand them to `engine.preload` so a skip either way has no buffering. A
+   * paused restore does not preload (saves bandwidth). Runs once per load token
+   * and window (see `neighbourKey`); window changes re-run it via
+   * `refreshNeighbours`. A neighbour that fails to resolve is left out and the
+   * next trigger retries. Results that went stale while resolving are dropped.
+   * Native engines are skipped: they get the window via `load`.
    */
-  private maybePreload(positionSec: number): void {
-    if (this.engine.wantsNeighbours || this._repeat() === 'one') return;
+  private preloadNeighbours(): void {
+    if (this.engine.wantsNeighbours || !this.engine.preload) return;
+    if (!this.current() || this.loadedToken !== this.loadToken) return;
     if (this._status() !== 'playing') return;
-    const duration = this._duration();
-    if (!duration || duration - positionSec > PRELOAD_LEAD_SEC) return;
-    const target = this.peek(1);
-    if (target === -1) return;
-    const track = this._queue()[this._order()[target]];
-    if (!track || track.id === this.current()?.id) return;
     const token = this.loadToken;
-    const key = `${token}|${track.id}`;
+    const key = `${token}|${this.neighbourKey()}`;
     if (key === this.preloadKey) return;
     this.preloadKey = key;
+    const at = (cursor: number): Track | undefined =>
+      cursor === -1 ? undefined : this._queue()[this._order()[cursor]];
+    const prevTrack = at(this.peek(-1));
+    const nextTrack = this._repeat() === 'one' ? undefined : at(this.peek(1));
     void (async () => {
       try {
-        const media = await this.toMedia(track);
-        const stillNext =
-          token === this.loadToken &&
-          this._queue()[this._order()[this.peek(1)]]?.id === track.id;
-        if (stillNext) this.engine.preload?.(media);
+        // Reuse media already resolved for these tracks: the loaded one and the
+        // last window's (a skipped-back track is then not resolved again).
+        const known = new Map(this.preloadedMedia);
+        if (this.loadedMedia) known.set(this.loadedMedia.media.id, this.loadedMedia);
+        const neighbours = await this.resolveNeighbours(known);
+        if (token !== this.loadToken || key !== `${token}|${this.neighbourKey()}`) {
+          return;
+        }
+        const kept = new Map<string, ResolvedMedia>();
+        if (this.loadedMedia) kept.set(this.loadedMedia.media.id, this.loadedMedia);
+        const pairs: [Track | undefined, EngineMedia | undefined][] = [
+          [prevTrack, neighbours.previous],
+          [nextTrack, neighbours.next],
+        ];
+        for (const [track, media] of pairs) {
+          if (track && media) {
+            kept.set(media.id, { media, key: this.trackMediaKey(track) });
+          }
+        }
+        this.preloadedMedia = kept;
+        // A neighbour that failed to resolve leaves a gap: allow a retry on the
+        // next trigger (playing again, or a queue/order change).
+        if ((prevTrack && !neighbours.previous) || (nextTrack && !neighbours.next)) {
+          this.preloadKey = '';
+        }
+        this.engine.preload?.(neighbours);
       } catch {
         // Preload is best effort; the real load reports errors.
       }
     })();
   }
 
-  /** Re-send the neighbour window after a mode/order change (native only). */
+  /** Identity a cached media is valid for: source key and cover art. */
+  private trackMediaKey(track: Track): string {
+    return `${defaultMediaKey(track)}|${track.artUrl ?? ''}`;
+  }
+
+  /**
+   * Re-send the neighbour window after a mode/order change. Native engines get
+   * it through `load`; web engines get it through `preloadNeighbours`.
+   */
   private refreshNeighbours(): void {
+    if (!this.engine.wantsNeighbours) {
+      this.preloadNeighbours();
+      return;
+    }
     const track = this.current();
-    if (!this.engine.wantsNeighbours || !track) return;
+    if (!track) return;
     const signature = this.neighbourKey();
     if (signature === this.neighbourSignature) return;
     this.neighbourSignature = signature;

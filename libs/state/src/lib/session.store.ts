@@ -41,6 +41,18 @@ import {
 
 /** How close the local engine must be to the server anchor to leave it alone. */
 const SEEK_TOLERANCE_SEC = 2;
+/**
+ * A track that changed and whose stored anchor is this close to 0 was just
+ * started by a command: it begins at 0 and no catch-up seek follows the load.
+ */
+const FRESH_START_SEC = 3;
+/**
+ * A fresh start's anchor must be this old or younger when the state is
+ * received. A command's state arrives within a moment; a mid-song join or a
+ * late state is already aged, so it seeks. Measured at receipt, not after the
+ * load, because buffering takes seconds.
+ */
+const FRESH_START_RECEIPT_SEC = 2.5;
 /** Ticks sent before the server saw a local seek are ignored for this long. */
 const LOCAL_SEEK_GRACE_MS = 3000;
 
@@ -1270,12 +1282,18 @@ export class SessionStore {
           targetStale: message.targetStale,
         };
         this.session.set(next);
+        // The engine ignores this while its track is loading or is not the
+        // one the session cursor names (the outgoing audio must not scrub).
+        const expectedTrackId = next.order[next.cursor]?.id;
         if (
           this.isTarget() &&
+          expectedTrackId !== undefined &&
           Date.now() - this.lastLocalSeekAt > LOCAL_SEEK_GRACE_MS
         ) {
           void this.engine.seekIfDrifted(
             anchoredPosition(next, Date.now() + this.serverSkew()),
+            SEEK_TOLERANCE_SEC,
+            expectedTrackId,
           );
         }
         break;
@@ -1498,6 +1516,9 @@ export class SessionStore {
     state: SessionState,
     keepPosition = false,
   ): Promise<void> {
+    // Age of the anchor at receipt, before any await: a command's state is
+    // fresh here, while a join or late state is already aged.
+    const anchorAtReceipt = anchoredPosition(state, Date.now() + this.serverSkew());
     const tracks = this.mapEntries(state.order).map((entry) => entry.track);
     const cursor = state.cursor;
     if (cursor < 0 || cursor >= tracks.length) {
@@ -1513,6 +1534,14 @@ export class SessionStore {
     // anchor (the drift check below handles that within tolerance). This is
     // the echo of this device's own publish.
     const sameSong = this.engine.current()?.id === tracks[cursor]?.id;
+    // A different song whose stored anchor is at its start and was received
+    // fresh was just started by a command. The anchor is stale by the time it
+    // loads (buffering takes seconds), so a catch-up seek would skip the start.
+    // Mid-song joins, and states already aged at receipt, still seek.
+    const freshStart =
+      !sameSong &&
+      state.positionSec <= FRESH_START_SEC &&
+      anchorAtReceipt <= FRESH_START_RECEIPT_SEC;
     await this.engine.applyOrder(tracks, cursor, {
       autoplay: state.playing,
       positionSec: sameSong ? undefined : state.positionSec,
@@ -1522,11 +1551,13 @@ export class SessionStore {
     if (!this.isTarget()) return;
     // The same song kept its position: a seek held during a publish is newer
     // than this anchor, so correcting to it would undo the seek.
-    if (!(keepPosition && sameSong)) {
+    if (!(keepPosition && sameSong) && !freshStart) {
       // A reload starts at 0, and the anchor moved while the state travelled.
+      // seekIfDrifted is a no-op unless this track has settled.
       await this.engine.seekIfDrifted(
         anchoredPosition(state, Date.now() + this.serverSkew()),
         SEEK_TOLERANCE_SEC,
+        tracks[cursor]?.id,
       );
     }
     if (!this.isTarget()) return;
@@ -1547,6 +1578,10 @@ export class SessionStore {
         this.emitReport('playing');
       } else {
         this.needsGesture.set(false);
+        // A fresh start begins at 0 when audio actually starts; a forced tick
+        // tells the server to re-base its anchor (and broadcast it) to the real
+        // start, not the click time.
+        if (freshStart) this.emitReport('tick', undefined, true);
       }
     } else {
       await this.engine.pause();

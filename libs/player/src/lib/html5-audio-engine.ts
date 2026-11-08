@@ -4,6 +4,7 @@ import type {
   AudioEngineListener,
   EngineError,
   EngineMedia,
+  EngineNeighbours,
 } from './audio-engine';
 
 function mapMediaError(error: MediaError | null): EngineError {
@@ -31,9 +32,9 @@ function mapMediaError(error: MediaError | null): EngineError {
  * HTML5 <audio> engine. Used on the web and as the fallback when the native
  * plugin is not installed. OS controls come from MediaSessionController.
  *
- * `preload` buffers the likely next item in a spare element; when `load` asks
- * for that same URL the spare becomes the active element, so the next track
- * starts without a fresh network round trip.
+ * `preload` buffers the previous and next items in spare elements (one per
+ * URL, at most two); when `load` asks for one of those URLs the spare becomes
+ * the active element, so that track starts without a fresh network round trip.
  */
 export class Html5AudioEngine implements AudioEngine {
   readonly ownsSystemControls = false;
@@ -42,7 +43,10 @@ export class Html5AudioEngine implements AudioEngine {
   private listener: AudioEngineListener | null = null;
   private audio: HTMLAudioElement;
   private unbind: () => void;
-  private spare: { audio: HTMLAudioElement; url: string } | null = null;
+  /** Warm spare elements keyed by source URL. */
+  private spares = new Map<string, HTMLAudioElement>();
+  /** URL of the item currently loaded into the active element. */
+  private currentUrl = '';
   private volume = 1;
 
   constructor(
@@ -60,37 +64,96 @@ export class Html5AudioEngine implements AudioEngine {
 
   async load(media: EngineMedia): Promise<void> {
     const url = media.source.url;
-    const spare = this.spare;
-    this.spare = null;
-    if (spare && spare.url === url) {
+    const spare = this.spares.get(url);
+    if (spare) this.spares.delete(url);
+
+    if (spare && !spare.error) {
+      // Skip to a neighbour: adopt its warm element (already buffered, so no
+      // new request) and park the outgoing one for a skip back.
+      const outgoing = this.audio;
+      const outgoingUrl = this.currentUrl;
       this.unbind();
-      this.audio.pause();
-      this.audio.removeAttribute('src');
-      this.audio.load();
-      this.audio = spare.audio;
+      this.retire(outgoing, outgoingUrl, url);
+      this.audio = spare;
+      this.currentUrl = url;
       this.audio.volume = this.volume;
-      this.unbind = this.bind(spare.audio);
-      const d = spare.audio.duration;
+      this.unbind = this.bind(spare);
+      const d = spare.duration;
       if (Number.isFinite(d) && d > 0) this.listener?.onDuration(d);
       return;
     }
-    if (spare) release(spare.audio);
+    // Miss, or a spare that failed: reuse the active element (it was unlocked
+    // by the user's gesture, which matters for iOS autoplay) and drop the
+    // spares, since the window is unknown until the next preload().
+    if (spare) release(spare);
+    this.releaseSpares();
+    this.currentUrl = url;
     this.audio.src = url;
     this.audio.load();
   }
 
-  preload(media: EngineMedia): void {
-    const url = media.source.url;
-    if (this.spare?.url === url) return;
-    if (this.spare) release(this.spare.audio);
+  /**
+   * Park the element that was playing when a spare is adopted, so a skip back
+   * reuses it with no new request. It is kept paused, unbound and rewound.
+   * Released instead when it failed or nothing was loaded. The map is capped at
+   * two entries.
+   */
+  private retire(audio: HTMLAudioElement, url: string, incomingUrl: string): void {
+    audio.pause();
+    if (!url || url === incomingUrl || audio.error) {
+      release(audio);
+      return;
+    }
+    const older = this.spares.get(url);
+    if (older) release(older);
+    this.spares.delete(url);
+    for (const [oldUrl, old] of this.spares) {
+      if (this.spares.size < 2) break;
+      release(old);
+      this.spares.delete(oldUrl);
+    }
     try {
-      const audio = this.createAudio();
-      audio.preload = 'auto';
-      audio.src = url;
-      audio.load();
-      this.spare = { audio, url };
+      audio.currentTime = 0;
     } catch {
-      this.spare = null;
+      // Rewind is best effort; playback then starts from the element's position.
+    }
+    this.spares.set(url, audio);
+  }
+
+  /**
+   * Make the spares match the neighbour window: buffer each wanted URL that is
+   * not held yet (held ones are kept as they are), and release spares that are
+   * no longer wanted. The currently loaded URL never gets a spare.
+   */
+  preload(neighbours: EngineNeighbours): void {
+    const wanted = new Set<string>();
+    for (const media of [neighbours.previous, neighbours.next]) {
+      const url = media?.source.url;
+      if (url && url !== this.currentUrl) wanted.add(url);
+    }
+    for (const [url, audio] of this.spares) {
+      if (!wanted.has(url)) {
+        release(audio);
+        this.spares.delete(url);
+      }
+    }
+    for (const url of wanted) {
+      const held = this.spares.get(url);
+      if (held && !held.error) continue;
+      if (held) {
+        // A failed spare is a miss: drop it and buffer a fresh one.
+        release(held);
+        this.spares.delete(url);
+      }
+      try {
+        const audio = this.createAudio();
+        audio.preload = 'auto';
+        audio.src = url;
+        audio.load();
+        this.spares.set(url, audio);
+      } catch {
+        // Best effort: without a spare the later load simply fetches normally.
+      }
     }
   }
 
@@ -135,8 +198,8 @@ export class Html5AudioEngine implements AudioEngine {
   }
 
   async stop(): Promise<void> {
-    if (this.spare) release(this.spare.audio);
-    this.spare = null;
+    this.releaseSpares();
+    this.currentUrl = '';
     this.audio.pause();
     this.audio.removeAttribute('src');
     this.audio.load();
@@ -146,6 +209,11 @@ export class Html5AudioEngine implements AudioEngine {
     await this.stop();
     this.unbind();
     this.listener = null;
+  }
+
+  private releaseSpares(): void {
+    for (const audio of this.spares.values()) release(audio);
+    this.spares.clear();
   }
 
   /** Forward an element's media events to the listener. */

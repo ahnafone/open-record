@@ -66,10 +66,12 @@ export interface AudioEngine {
   /** Load (but do not start) an item. Resolves once the source is set. */
   load(media: EngineMedia, neighbours?: EngineNeighbours): Promise<void>;
   /**
-   * Optional hint: `media` is likely the next `load`. Engines may start
-   * buffering it so the switch is near-instant. Best effort, never throws.
+   * Optional hint: the previous and next items are likely the next `load`.
+   * Engines may buffer them so a skip either way is near-instant. Called with
+   * the full neighbour window; an absent side means "no longer wanted", so the
+   * engine should drop any buffer it holds for it. Best effort, never throws.
    */
-  preload?(media: EngineMedia): void;
+  preload?(neighbours: EngineNeighbours): void;
   play(): Promise<void>;
   pause(): Promise<void>;
   seek(positionSec: number): Promise<void>;
