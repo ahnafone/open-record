@@ -14,8 +14,7 @@ Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md). Checksums for the desktop i
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS Apple Silicon | [OpenRecord-macos-arm64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-arm64.dmg) | Open the DMG, drag to Applications |
-| macOS Intel | [OpenRecord-macos-x64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-x64.dmg) | Same, with the Intel DMG |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.1; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; beta-tested; see [release builds](#release-builds) |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | Not tested yet. Mac, Xcode and a free Apple ID; re-sign every 7 days |
 
@@ -37,7 +36,7 @@ accounts and sync. The Electron desktop app bundles the UI and local server, and
 
 - **Android:** beta-tested on devices.
 - **iPhone:** not tested yet. It is build-from-source only (see [docs/ios-install.md](docs/ios-install.md)).
-- **Desktop:** installers are unsigned and do not auto-update.
+- **Desktop:** Windows and Linux installers are unsigned and do not auto-update. macOS installers are not part of v0.0.1; build from source (see [docs/desktop.md](docs/desktop.md#build-from-source)).
 - Collaborators is hidden in this release; its role logic is kept for later.
 
 ## Web app
@@ -120,7 +119,7 @@ Electron application.
   Supabase project URL and anon key. It refuses `service_role` and `sb_secret_...` keys.
 - **Phones on this network:** the toggle restarts the local server on all interfaces and shows the
   LAN address and QR code. Use a trusted Wi-Fi only (plain HTTP), and never port-forward 47900.
-- **Unsigned, no auto-update:** expect Gatekeeper/SmartScreen warnings; reinstall to update. The
+- **Unsigned, no auto-update:** expect SmartScreen warnings on Windows; reinstall to update. The
   data folder and fixed origin preserve your library.
 
 See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and troubleshooting.
@@ -194,9 +193,10 @@ and the runbooks.
 
 Build and measure with release builds, not debug.
 
-- **Desktop:** `.github/workflows/desktop-build.yml` builds the Linux `.deb`/AppImage, Windows NSIS
-  installer and both macOS DMGs on a `v*` tag, writes `SHA256SUMS.txt`, and uploads them to the
-  GitHub release. All desktop installers are unsigned; there is no auto-update.
+- **Desktop:** `.github/workflows/desktop-build.yml` builds the Linux `.deb`/AppImage and Windows NSIS
+  installer on a `v*` tag, writes `SHA256SUMS.txt`, and uploads them to the GitHub release. macOS jobs
+  are removed for v0.0.1 (no macOS runner available). All desktop installers are unsigned; there is no
+  auto-update.
 - **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
   configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
   opt-in with `-PallowDebugSigning` for local performance builds. The signed `OpenRecord-android.apk`

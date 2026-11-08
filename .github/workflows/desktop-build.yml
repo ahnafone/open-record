@@ -34,18 +34,9 @@ jobs:
             arch: x64
             artifact: open-record-windows-x64
             builder_args: --win --x64
-          - name: macos-arm64
-            os: macos-14
-            platform: darwin
-            arch: arm64
-            artifact: open-record-macos-arm64
-            builder_args: --mac --arm64
-          - name: macos-x64
-            os: macos-14
-            platform: darwin
-            arch: x64
-            artifact: open-record-macos-x64
-            builder_args: --mac --x64
+          # macOS is skipped for v0.0.1: GitHub rejects the macos-14 runner
+          # configuration for this repo ("not supported"). Re-add the
+          # macos-arm64 / macos-x64 entries once a macOS runner works.
     steps:
       - name: Checkout
         uses: actions/checkout@v4

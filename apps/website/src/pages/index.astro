@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import PhoneShot from '../components/PhoneShot.astro';
 import WindowShot from '../components/WindowShot.astro';
-import { DOWNLOADS, IPHONE_GUIDE_URL, INSTALL_GUIDE_URL, PUBLIC_HOSTING_URL, RELEASES_URL, REPO, WEB_APP_URL, url } from '../lib/site';
+import { DESKTOP_GUIDE_URL, DOWNLOADS, IPHONE_GUIDE_URL, INSTALL_GUIDE_URL, PUBLIC_HOSTING_URL, RELEASES_URL, REPO, WEB_APP_URL, url } from '../lib/site';
 
 const features = [
   {
@@ -201,8 +201,9 @@ const features = [
         <span class="beta-badge">Beta · v0.0.1</span>
       </div>
       <p class="lead">
-        Desktop installers are unsigned and do not update themselves: expect Gatekeeper or SmartScreen warnings, and
-        install a newer build over the old one. Android is beta-tested. iPhone is build-from-source only.
+        Desktop installers are unsigned and do not update themselves: expect SmartScreen warnings on Windows, and
+        install a newer build over the old one. macOS installers are coming later; build from source for now.
+        Android is beta-tested. iPhone is build-from-source only.
       </p>
       <div class="grid grid--3 mt-xl">
         <article class="card">
@@ -234,20 +235,11 @@ const features = [
         </article>
 
         <article class="card">
-          <h3>macOS · Apple Silicon</h3>
-          <div class="card__head"><span class="tag tag--primary">Unsigned</span></div>
-          <p>Open the DMG and drag to Applications. The first time, right-click the app and choose Open.</p>
+          <h3>macOS · build from source</h3>
+          <div class="card__head"><span class="tag">Coming later</span></div>
+          <p>macOS installers are not part of v0.0.1. Build the desktop app yourself with <code>npm run desktop:dist</code>.</p>
           <div class="card__actions">
-            <a class="button button--primary" href={DOWNLOADS.macArm} rel="noopener">Download <span class="muted">(OpenRecord-macos-arm64.dmg)</span></a>
-          </div>
-        </article>
-
-        <article class="card">
-          <h3>macOS · Intel</h3>
-          <div class="card__head"><span class="tag tag--primary">Unsigned</span></div>
-          <p>Same steps as Apple Silicon, with the Intel DMG.</p>
-          <div class="card__actions">
-            <a class="button button--primary" href={DOWNLOADS.macIntel} rel="noopener">Download <span class="muted">(OpenRecord-macos-x64.dmg)</span></a>
+            <a class="button" href={`${DESKTOP_GUIDE_URL}#build-from-source`} rel="noopener">Build guide on GitHub</a>
           </div>
         </article>
 

@@ -6,8 +6,9 @@ an optional Supabase project adds sync and lets phones on your Wi-Fi use the sam
 The window loads a fixed local address, `http://127.0.0.1:47900`, not a public server (see
 [Deploy over HTTPS](../README.md#deploy-over-https)).
 
-> **Unsigned builds.** Gatekeeper and SmartScreen will warn you, and there is no
-> auto-update. macOS and Windows installers are CI-built and untested here.
+> **Unsigned builds.** SmartScreen will warn you on Windows, and there is no
+> auto-update. Windows installers are CI-built and untested here. macOS installers are
+> not published in v0.0.1; [build from source](#build-from-source) instead.
 
 ## Download and install
 
@@ -19,8 +20,7 @@ Get your file from the
 | Linux x64 (recommended) | `OpenRecord-linux-amd64.deb`       | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64               | `OpenRecord-linux-x86_64.AppImage` | `chmod +x`, then run it                         |
 | Windows x64             | `OpenRecord-windows-x64.exe`       | Run, then launch from the Start menu            |
-| macOS Apple Silicon     | `OpenRecord-macos-arm64.dmg`       | Open the DMG, drag to Applications              |
-| macOS Intel             | `OpenRecord-macos-x64.dmg`         | Same, with the Intel DMG                        |
+| macOS (Apple Silicon and Intel) | Not published in v0.0.1 | [Build from source](#build-from-source) |
 
 ### Linux
 
@@ -45,6 +45,10 @@ binaries on first launch.
 
 ### macOS
 
+Not published in v0.0.1, and there is no macOS DMG on the release page. Build the app from
+source instead: see [Build from source](#build-from-source).
+
+<!-- Restore this section when macOS DMGs are published again.
 Open the DMG, drag **Open Record** to Applications, then right-click the app and choose
 **Open** (or **System Settings > Privacy & Security > Open Anyway**) the first time. If
 macOS still says the app is damaged, clear quarantine:
@@ -52,6 +56,21 @@ macOS still says the app is damaged, clear quarantine:
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Open Record.app"
 ```
+-->
+
+## Build from source
+
+Use this on macOS for now, or to build any platform yourself. You need Node 24 and npm.
+
+```bash
+npm ci
+npm run desktop:dist
+```
+
+`desktop:dist` builds the web UI and server, fetches the bundled yt-dlp and ffmpeg, and writes
+the installer for the current OS to `dist/apps/desktop/release/`. On macOS, set
+`CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder skips signing-identity lookup, as CI
+does. Local builds are unsigned and are not tested by the project on macOS for v0.0.1.
 
 ## First run
 

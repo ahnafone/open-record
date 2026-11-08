@@ -2,18 +2,18 @@
 import Layout from '../layouts/Layout.astro';
 import PageHeader from '../components/PageHeader.astro';
 import DownloadCard from '../components/DownloadCard.astro';
-import { DOWNLOADS, IPHONE_GUIDE_URL, RELEASES_URL, INSTALL_GUIDE_URL, WEB_APP_URL, url } from '../lib/site';
+import { DESKTOP_GUIDE_URL, DOWNLOADS, IPHONE_GUIDE_URL, RELEASES_URL, INSTALL_GUIDE_URL, WEB_APP_URL, url } from '../lib/site';
 ---
 
 <Layout
   title="Install"
   path="install/"
-  description="Install Open Record v0.0.1 beta: Linux, Windows and macOS installers (unsigned), the Android APK, and building for iPhone from source."
+  description="Install Open Record v0.0.1 beta: Linux and Windows installers (unsigned), the Android APK, and building for macOS and iPhone from source."
 >
   <div class="container">
     <PageHeader
       title="Install"
-      lead="Beta · v0.0.1. Pick the file for your system. Desktop installers are unsigned and do not auto-update; Android is beta-tested; iPhone is build-from-source and untested."
+      lead="Beta · v0.0.1. Pick the file for your system. Desktop installers are unsigned and do not auto-update; macOS installers are coming later; Android is beta-tested; iPhone is build-from-source and untested."
     />
 
     <div class="page-body">
@@ -49,24 +49,9 @@ import { DOWNLOADS, IPHONE_GUIDE_URL, RELEASES_URL, INSTALL_GUIDE_URL, WEB_APP_U
             note="SmartScreen says Windows protected your PC: choose More info, then Run anyway. Defender may scan the bundled binaries on first launch."
             external
           />
-          <DownloadCard
-            title="macOS · Apple Silicon"
-            file="OpenRecord-macos-arm64.dmg"
-            href={DOWNLOADS.macArm}
-            tags={[{ label: 'Unsigned', variant: 'primary' }]}
-            note="Open the DMG and drag Open Record to Applications. The first time, right-click it and choose Open. If macOS says the app is damaged, clear quarantine as described on the Desktop page."
-            external
-          />
-          <DownloadCard
-            title="macOS · Intel"
-            file="OpenRecord-macos-x64.dmg"
-            href={DOWNLOADS.macIntel}
-            tags={[{ label: 'Unsigned', variant: 'primary' }]}
-            note="Same steps as Apple Silicon, with the Intel DMG."
-            external
-          />
         </div>
         <p class="meta">
+          macOS installers are not part of v0.0.1. To run the desktop app on a Mac, <a href={`${DESKTOP_GUIDE_URL}#build-from-source`} rel="noopener">build from source</a>.
           Desktop details, data folders and troubleshooting: <a href={url('desktop/')}>the desktop guide</a>.
         </p>
       </section>

@@ -34,8 +34,7 @@ Download links always point at the latest release. File names are the same as be
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS Apple Silicon | [OpenRecord-macos-arm64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-arm64.dmg) | Open the DMG, drag to Applications |
-| macOS Intel | [OpenRecord-macos-x64.dmg](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-macos-x64.dmg) | Same, with the Intel DMG |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.1; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+. Signed release APK; beta-tested |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | **Not tested yet.** Needs a Mac, Xcode and a free Apple ID |
 
@@ -48,9 +47,9 @@ There is no App Store, TestFlight, Play Store or enterprise build.
   key; uninstalling deletes downloads.
 - **iPhone:** not tested on a device yet. It is build-from-source only, and a free Apple ID build
   expires after **7 days** and must be re-signed from Xcode.
-- **Desktop:** installers are **unsigned**, so macOS (Gatekeeper) and Windows (SmartScreen) show
-  warnings. There is **no auto-update**: install the new version over the old one. Your library is kept
-  in the app's data folder.
+- **Desktop:** installers are **unsigned**, so Windows (SmartScreen) shows warnings. There is **no
+  auto-update**: install the new version over the old one. Your library is kept in the app's data folder.
+- **macOS installers are not part of v0.0.1.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
 - **Streaming and saving** depend on a stream-link server and `yt-dlp`. Links expire. With your own
   server, streaming works on the same network as the server, not on mobile data. Guest streaming on the
   public web app is rate-limited and only on servers that enable it.

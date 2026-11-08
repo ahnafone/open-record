@@ -22,8 +22,6 @@ export const DOWNLOADS = {
   linuxDeb: `${RELEASE_DOWNLOAD}/OpenRecord-linux-amd64.deb`,
   linuxAppImage: `${RELEASE_DOWNLOAD}/OpenRecord-linux-x86_64.AppImage`,
   windows: `${RELEASE_DOWNLOAD}/OpenRecord-windows-x64.exe`,
-  macArm: `${RELEASE_DOWNLOAD}/OpenRecord-macos-arm64.dmg`,
-  macIntel: `${RELEASE_DOWNLOAD}/OpenRecord-macos-x64.dmg`,
   android: `${RELEASE_DOWNLOAD}/OpenRecord-android.apk`,
 } as const;
 
