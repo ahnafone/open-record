@@ -1,0 +1,20 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { url } from '../lib/site';
+---
+
+<Layout title="Page not found" path="404.html" description="This page does not exist on Open Record.">
+  <div class="container">
+    <div class="page-body">
+      <section>
+        <h1>Page not found</h1>
+        <p class="lead">The page you asked for is not here. It may have moved.</p>
+        <div class="card__actions">
+          <a class="button button--primary" href={url()}>Back to home</a>
+          <a class="button" href={url('install/')}>Install guide</a>
+          <a class="button button--ghost" href={url('faq/')}>FAQ</a>
+        </div>
+      </section>
+    </div>
+  </div>
+</Layout>

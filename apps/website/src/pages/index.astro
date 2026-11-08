@@ -1,0 +1,377 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PhoneShot from '../components/PhoneShot.astro';
+import WindowShot from '../components/WindowShot.astro';
+import { DOWNLOADS, IPHONE_GUIDE_URL, INSTALL_GUIDE_URL, PUBLIC_HOSTING_URL, RELEASES_URL, REPO, WEB_APP_URL, url } from '../lib/site';
+
+const features = [
+  {
+    title: 'Browse the crates',
+    body: 'A "now on the turntable" record and genre bins over the bundled public-domain catalogue. Works without an account or a server.',
+  },
+  {
+    title: 'Search',
+    body: 'Search by title, artist, year or genre. With your own server, search YouTube, YouTube Music and SoundCloud, or paste a link from a supported site.',
+  },
+  {
+    title: 'Library and playlists',
+    body: 'Save records, keep playlists marked private or public, filter by title, artist and album. On desktop, library lists become sortable tables.',
+  },
+  {
+    title: 'Import your own music',
+    body: 'Add audio files from the device with editable tags and art. Bring in Spotify Exportify CSV or JSON, or YouTube and YT Music playlist and song links. Uncertain matches wait in a review list.',
+  },
+  {
+    title: 'Stream and save',
+    body: 'With your own stream-link server, the app gets a direct link and can save the file to the device. Tags and cover art come from iTunes and Deezer lookups.',
+  },
+  {
+    title: 'Auto-download and recovery',
+    body: 'Switch on auto-download for the library or a playlist. Downloads wait for Wi-Fi by default. Failed songs show the reason, with Retry and a Fix link page.',
+  },
+  {
+    title: 'Now playing, queue and history',
+    body: 'Full-screen player with sleeve art and a seek bar, a mini player, Play next, an editable Up next list, and play counts. Desktop adds a side panel, keyboard shortcuts and media keys.',
+  },
+  {
+    title: 'Sync and Cast (optional)',
+    body: 'Your own Supabase project syncs track metadata, saved songs, playlists and import history, never audio. Signed-in users can also share playback with Google Cast speakers on the LAN.',
+  },
+];
+---
+
+<Layout
+  title="Open Record · A listening room in your pocket"
+  description="Open Record is a free, open-source, self-hosted vinyl listening room for phone, desktop and web. Browse crates, build playlists and play music through your own server."
+>
+  <!-- Hero -->
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="container hero__grid">
+      <div class="hero__copy">
+        <p class="eyebrow">Free and open source · self-hosted</p>
+        <span class="beta-badge">Beta · v0.0.1</span>
+        <h1 id="hero-title">A listening room in your pocket</h1>
+        <p class="lead">
+          Open Record is a dark, vinyl-shop listening room for phone, desktop and web. Browse the crates, search,
+          keep a library and playlists, and play it all on a virtual turntable.
+        </p>
+        <div class="hero__ctas">
+          <a class="button button--primary" href="#downloads">Download for desktop</a>
+          <a class="button" href={DOWNLOADS.android} rel="noopener">Android APK</a>
+          <a class="button" href={url('iphone/')}>Build for iPhone</a>
+        </div>
+        <div class="hero__secondary">
+          <a class="link-arrow" href={WEB_APP_URL} rel="noopener">Try the web app →</a>
+        </div>
+        <p class="meta">Android is beta-tested. iPhone is build-from-source and untested. Desktop installers are unsigned.</p>
+      </div>
+
+      <div class="hero__visual">
+        <div class="hero__disc-wrap">
+          <img
+            class="hero__disc"
+            src={url('assets/icon-512.png')}
+            width="220"
+            height="220"
+            alt=""
+            decoding="async"
+          />
+        </div>
+        <div class="hero__phone">
+          <PhoneShot
+            name="01-browse"
+            alt="Open Record Browse screen: a 'Now on the turntable' record with a sleeve and a spinning disc, Play record and Open player buttons, and genre chips."
+            eager
+          />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Gallery -->
+  <section class="section" id="screenshots" aria-labelledby="gallery-title">
+    <div class="container">
+      <div class="section-head">
+        <h2 id="gallery-title">Screenshots</h2>
+      </div>
+      <div class="gallery">
+        <PhoneShot
+          name="01-browse"
+          alt="Browse screen with the listening-room record and genre bins."
+          label="Browse"
+          caption="The listening room and genre bins."
+        />
+        <PhoneShot
+          name="02-search"
+          alt="Search screen with search results and a search field."
+          label="Search"
+          caption="By title, artist, year or genre."
+        />
+        <PhoneShot
+          name="03-library"
+          alt="Library screen listing saved records and playlists."
+          label="Library"
+          caption="Saved records and playlists."
+        />
+        <PhoneShot
+          name="04-playlist"
+          alt="Playlist screen with play and shuffle controls and a list of tracks."
+          label="Playlist"
+          caption="Play, shuffle, add, rename, delete."
+        />
+        <PhoneShot
+          name="06-now-playing"
+          alt="Now Playing screen with the sleeve, seek bar, transport buttons and queue."
+          label="Now playing"
+          caption="Full-screen player with seek bar, queue and mini player."
+        />
+        <PhoneShot
+          name="08-settings"
+          alt="Settings screen with storage, quality, stream server and the Desktop app link."
+          label="Settings"
+          caption="Storage, quality, stream server and the desktop page."
+        />
+      </div>
+      <div class="gallery-desktop">
+        <WindowShot
+          alt="Open Record desktop app window showing the library and player."
+          caption="Desktop: the same library and player in the Electron app, with the local server bundled."
+        />
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="section" id="features" aria-labelledby="features-title">
+    <div class="container">
+      <div class="section-head">
+        <h2 id="features-title">What it does</h2>
+      </div>
+      <div class="grid grid--2 grid--4">
+        {features.map((feature) => (
+          <article class="card">
+            <h3>{feature.title}</h3>
+            <p>{feature.body}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section class="section" aria-labelledby="how-title">
+    <div class="container">
+      <div class="section-head">
+        <h2 id="how-title">How it works</h2>
+      </div>
+      <ol class="steps">
+        <li>
+          <span class="steps__letter" aria-hidden="true">a</span>
+          <h3>The app is the client</h3>
+          <p>
+            The Android app, the iPhone build, the desktop app or the web app browse, play and keep your library
+            on the device you use.
+          </p>
+        </li>
+        <li>
+          <span class="steps__letter" aria-hidden="true">b</span>
+          <h3>You run the server (optional)</h3>
+          <p>
+            A small Fastify server with yt-dlp finds a direct audio link for search and streaming. It does not
+            proxy audio, except for Google Cast playback; the app fetches the audio itself. You run it on your own hardware.
+          </p>
+        </li>
+        <li>
+          <span class="steps__letter" aria-hidden="true">c</span>
+          <h3>Your Supabase project (optional)</h3>
+          <p>
+            Accounts, sync and Cast use a Supabase project you create and own. Sync covers metadata, saved songs,
+            playlists and import history, never audio.
+          </p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- Downloads -->
+  <section class="section" id="downloads" aria-labelledby="downloads-title">
+    <div class="container">
+      <div class="section-head">
+        <h2 id="downloads-title">Download</h2>
+        <span class="beta-badge">Beta · v0.0.1</span>
+      </div>
+      <p class="lead">
+        Desktop installers are unsigned and do not update themselves: expect Gatekeeper or SmartScreen warnings, and
+        install a newer build over the old one. Android is beta-tested. iPhone is build-from-source only.
+      </p>
+      <div class="grid grid--3 mt-xl">
+        <article class="card">
+          <h3>Linux x64 · .deb</h3>
+          <div class="card__head"><span class="tag tag--primary">Recommended</span></div>
+          <p>Ubuntu 24.04 and similar. Adds the launcher entry.</p>
+          <code class="code-line">sudo apt install ./OpenRecord-linux-amd64.deb</code>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.linuxDeb} rel="noopener">Download <span class="muted">(OpenRecord-linux-amd64.deb)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Linux x64 · AppImage</h3>
+          <div class="card__head"><span class="tag">Portable</span></div>
+          <p>Run <code>chmod +x</code>, then start it. Some systems need FUSE 2 (<code>libfuse2t64</code>); the .deb avoids that.</p>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.linuxAppImage} rel="noopener">Download <span class="muted">(OpenRecord-linux-x86_64.AppImage)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Windows x64 · .exe</h3>
+          <div class="card__head"><span class="tag tag--primary">Unsigned</span></div>
+          <p>SmartScreen shows "Windows protected your PC". Choose More info, then Run anyway.</p>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.windows} rel="noopener">Download <span class="muted">(OpenRecord-windows-x64.exe)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>macOS · Apple Silicon</h3>
+          <div class="card__head"><span class="tag tag--primary">Unsigned</span></div>
+          <p>Open the DMG and drag to Applications. The first time, right-click the app and choose Open.</p>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.macArm} rel="noopener">Download <span class="muted">(OpenRecord-macos-arm64.dmg)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>macOS · Intel</h3>
+          <div class="card__head"><span class="tag tag--primary">Unsigned</span></div>
+          <p>Same steps as Apple Silicon, with the Intel DMG.</p>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.macIntel} rel="noopener">Download <span class="muted">(OpenRecord-macos-x64.dmg)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Android · APK</h3>
+          <div class="card__head"><span class="tag tag--ivory">Beta-tested</span><span class="tag">Sideload</span></div>
+          <p>Android 7 or newer. Not on Google Play. Updates install over the old app only when signed with the same key.</p>
+          <div class="card__actions">
+            <a class="button button--primary" href={DOWNLOADS.android} rel="noopener">Download <span class="muted">(OpenRecord-android.apk)</span></a>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>iPhone · build from source</h3>
+          <div class="card__head"><span class="tag">Untested</span><span class="tag">7-day install</span></div>
+          <p>
+            Needs a Mac with Xcode and a free Apple ID. Builds expire after 7 days; re-run from Xcode to re-sign.
+            No App Store, TestFlight or prebuilt download.
+          </p>
+          <div class="card__actions">
+            <a class="button" href={url('iphone/')}>iPhone guide</a>
+            <a class="button button--ghost" href={IPHONE_GUIDE_URL} rel="noopener">Build guide on GitHub</a>
+          </div>
+        </article>
+      </div>
+      <p class="meta mt-xl">
+        <a href={RELEASES_URL} rel="noopener">Release notes</a> · <a href={INSTALL_GUIDE_URL} rel="noopener">Install and run guide</a> · <a href={REPO} rel="noopener">Source on GitHub</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Desktop -->
+  <section class="section" id="desktop" aria-labelledby="desktop-title">
+    <div class="container grid grid--2 grid--start">
+      <div class="stack">
+        <div class="section-head section-head--tight">
+          <h2 id="desktop-title">Desktop app</h2>
+        </div>
+        <p class="lead">
+          One Electron app bundles the web UI, the local server, yt-dlp and ffmpeg. It works offline for the bundled
+          catalogue, local imports, playback, playlists and history.
+        </p>
+        <ul class="rule-list">
+          <li>Fixed local address, 127.0.0.1 only. No account is needed.</li>
+          <li>"Allow phones on this network" restarts the server on your LAN and shows a QR code. Trusted Wi-Fi only; plain HTTP.</li>
+          <li>Optional sync and phone sign-in use your own Supabase project.</li>
+          <li>Unsigned installers and no auto-update: install a newer build over the old one.</li>
+        </ul>
+        <div class="card__actions">
+          <a class="button" href={url('desktop/')}>Desktop guide</a>
+        </div>
+      </div>
+      <WindowShot
+        alt="Open Record desktop app window with the library and player."
+        caption="The real desktop app, with the local server bundled."
+      />
+    </div>
+  </section>
+
+  <!-- iPhone -->
+  <section class="section" id="iphone" aria-labelledby="iphone-title">
+    <div class="container stack">
+      <div class="section-head">
+        <h2 id="iphone-title">iPhone</h2>
+      </div>
+      <p class="lead">
+        There is no iPhone binary to download. You build the app from source on a Mac with Xcode, sign it with a free
+        Apple ID, and install it on your own iPhone. That install expires after 7 days, and you re-sign it from Xcode.
+      </p>
+      <div class="card__actions">
+        <a class="button button--primary" href={url('iphone/')}>iPhone build guide</a>
+        <a class="button" href={IPHONE_GUIDE_URL} rel="noopener">Guide on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Self-host -->
+  <section class="section" id="self-host" aria-labelledby="self-host-title">
+    <div class="container stack">
+      <div class="section-head">
+        <h2 id="self-host-title">Self-host</h2>
+      </div>
+      <p class="lead">
+        Search and streaming need a stream-link server. Run it on your own machine and reach it through a Cloudflare
+        Tunnel. The server stays on loopback, nothing is port-forwarded, and phones connect over HTTPS. Never expose
+        the server's plain HTTP port to the internet.
+      </p>
+      <div class="card__actions">
+        <a class="button" href={url('self-host/')}>Self-host guide</a>
+        <a class="button button--ghost" href={PUBLIC_HOSTING_URL} rel="noopener">Public hosting runbook on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Honest limits -->
+  <section class="section" id="limits" aria-labelledby="limits-title">
+    <div class="container stack">
+      <div class="section-head">
+        <h2 id="limits-title">Honest limits</h2>
+      </div>
+      <ul class="rule-list">
+        <li>Not a streaming service. Open Record hosts no music; the bundled catalogue is public domain.</li>
+        <li>You are responsible for having the rights to anything you download, stream or save.</li>
+        <li>Stream links are tied to the server's public IP and expire, so remote playback mostly works on the same network as the server.</li>
+        <li>Search, streaming and saving need network access and a server (yours, or the hosted web app).</li>
+        <li>Android is an APK you sideload, not a Google Play release.</li>
+        <li>The iPhone build from source expires after 7 days on a free Apple ID.</li>
+        <li>Desktop installers are unsigned and there is no auto-update.</li>
+        <li>LAN access uses plain HTTP; use it only on Wi-Fi you trust.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- FAQ teaser -->
+  <section class="section" aria-labelledby="faq-teaser-title">
+    <div class="container stack">
+      <div class="section-head">
+        <h2 id="faq-teaser-title">Questions</h2>
+      </div>
+      <p class="lead">Is it free, does it work offline, do you need a server or Supabase, and what do the desktop warnings mean?</p>
+      <div class="card__actions">
+        <a class="button" href={url('faq/')}>Read the FAQ</a>
+        <a class="button" href={url('web/')}>About the web app</a>
+      </div>
+    </div>
+  </section>
+</Layout>

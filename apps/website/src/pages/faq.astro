@@ -1,0 +1,106 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHeader from '../components/PageHeader.astro';
+import { DESKTOP_GUIDE_URL, IPHONE_GUIDE_URL, LICENSE_URL, url } from '../lib/site';
+
+const questions = [
+  {
+    q: 'Is Open Record free?',
+    a: 'Yes. The code is open source under the license in the repository. There are no subscriptions, ads or paid tiers in the project.',
+  },
+  {
+    q: 'Does it work offline?',
+    a: 'Partly. The bundled public-domain catalogue, your local imports, playback, playlists, history and settings work without a connection. Search, streaming and saving need the internet.',
+  },
+  {
+    q: 'Where does the music come from?',
+    a: 'From the sources you search and download with the tools the app uses, such as yt-dlp. Open Record does not host a music library of its own. You are responsible for what you download and for following the rules that apply where you live.',
+  },
+  {
+    q: 'Do I need an account?',
+    a: 'Not for the desktop app or a server you run yourself. On the hosted web app, guests can play the bundled catalogue and stream from search under limits, but your library and playlists need an account, and sign-up is a request the owner approves.',
+  },
+  {
+    q: 'Does sync work?',
+    a: 'Sync uses your own Supabase project. The hosted web app uses the owner’s project. Nothing is synced to a service you have not configured.',
+  },
+  {
+    q: 'Is there an iPhone app on the App Store?',
+    a: 'No. iPhone is build-from-source for now and is untested. You need a Mac with Xcode and a way to sign the app to your own device. The build guide is on GitHub.',
+  },
+  {
+    q: 'Is there an Android app?',
+    a: 'Yes, as a beta APK from the releases page. It has been beta-tested.',
+  },
+  {
+    q: 'Why does my computer warn me about the desktop app?',
+    a: 'The installers are not code-signed, and there is no auto-update. Windows SmartScreen and macOS Gatekeeper will warn about an unknown publisher. Check the download came from the official releases page before you run it.',
+  },
+  {
+    q: 'Can I run my own server?',
+    a: 'Yes. The self-host page covers running the server and exposing it through a Cloudflare Tunnel.',
+  },
+];
+---
+
+<Layout
+  title="FAQ"
+  path="faq/"
+  description="Frequently asked questions about Open Record: cost, offline use, sources, accounts, sync, iPhone, Android, desktop warnings and self-hosting."
+>
+  <div class="container">
+    <PageHeader
+      title="Questions"
+      lead="Short, direct answers. The guides have the detail."
+    />
+
+    <div class="page-body">
+      <section aria-label="Frequently asked questions">
+        <dl class="faq">
+          {
+            questions.map(({ q, a }) => (
+              <div class="faq__item">
+                <dt>{q}</dt>
+                <dd>{a}</dd>
+              </div>
+            ))
+          }
+        </dl>
+      </section>
+
+      <section aria-labelledby="faq-more">
+        <h2 id="faq-more">More</h2>
+        <div class="card__actions">
+          <a class="button" href={DESKTOP_GUIDE_URL} rel="noopener">Desktop guide</a>
+          <a class="button" href={IPHONE_GUIDE_URL} rel="noopener">iPhone build guide</a>
+          <a class="button button--ghost" href={LICENSE_URL} rel="noopener">License</a>
+          <a class="button button--ghost" href={url('self-host/')}>Self-host</a>
+        </div>
+      </section>
+    </div>
+  </div>
+</Layout>
+
+<style>
+  .faq {
+    margin: 0;
+    display: grid;
+    gap: var(--space-md);
+  }
+
+  .faq__item {
+    padding: var(--space-md) 0;
+    border-bottom: 1px solid var(--color-border, currentColor);
+  }
+
+  .faq dt {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.125rem;
+    font-weight: 700;
+    margin: 0 0 var(--space-xs);
+  }
+
+  .faq dd {
+    margin: 0;
+  }
+</style>

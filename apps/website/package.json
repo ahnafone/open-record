@@ -1,0 +1,26 @@
+{
+  "name": "@open-record/website",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Open Record GitHub Pages site (static Astro, served under /open-record/).",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "sync:assets": "node scripts/sync-assets.mjs",
+    "dev": "npm run sync:assets && astro dev",
+    "build": "npm run sync:assets && astro build",
+    "preview": "astro preview",
+    "lint": "eslint scripts plugins src --no-warn-ignored",
+    "typecheck": "npm run sync:assets && astro check"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@astrojs/markdown-remark": "^7.3.6",
+    "astro": "^7.4.7",
+    "sharp": "^0.35.5",
+    "typescript": "~6.0.3"
+  }
+}

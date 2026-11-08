@@ -1,0 +1,55 @@
+---
+import { getEntry, render } from 'astro:content';
+import Layout from '../layouts/Layout.astro';
+import PageHeader from '../components/PageHeader.astro';
+import { IPHONE_GUIDE_URL } from '../lib/site';
+
+// Rendered from docs/ios-install.md at build time. If that file is missing, the build still
+// works and the page links to the guide on GitHub instead.
+const entry = await getEntry('iphone', 'ios-install');
+const rendered = entry ? await render(entry) : null;
+---
+
+<Layout
+  title="iPhone"
+  path="iphone/"
+  description="Build Open Record for iPhone from source with Xcode and a free Apple ID. Untested, and the install expires after 7 days. No App Store or TestFlight build."
+>
+  <div class="container">
+    <PageHeader
+      title="iPhone"
+      lead="There is no iPhone download. You build the app from source with a Mac and Xcode, sign it with a free Apple ID, and install it on your own iPhone. Untested on device; the install expires after 7 days."
+    />
+
+    <div class="page-body">
+      <section aria-labelledby="iphone-facts">
+        <h2 id="iphone-facts">What to know first</h2>
+        <ul class="rule-list">
+          <li>You need a Mac with Xcode, an iPhone on iOS 18 or newer, and a free Apple ID.</li>
+          <li>Free-account builds expire after 7 days. Re-run the build from Xcode to re-sign.</li>
+          <li>There is no App Store, TestFlight or enterprise build, and no prebuilt file to download.</li>
+          <li>The iPhone build is untested on device; treat it as a build-from-source preview.</li>
+        </ul>
+        <div class="card__actions">
+          <a class="button" href={IPHONE_GUIDE_URL} rel="noopener">Guide on GitHub</a>
+        </div>
+      </section>
+
+      {
+        rendered ? (
+          <section class="docs" aria-label="Full iPhone build guide">
+            <rendered.Content />
+          </section>
+        ) : (
+          <section aria-labelledby="guide-fallback">
+            <h2 id="guide-fallback">Build guide</h2>
+            <p class="prose">The step-by-step Xcode guide is on GitHub.</p>
+            <div class="card__actions">
+              <a class="button button--primary" href={IPHONE_GUIDE_URL} rel="noopener">Open the iPhone build guide</a>
+            </div>
+          </section>
+        )
+      }
+    </div>
+  </div>
+</Layout>

@@ -1,0 +1,39 @@
+---
+interface Props {
+  title: string;
+  file: string;
+  href: string;
+  /** Short status tags, e.g. "Recommended", "Unsigned", "Beta". */
+  tags: { label: string; variant?: 'ivory' | 'primary' }[];
+  /** Install hint shown under the title. */
+  note: string;
+  /** Optional command line (e.g. apt install). */
+  command?: string;
+  /** Optional second link, e.g. a page with more detail. */
+  more?: { label: string; href: string };
+  external?: boolean;
+}
+
+const { title, file, href, tags, note, command, more, external = false } = Astro.props;
+---
+
+<article class="card">
+  <div class="card__head">
+    <h3>{title}</h3>
+  </div>
+  <div class="card__head">
+    {tags.map((tag) => (
+      <span class:list={['tag', tag.variant === 'ivory' && 'tag--ivory', tag.variant === 'primary' && 'tag--primary']}>{tag.label}</span>
+    ))}
+  </div>
+  <p>{note}</p>
+  {command && <code class="code-line">{command}</code>}
+  <div class="card__actions">
+    <a class="button button--primary" href={href} rel={external ? 'noopener' : undefined}>
+      Download <span class="muted">({file})</span>
+    </a>
+    {more && (
+      <a class="button button--ghost" href={more.href} rel={more.href.startsWith('http') ? 'noopener' : undefined}>{more.label}</a>
+    )}
+  </div>
+</article>

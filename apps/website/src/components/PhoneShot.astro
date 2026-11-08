@@ -1,0 +1,37 @@
+---
+import { url } from '../lib/site';
+
+// A CSS phone bezel around a real capture from docs/screenshots (copied to public/screenshots as WebP).
+interface Props {
+  name: string;
+  alt: string;
+  eager?: boolean;
+  caption?: string;
+  label?: string;
+}
+
+const { name, alt, eager = false, caption, label } = Astro.props;
+// Captures are 786x1704 and are stored at 600x1301 by scripts/sync-assets.mjs.
+---
+
+<figure class="gallery-item">
+  <div class="phone-frame">
+    <img
+      src={url(`screenshots/${name}.webp`)}
+      width="600"
+      height="1301"
+      alt={alt}
+      loading={eager ? 'eager' : 'lazy'}
+      fetchpriority={eager ? 'high' : 'auto'}
+      decoding="async"
+    />
+  </div>
+  {
+    (label || caption) && (
+      <figcaption>
+        {label && <strong>{label}</strong>}
+        {caption && <span>{caption}</span>}
+      </figcaption>
+    )
+  }
+</figure>

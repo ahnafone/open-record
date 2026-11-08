@@ -1,0 +1,48 @@
+---
+import {
+  ATTRIBUTION_URL,
+  DESKTOP_GUIDE_URL,
+  LICENSE_URL,
+  README_URL,
+  REPO,
+  SERVER_GUIDE_URL,
+  WEB_APP_URL,
+  url,
+} from '../lib/site';
+
+const year = 2026;
+---
+
+<footer class="site-footer">
+  <div class="container footer-grid">
+    <div class="stack">
+      <a class="brand" href={url()}>
+        <img src={url('assets/icon-192.png')} width="32" height="32" alt="" />
+        <span>Open Record</span>
+      </a>
+      <p>A listening room for your phone, desktop and web. Free and open source; you run the server.</p>
+    </div>
+
+    <div class="footer-fine">
+      <ul class="footer-links" aria-label="Project links">
+        <li><a href={REPO} rel="noopener">GitHub</a></li>
+        <li><a href={README_URL} rel="noopener">README</a></li>
+        <li><a href={LICENSE_URL} rel="noopener">MIT license</a></li>
+        <li><a href={SERVER_GUIDE_URL} rel="noopener">Server guide</a></li>
+        <li><a href={DESKTOP_GUIDE_URL} rel="noopener">Desktop guide</a></li>
+        <li><a href={WEB_APP_URL} rel="noopener">Web app</a></li>
+        <li><a href={url('faq/')}>FAQ</a></li>
+      </ul>
+      <p>
+        Credits: design made with the <a href="https://github.com/nexu-io/open-design" rel="noopener">Open Design</a> app.
+        Sample media keep their own licences; see the <a href={ATTRIBUTION_URL} rel="noopener">attribution notes</a>.
+      </p>
+      <p>
+        Music disclaimer: the author owns no copyrights to music users download and is not responsible for what they choose
+        to download. You are responsible for having the rights to any music you download, stream or use.
+      </p>
+      <p>Not affiliated with Spotify, YouTube, or Google.</p>
+      <p>Copyright {year} Ahnaf. Released under the MIT License.</p>
+    </div>
+  </div>
+</footer>

@@ -1,0 +1,43 @@
+---
+import { REPO, url } from '../lib/site';
+
+// Landing-page anchors resolve from any page through the site base.
+const links = [
+  { label: 'Features', href: url('#features') },
+  { label: 'Screenshots', href: url('#screenshots') },
+  { label: 'Download', href: url('#downloads') },
+  { label: 'Self-host', href: url('self-host/') },
+  { label: 'FAQ', href: url('faq/') },
+];
+---
+
+<header class="site-header">
+  <div class="container site-header__inner">
+    <a class="brand" href={url()} aria-label="Open Record home">
+      <img src={url('assets/icon-192.png')} width="32" height="32" alt="" />
+      <span>Open Record</span>
+    </a>
+
+    <nav aria-label="Primary" class="site-nav">
+      <ul class="nav-links">
+        {links.map((link) => (
+          <li><a href={link.href}>{link.label}</a></li>
+        ))}
+      </ul>
+
+      <details class="menu">
+        <summary>Menu</summary>
+        <div class="menu__panel">
+          <ul>
+            {links.map((link) => (
+              <li><a href={link.href}>{link.label}</a></li>
+            ))}
+            <li><a href={REPO} rel="noopener">GitHub</a></li>
+          </ul>
+        </div>
+      </details>
+    </nav>
+
+    <a class="nav-github" href={REPO} rel="noopener">GitHub</a>
+  </div>
+</header>

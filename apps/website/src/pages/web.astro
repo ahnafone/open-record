@@ -1,0 +1,62 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHeader from '../components/PageHeader.astro';
+import { PUBLIC_HOSTING_URL, WEB_APP_URL, url } from '../lib/site';
+---
+
+<Layout
+  title="Web app"
+  path="web/"
+  description="The hosted Open Record web app: guests can play the bundled catalogue and stream from search under rate limits; library and playlists need an account; sign-up is a request the owner approves."
+>
+  <div class="container">
+    <PageHeader
+      title="Web app"
+      lead="Try Open Record in a browser without installing anything. The hosted web app is run by the project owner, so it has limits that the desktop app and your own server do not."
+    />
+
+    <div class="page-body">
+      <section aria-labelledby="web-open">
+        <h2 id="web-open">Open the web app</h2>
+        <p class="prose">
+          The hosted web app is at
+          <a href={WEB_APP_URL} rel="noopener">{WEB_APP_URL.replace('https://', '')}</a>. Open it in a current desktop or
+          phone browser. Nothing is installed.
+        </p>
+        <div class="card__actions">
+          <a class="button button--primary" href={WEB_APP_URL} rel="noopener">Try the web app</a>
+        </div>
+      </section>
+
+      <section aria-labelledby="web-guests">
+        <h2 id="web-guests">As a guest</h2>
+        <ul class="rule-list">
+          <li>Play the bundled public-domain catalogue.</li>
+          <li>Search and stream from search results, under rate limits. If you hit a limit, wait a minute and try again.</li>
+          <li>Streaming depends on the source. Stream links are tied to the server's public IP and expire, so search playback may not work from every network. The bundled catalogue always plays.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="web-accounts">
+        <h2 id="web-accounts">Accounts and approval</h2>
+        <p class="prose">
+          Your library and playlists need an account. Accounts are not self-service: you send a sign-up request, and the
+          owner reviews it and approves or declines it. Until an approval arrives, signing in does not unlock the
+          server's features.
+        </p>
+      </section>
+
+      <section aria-labelledby="web-not-needed">
+        <h2 id="web-not-needed">When you don't need any of this</h2>
+        <p class="prose">
+          The desktop app and a server you run yourself skip the hosted limits, the sign-up request and the approval
+          step. Your own server uses your own access token; see <a href={url('desktop/')}>the desktop app</a> or
+          <a href={url('self-host/')}>self-hosting</a>.
+        </p>
+        <p class="meta">
+          The hosted server's operator setup is described in the <a href={PUBLIC_HOSTING_URL} rel="noopener">public hosting runbook on GitHub</a>.
+        </p>
+      </section>
+    </div>
+  </div>
+</Layout>

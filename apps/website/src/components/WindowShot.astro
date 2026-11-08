@@ -1,0 +1,25 @@
+---
+import { url } from '../lib/site';
+
+// Desktop capture from docs/screenshots (07-desktop.png) inside a window frame.
+interface Props {
+  alt: string;
+  caption: string;
+  eager?: boolean;
+}
+
+const { alt, caption, eager = false } = Astro.props;
+---
+
+<figure class="window-frame">
+  <div class="window-frame__bar" aria-hidden="true"><span></span><span></span><span></span></div>
+  <img
+    src={url('screenshots/07-desktop.webp')}
+    width="1280"
+    height="900"
+    alt={alt}
+    loading={eager ? 'eager' : 'lazy'}
+    decoding="async"
+  />
+  <figcaption>{caption}</figcaption>
+</figure>

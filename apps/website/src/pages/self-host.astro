@@ -1,0 +1,90 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHeader from '../components/PageHeader.astro';
+import { PUBLIC_HOSTING_URL, SERVER_GUIDE_URL, url } from '../lib/site';
+---
+
+<Layout
+  title="Self-host"
+  path="self-host/"
+  description="Run your own Open Record server and expose it on a domain through a Cloudflare Tunnel. Keep the server bound to loopback and let cloudflared be the only way in."
+>
+  <div class="container">
+    <PageHeader
+      title="Self-host"
+      lead="Run the Open Record server on a machine you control and publish it on your own domain. The supported public setup is a Cloudflare Tunnel."
+    />
+
+    <div class="page-body">
+      <section aria-labelledby="self-host-when">
+        <h2 id="self-host-when">When to self-host</h2>
+        <p class="prose">
+          Self-hosting gives your phone and web app a server you run, with your own Supabase project and your own
+          access rules. You do not need it for the desktop app, which bundles its own local server.
+        </p>
+        <ul class="rule-list">
+          <li>Keep the server bound to <code>127.0.0.1</code>. The tunnel is the only way in.</li>
+          <li>Set <code>PUBLIC_URL</code> to the public address you own.</li>
+          <li>Keep secrets such as the Supabase service role key only in the server's <code>.env</code> file.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="self-host-steps">
+        <h2 id="self-host-steps">Steps</h2>
+        <ol class="steps">
+          <li>
+            <h3>Start the server on loopback</h3>
+            <p>Bind the server to the loopback address only, so nothing on your network can reach it directly.</p>
+            <code class="code-line">npm run server:up -- --host 127.0.0.1</code>
+          </li>
+          <li>
+            <h3>Create a tunnel</h3>
+            <p>
+              Install <code>cloudflared</code>, create a tunnel, and route your hostname to it. The tunnel forwards
+              HTTPS traffic from the public hostname to the local server on port 8787.
+            </p>
+            <code class="code-line">cloudflared tunnel run open-record</code>
+          </li>
+          <li>
+            <h3>Set the server environment</h3>
+            <p>
+              In <code>apps/server/.env</code>, set the values below. Apply the proxy settings only when cloudflared is
+              the only path into the server.
+            </p>
+            <code class="code-line">HOST=127.0.0.1
+PUBLIC_URL=https://your-domain.example
+TRUST_PROXY=127.0.0.1/8,::1
+TRUST_CF_CONNECTING_IP=true</code>
+          </li>
+          <li>
+            <h3>Check it</h3>
+            <p>Open your public hostname in a browser. If it does not load, confirm the server is running and the tunnel shows as connected.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="self-host-rules">
+        <h2 id="self-host-rules">Rules that keep it safe</h2>
+        <ul class="rule-list">
+          <li><code>TRUST_PROXY=true</code> is never safe on a host the public can reach. Trust only loopback.</li>
+          <li><code>TRUST_CF_CONNECTING_IP=true</code> is safe only because nothing else can reach the server port.</li>
+          <li>Guest streaming is off unless you turn it on. Accounts stay behind approval either way.</li>
+          <li>Rate limits are only as good as this setup. If you change the tunnel or the bind address, re-check them.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="self-host-guides">
+        <h2 id="self-host-guides">Full runbooks</h2>
+        <p class="prose">
+          The complete tunnel, Supabase, approval and limits setup for the hosted deployment is in the public hosting
+          runbook. The server's own options are in the server README.
+        </p>
+        <div class="card__actions">
+          <a class="button button--primary" href={PUBLIC_HOSTING_URL} rel="noopener">Public hosting runbook</a>
+          <a class="button button--ghost" href={SERVER_GUIDE_URL} rel="noopener">Server README</a>
+          <a class="button button--ghost" href={url('web/')}>About the web app</a>
+        </div>
+      </section>
+    </div>
+  </div>
+</Layout>

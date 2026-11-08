@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#171b20"/>
+  <circle cx="512" cy="512" r="400" fill="#0b0d10" stroke="#56616c" stroke-opacity="0.75" stroke-width="11.2"/>
+  <circle cx="512" cy="512" r="368" fill="#1c2229"/>
+  <circle cx="512" cy="512" r="168" fill="#0b0d10"/>
+  <circle cx="512" cy="512" r="188" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="216" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="244" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="272" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="300" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="328" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="356" fill="none" stroke="#0b0d10" stroke-width="8.8"/>
+  <circle cx="512" cy="512" r="136" fill="#ff8d83"/>
+  <circle cx="512" cy="512" r="24" fill="#171b20"/>
+</svg>
