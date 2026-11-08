@@ -120,6 +120,25 @@ export async function validateUrl(raw: unknown, lookup: LookupFn = defaultLookup
   return { url: url.toString(), addresses };
 }
 
+/**
+ * Guest host check, run before any DNS lookup or yt-dlp call. True when the
+ * parsed hostname is not one of `allowed` or a subdomain of one. Matching is on
+ * the WHATWG-parsed hostname, so userinfo (`youtube.com@evil.example`), a
+ * lookalike suffix (`youtube.com.evil.example`) or a prefix (`notyoutube.com`)
+ * cannot pass. Input that does not parse as a URL is not refused here: the
+ * normal validation rejects it before any fetch.
+ */
+export function guestHostRefused(raw: string, allowed: readonly string[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(raw.trim()).hostname;
+  } catch {
+    return false;
+  }
+  const host = hostname.toLowerCase().replace(/\.$/, '');
+  return !allowed.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
 /** Compatibility wrapper for callers that only need the normalised URL. */
 export async function validateUrlString(raw: unknown, lookup: LookupFn = defaultLookup): Promise<string> {
   return (await validateUrl(raw, lookup)).url;

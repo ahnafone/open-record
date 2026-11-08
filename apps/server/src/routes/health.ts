@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import type { PublicAppConfig } from '../config';
 import type { RouteOptions } from './index';
 
 /** Unauthenticated liveness probe (`npm run server:up` waits for it; uptime checks use it too). */
@@ -20,6 +21,12 @@ export const appConfigRoutes: FastifyPluginAsync<RouteOptions> = async (app, { c
   app.get('/app-config', { config: { public: true } }, async (_request, reply) => {
     reply.header('cache-control', 'no-store');
     const { supabaseUrl, supabaseAnonKey, turnstileSiteKey } = config.appConfig;
-    return { supabaseUrl, supabaseAnonKey, turnstileSiteKey };
+    const body: PublicAppConfig = {
+      supabaseUrl,
+      supabaseAnonKey,
+      turnstileSiteKey,
+      guestStreaming: config.guestStreaming,
+    };
+    return body;
   });
 };

@@ -1,6 +1,41 @@
-import { UrlRejectedError, validateUrl, validateUrlString, type LookupFn } from './url-guard';
+import {
+  guestHostRefused,
+  UrlRejectedError,
+  validateUrl,
+  validateUrlString,
+  type LookupFn,
+} from './url-guard';
 
 const publicLookup: LookupFn = async () => ['8.8.8.8', '2606:4700::1111'];
+
+describe('guestHostRefused', () => {
+  const allowed = ['youtube.com', 'youtu.be', 'music.youtube.com', 'soundcloud.com', 'bandcamp.com'];
+
+  it.each([
+    ['https://evil.example/track.mp3', 'another host'],
+    ['https://youtube.com.evil.example/watch?v=x', 'lookalike suffix'],
+    ['https://notyoutube.com/watch?v=x', 'lookalike prefix'],
+    ['https://youtube.com@evil.example/watch?v=x', 'userinfo trick'],
+    ['https://evil.example/?next=youtube.com', 'allowed name only in the query'],
+    ['https://уoutube.com/watch?v=x', 'IDN homoglyph (Cyrillic у)'],
+  ])('refuses %s (%s)', (url) => {
+    expect(guestHostRefused(url, allowed)).toBe(true);
+  });
+
+  it.each([
+    ['https://YOUTUBE.com/watch?v=x', 'uppercase host'],
+    ['https://youtube.com./watch?v=x', 'trailing dot'],
+    ['https://m.youtube.com/watch?v=x', 'subdomain'],
+    ['https://youtu.be/x', 'short link'],
+  ])('allows %s (%s)', (url) => {
+    expect(guestHostRefused(url, allowed)).toBe(false);
+  });
+
+  it('does not refuse a bare path, which the URL validation then rejects before any fetch', async () => {
+    expect(guestHostRefused('youtube.com/watch?v=x', allowed)).toBe(false);
+    await expect(validateUrlString('youtube.com/watch?v=x')).rejects.toThrow(UrlRejectedError);
+  });
+});
 
 describe('validateUrl', () => {
   it('returns the normalised URL and every vetted address', async () => {

@@ -346,19 +346,59 @@ export function toSearchResult(
   return result;
 }
 
+/** Who a yt-dlp run is for. Guests get a capped share of the slots and only supported sites. */
+export type Lane = 'member' | 'guest';
+
+/**
+ * yt-dlp extractors a guest run may use (regexes, `--use-extractors`): the
+ * supported media sites only. Keeps the generic extractor away from guests,
+ * including when a supported host redirects somewhere else.
+ */
+export const GUEST_EXTRACTORS = 'youtube.*,soundcloud.*,bandcamp.*';
+const GUEST_ARGS = ['--use-extractors', GUEST_EXTRACTORS];
+
+/** A guest run refused because the guest share of yt-dlp slots is in use; answered as 503. */
+export class GuestBusyError extends Error {
+  readonly status = 503;
+  readonly code = 'guest_busy';
+
+  constructor() {
+    super('guest streaming is busy, try again shortly');
+  }
+}
+
 /** Global cap on concurrent yt-dlp processes; replaced by `configureResolveLimits`. */
 let limiter = createLimiter({
   max: 2,
   maxQueue: DEFAULT_MAX_QUEUE,
   waitMs: QUEUE_WAIT_MS,
 });
+/** Processes guests may hold at once, counted across queue and run. */
+let guestCap = 1;
+let guestActive = 0;
+/**
+ * Bumped by `configureResolveLimits`. Runs started under an older limiter
+ * still finish, but they must not decrement the count of the new one.
+ */
+let limiterGeneration = 0;
 
-/** Sets the yt-dlp concurrency cap and wait-queue length (called from buildApp). */
+/**
+ * Sets the yt-dlp concurrency cap, the wait-queue length and the guest share
+ * (called from buildApp). Guests get at most `guestMax` processes and never the
+ * last slot, so at least one stays free for signed-in callers: with `max` 1,
+ * guests get none and receive 503. Calling it again starts a fresh limiter and
+ * a fresh guest count; guest runs still in flight on the old limiter do not
+ * touch the new count when they finish.
+ */
 export function configureResolveLimits(
   max: number,
   maxQueue = DEFAULT_MAX_QUEUE,
+  guestMax = 1,
 ): void {
   limiter = createLimiter({ max, maxQueue, waitMs: QUEUE_WAIT_MS });
+  guestCap = Math.max(0, Math.min(guestMax, max - 1));
+  guestActive = 0;
+  limiterGeneration++;
 }
 
 /**
@@ -374,10 +414,24 @@ export class YtDlpAbortedError extends Error {
 
 /**
  * Runs yt-dlp under the global concurrency cap (503 when the queue is full).
- * An aborted `signal` kills the child process and frees its slot.
+ * A guest run also needs one of the guest slots (503 `GuestBusyError` at once
+ * when they are taken) and is restricted to the guest extractors. An aborted
+ * `signal` kills the child process and frees its slot.
  */
-export function runYtDlpJson(args: string[], signal?: AbortSignal): Promise<YtDlpInfo> {
-  return limiter.run(() => execYtDlpJson(args, signal));
+export function runYtDlpJson(
+  args: string[],
+  signal?: AbortSignal,
+  lane: Lane = 'member',
+): Promise<YtDlpInfo> {
+  if (lane === 'member') return limiter.run(() => execYtDlpJson(args, signal, lane));
+  if (guestActive >= guestCap) return Promise.reject(new GuestBusyError());
+  guestActive++;
+  const generation = limiterGeneration;
+  return limiter
+    .run(() => execYtDlpJson([...GUEST_ARGS, ...args], signal, lane))
+    .finally(() => {
+      if (generation === limiterGeneration) guestActive--;
+    });
 }
 
 /** Prefix of the per-run temp directory holding the cookie copy. */
@@ -798,12 +852,21 @@ function execOnce(
  * is configured — once more with a fresh private copy of the cookies. Both
  * attempts run inside the caller's limiter slot, so the pair never waits for a
  * second slot or reorders the queue.
+ *
+ * Guest runs never take the cookie retry: a guest must not be able to make the
+ * server's signed-in session do work (or touch its account) on their behalf. The
+ * guest refusal is rethrown as yt-dlp said it.
  */
-async function execYtDlpJson(args: string[], signal?: AbortSignal): Promise<YtDlpInfo> {
+async function execYtDlpJson(
+  args: string[],
+  signal: AbortSignal | undefined,
+  lane: Lane,
+): Promise<YtDlpInfo> {
   try {
     return await execOnce(args, NO_CLEANUP, signal);
   } catch (err) {
     if (!(err instanceof YtDlpError) || signal?.aborted) throw err;
+    if (lane === 'guest') throw err;
     const message = err.message;
     // Not something a session can fix: keep yt-dlp's wording, and do not touch
     // the cookies file at all (an unrelated error must not warn about it).
@@ -865,6 +928,7 @@ export function lastError(stderr: string): string | undefined {
 export async function search(
   query: string,
   source: SearchSource,
+  lane: Lane = 'member',
 ): Promise<SearchResult[]> {
   const target = searchTarget(source, query);
   if (!target)
@@ -872,14 +936,18 @@ export async function search(
       `search is not supported for ${source}; paste a link instead`,
       400,
     );
-  const info = await runYtDlpJson([
-    '-J',
-    '--flat-playlist',
-    '--playlist-end',
-    String(SEARCH_LIMIT),
-    '--',
-    target,
-  ]);
+  const info = await runYtDlpJson(
+    [
+      '-J',
+      '--flat-playlist',
+      '--playlist-end',
+      String(SEARCH_LIMIT),
+      '--',
+      target,
+    ],
+    undefined,
+    lane,
+  );
   const site = source;
   const mapped = (info.entries ?? [])
     .filter(
@@ -899,7 +967,7 @@ export async function search(
     (x) => x.result,
   );
 
-  await enrichMissingArtists(results);
+  await enrichMissingArtists(results, lane);
 
   for (const r of results) {
     // Flat YouTube Music entries carry only id + title; the thumbnail is derivable.
@@ -914,8 +982,10 @@ export async function search(
   return results;
 }
 
-/** Parallel per-result metadata lookups during one search. */
+/** Parallel per-result metadata lookups during one search (members). */
 const ENRICH_CONCURRENCY = 3;
+/** Guest searches look up at most this many missing artists, one at a time. */
+const GUEST_ENRICH_MAX = 3;
 /** A search stops waiting for lookups after this long and answers with what it has. */
 const ENRICH_BUDGET_MS = 15_000;
 const ENRICH_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -927,6 +997,11 @@ type TrackMeta = Pick<
   SearchResult,
   'title' | 'artist' | 'durationSec' | 'thumbnailUrl'
 >;
+/**
+ * Lookup results by `site:id`, shared by BOTH lanes: it may only hold public
+ * track metadata (title, artist, duration, thumbnail). Never a URL with a
+ * signature or token, never anything tied to a caller, a cookie or a lane.
+ */
 const metaCache = new Map<string, { meta: TrackMeta; expires: number }>();
 
 function cachedMeta(key: string): TrackMeta | undefined {
@@ -962,8 +1037,12 @@ function applyMeta(r: SearchResult, meta: TrackMeta): void {
  * search has none) with one `-J --no-playlist` lookup each, through the
  * global yt-dlp limiter, a few at a time, cached by id. Lookup failures and
  * lookups past the time budget leave the result as it was.
+ *
+ * Guest lane: one lookup at a time, at most `GUEST_ENRICH_MAX` per search, and
+ * the loop stops at once when the guest slot is busy (`GuestBusyError`) rather
+ * than trying the rest. Exported for tests.
  */
-async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
+export async function enrichMissingArtists(results: SearchResult[], lane: Lane): Promise<void> {
   const todo: SearchResult[] = [];
   for (const r of results) {
     if (
@@ -978,17 +1057,21 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
   }
   if (!todo.length) return;
 
+  const guest = lane === 'guest';
+  if (guest) todo.splice(GUEST_ENRICH_MAX);
   let next = 0;
   let expired = false;
+  let busy = false;
   // Aborted once the budget is spent: kills in-flight lookups and frees their slots.
   const abort = new AbortController();
   const worker = async (): Promise<void> => {
-    while (!expired && next < todo.length) {
+    while (!expired && !busy && next < todo.length) {
       const r = todo[next++];
       try {
         const info = await runYtDlpJson(
           ['-J', '--no-playlist', '--', r.url],
           abort.signal,
+          lane,
         );
         const full = toSearchResult(
           {
@@ -1004,7 +1087,9 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
         if (full.thumbnailUrl) meta.thumbnailUrl = full.thumbnailUrl;
         cacheMeta(`${r.site}:${r.id}`, meta);
         if (!expired) applyMeta(r, meta);
-      } catch {
+      } catch (err) {
+        // The guest slot is taken by another run: stop, leave the rest flat.
+        if (err instanceof GuestBusyError) busy = true;
         // Keep the flat result; a failed lookup never fails the search.
       }
     }
@@ -1016,7 +1101,7 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
     timer.unref?.();
   });
   const workers = Array.from(
-    { length: Math.min(ENRICH_CONCURRENCY, todo.length) },
+    { length: guest ? 1 : Math.min(ENRICH_CONCURRENCY, todo.length) },
     worker,
   );
   await Promise.race([Promise.all(workers), budget]);
@@ -1026,8 +1111,8 @@ async function enrichMissingArtists(results: SearchResult[]): Promise<void> {
 }
 
 /** Metadata for one already-validated URL (no download). */
-export async function resolveUrl(url: string): Promise<SearchResult> {
-  const info = await runYtDlpJson(['-J', '--no-playlist', '--', url]);
+export async function resolveUrl(url: string, lane: Lane = 'member'): Promise<SearchResult> {
+  const info = await runYtDlpJson(['-J', '--no-playlist', '--', url], undefined, lane);
   if (info._type === 'playlist')
     throw new YtDlpError(
       'playlists are not supported; use a single track link',
@@ -1188,15 +1273,13 @@ async function warmStreamLink(response: StreamResponse): Promise<void> {
 export async function resolveStream(
   url: string,
   quality: AudioQuality = 'highest',
+  lane: Lane = 'member',
 ): Promise<StreamResponse> {
-  const info = await runYtDlpJson([
-    '-J',
-    '--no-playlist',
-    '-f',
-    streamFormatFor(quality),
-    '--',
-    url,
-  ]);
+  const info = await runYtDlpJson(
+    ['-J', '--no-playlist', '-f', streamFormatFor(quality), '--', url],
+    undefined,
+    lane,
+  );
   const response = toStreamResponse(info);
   await warmStreamLink(response);
   return response;

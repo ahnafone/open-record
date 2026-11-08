@@ -55,7 +55,7 @@ Then `npm install` once in the repository root.
 
 ```sh
 npm run server:up                   # detect the LAN IP, build, start detached, print banner + QR, exit
-npm run server:up -- --ip 10.0.0.5  # choose the LAN address
+npm run server:up -- --ip <lan-ip>  # choose the LAN address
 npm run server:up -- --host 127.0.0.1
                                     # bind this address instead (e.g. behind a tunnel)
 npm run server:up -- --follow       # stay attached and stream the server output
@@ -89,54 +89,17 @@ Other targets: `npx nx run-many -t lint,typecheck,build,test --projects=server`.
 
 ## Run as a systemd user service
 
-On a machine that should keep the server up, use the user unit in
-`deploy/open-record-server.service` instead of `server:up`; both bind port
-8787, so run one or the other.
+To keep the server running on a host, use a systemd user unit instead of `server:up`
+(both use port 8787, so run one or the other). The public unit, with install
+and journal commands, is in
+[`docs/public-hosting.md`](../../docs/public-hosting.md#systemd-user-unit-server).
+It binds `HOST=127.0.0.1` so only the Cloudflare Tunnel's `cloudflared` can reach it.
 
-For the **public HTTPS** deployment (Caddy terminating 80/443 and proxying to
-`127.0.0.1:8787`), follow [`deploy/README.md`](../../deploy/README.md). Port
-8787 stays private: the router forwards only 80/443, and Caddy binds the LAN
-address because Tailscale already owns `127.0.0.1:80/443`. Never port-forward
-8787.
-
-From the repository root:
-
-```sh
-mkdir -p ~/.config/systemd/user
-ln -sf "$PWD/deploy/open-record-server.service" ~/.config/systemd/user/
-loginctl enable-linger $USER
-systemctl --user daemon-reload
-systemctl --user enable --now open-record-server
-journalctl --user -u open-record-server -f
-```
-
-The symlink is required: `systemctl --user` only scans `~/.config/systemd/user`,
-`/etc/systemd/user` and `/usr/lib/systemd/user`, never this repository.
-
-The unit assumes the repository is at `~/Github/open-record` (`%h` is your home
-directory) and runs:
-
-```sh
-~/.local/bin/node --env-file-if-exists=%h/Github/open-record/apps/server/.env \
-  %h/Github/open-record/dist/apps/server/main.mjs
-```
-
-with `WorkingDirectory` at the repository root, `WEB_DIR` at
-`dist/apps/app/browser` and `PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin`.
-Build both first (`npx nx build app`, `npx nx build server`), then reload and
-start.
-
-It starts `~/.local/bin/node`, a symlink to the nvm-managed Node; after an nvm
-upgrade, repoint it:
-
-```sh
-ln -sf "$(command -v node)" ~/.local/bin/node
-```
-
-The unit sets `HOST=0.0.0.0` explicitly, so firewall the port:
-`sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. Keep that rule
-LAN-only; the public listener is Caddy on 80/443, not 8787. This is an ordinary
-host process, so `ufw` rules apply to it.
+For LAN-only use (phones or Cast speakers on your Wi-Fi), copy that unit, set
+`HOST=0.0.0.0`, and allow only your subnet through the firewall:
+`sudo ufw allow from <your-subnet> to any port 8787 proto tcp`. Never port-forward
+8787. The unit runs `~/.local/bin/node`, a symlink to your nvm-managed Node; after
+an nvm upgrade, repoint it with `ln -sf "$(command -v node)" ~/.local/bin/node`.
 
 ## Environment variables
 
@@ -153,17 +116,23 @@ is already set.
 | `PUBLIC_URL`        | (detected)   | URL phones use, shown in the banner and QR code, used verbatim. `npm run server:up` sets it to the LAN IP. |
 | `PORT`              | `8787`       | Listen port.                                                          |
 | `HOST`              | `0.0.0.0`    | Listen interface. `npm run server:up` uses `--host`, then `--ip`, then this value, then the detected LAN address; the systemd unit sets it explicitly. |
-| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list (`127.0.0.1/8,::1` works). Behind a proxy (Caddy, a tunnel) set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host Caddy use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
-| `TRUST_CF_CONNECTING_IP` | `false` | Opt-in. When `true`, a loopback TCP peer that sends a valid `CF-Connecting-IP` is keyed by that address (per-client limits see the real visitor behind a Cloudflare Tunnel). Set it **only** when cloudflared is the sole path to the origin (no Caddy or other same-host proxy in front). A same-host proxy that forwards unknown headers would let any client choose its own rate-limit bucket. When `false` (default), `CF-Connecting-IP` is ignored entirely and `TRUST_PROXY` alone decides the address. |
+| `TRUST_PROXY`       | `false`      | Trust `X-Forwarded-For`: `true`, `false`, or a proxy IP/CIDR list (`127.0.0.1/8,::1` works). Behind a proxy or tunnel set it, or every client is the proxy's IP and per-client limits are shared; behind the same-host cloudflared use `127.0.0.1`; never `true` while 8787 is LAN-reachable. |
+| `TRUST_CF_CONNECTING_IP` | `false` | Opt-in. When `true`, a loopback TCP peer that sends a valid `CF-Connecting-IP` is keyed by that address (per-client limits see the real visitor behind a Cloudflare Tunnel). Set it **only** when cloudflared is the sole path to the origin (no other same-host proxy in front). A same-host proxy that forwards unknown headers would let any client choose its own rate-limit bucket. When `false` (default), `CF-Connecting-IP` is ignored entirely and `TRUST_PROXY` alone decides the address. |
 | `LOG_LEVEL`         | `info`       | pino level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`). Relay URLs in request logs are redacted. |
 | `MAX_CONCURRENT_RESOLVES` | `2`  | yt-dlp processes (search, resolve, stream) that run at once (1-16). Extra calls wait in a short queue; when it is full the server answers `503` with `Retry-After`. |
 | `STREAM_CACHE_TTL`  | `1800`       | Seconds a resolved stream link is cached in memory (0 disables). A cached link is never served past its own expiry. |
 | `RESOLVE_RATE_LIMIT_MAX` | `30`    | Requests per minute per token on `/search`, `/resolve` and `/stream` (stricter than `RATE_LIMIT_MAX`). |
+| `GUEST_STREAMING`   | `false`      | Opt-in. `true` lets signed-out visitors call `/search`, `/resolve` and `/stream` without a token, under the per-IP guest limits below. Everything else stays token-only. See [Guest streaming](#guest-streaming). |
+| `GUEST_STREAM_PER_MINUTE` | `10`   | Guest requests per minute per client IP (burst limit). Only used with `GUEST_STREAMING=true`. |
+| `GUEST_STREAM_PER_DAY` | `100`     | Guest requests per day per client IP (daily cap). Only used with `GUEST_STREAMING=true`. |
+| `GUEST_GLOBAL_PER_MINUTE` | `60`  | Guest requests per minute across all clients combined. Bounds how far spreading requests over many addresses can go. Only used with `GUEST_STREAMING=true`. |
+| `GUEST_MAX_CONCURRENT` | `1`     | yt-dlp processes guests may run at once (1-16). Guests never take the last of the `MAX_CONCURRENT_RESOLVES` slots, so with `MAX_CONCURRENT_RESOLVES=1` guests get none. A guest refused for lack of a slot gets `503` `{"error":"guest_busy"}`. |
+| `GUEST_ALLOWED_HOSTS` | `youtube.com,youtu.be,music.youtube.com,soundcloud.com,bandcamp.com` | Comma list of hostnames guests may send to `/resolve` and `/stream`; subdomains are included. Other hosts get `403` `{"error":"guest_host_not_allowed"}` before the server fetches anything. Guest search (`/search`) is unaffected. Only used with `GUEST_STREAMING=true`. |
 | `SESSION_ENABLED`   | `true`       | Share one playback session between signed-in devices and Cast speakers. Needs a Supabase account: the static token is refused (`403`) on `/session/*` and `/cast/uploads*`. |
 | `SESSION_IDLE_TIMEOUT_MIN` | `120` | Minutes without contact from any device before a session is dropped from memory. |
 | `SESSION_TARGET_STALE_MIN` | `30`  | Minutes the playing device may stay silent before the server pauses and clears the target. |
 | `CAST_ENABLED`      | `true`       | Discover Google Cast speakers over mDNS and relay audio to them. Inert unless sessions and `CAST_MEDIA_BASE_URL` are available. |
-| `CAST_MEDIA_BASE_URL` | (unset)    | URL the speaker uses to reach this server, e.g. `http://10.0.0.5:8787`. Casting stays off when unset. |
+| `CAST_MEDIA_BASE_URL` | (unset)    | URL the speaker uses to reach this server, e.g. `http://<lan-ip>:8787`. Casting stays off when unset. |
 | `CAST_RELAY_TTL_SEC` | `900`       | Lifetime of a relay token in seconds (60-86400), slid while the speaker keeps playing; the hard cap is 24 hours. |
 | `CAST_CACHE_MB`     | `2048`       | Per-account cap for uploaded PC imports; `0` disables uploads. Least-recently-used files are evicted, never the one the speaker is playing. A cap below `CAST_UPLOAD_MAX_MB` also caps a single upload: the effective limit is the smaller of the two. |
 | `CAST_UPLOAD_MAX_MB` | `200`       | Largest accepted upload from the PC browser (1-4096). Effective limit is `min(this, CAST_CACHE_MB)`. |
@@ -180,7 +149,9 @@ is already set.
 | `YTDLP_COOKIES_FILE` | `<data dir>/cookies.txt` when present | Optional Netscape `cookies.txt` on this machine, e.g. `/home/you/cookies.txt`. Every request goes out without cookies first; only a video refused for sign-in (age gate, private, members-only, bot check) is retried once with them, so those songs take two yt-dlp runs. When unset, `<OPEN_RECORD_DATA_DIR>/cookies.txt` is used if that file exists; when neither exists the server has no cookies at all (no warning). An explicit path always wins, even when it is broken. A path that is unreadable, empty or not a Netscape file only logs a warning and a banner note; it never stops the server, and requests run anonymously. See [Age-restricted videos (cookies)](#age-restricted-videos-cookies). |
 
 Every request needs `Authorization: Bearer <token>`, except `GET /health`,
-`GET /app-config` and, with `WEB_DIR` set, the web app's static files.
+`GET /app-config`, with `WEB_DIR` set the web app's static files, and, with
+`GUEST_STREAMING=true`, a request with no `Authorization` header to `/search`,
+`/resolve` or `/stream` (see [Guest streaming](#guest-streaming)).
 The token is `OPEN_RECORD_TOKEN` if set, otherwise the generated one.
 With `SUPABASE_JWT_SECRET` or `SUPABASE_URL` set, a valid Supabase access token is accepted in the same header too; the static token keeps working.
 
@@ -203,7 +174,7 @@ StreamResponse = {
 | Endpoint | Body / query | Response |
 | --- | --- | --- |
 | `GET /health` | | `{ status: "ok" }` (no auth; liveness check) |
-| `GET /app-config` | | `{ supabaseUrl: string \| null, supabaseAnonKey: string \| null, turnstileSiteKey: string \| null }` (no auth, `cache-control: no-store`); the Supabase pair is null unless `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set, `turnstileSiteKey` is null unless `TURNSTILE_SITE_KEY` is set |
+| `GET /app-config` | | `{ supabaseUrl: string \| null, supabaseAnonKey: string \| null, turnstileSiteKey: string \| null, guestStreaming: boolean }` (no auth, `cache-control: no-store`); the Supabase pair is null unless `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set, `turnstileSiteKey` is null unless `TURNSTILE_SITE_KEY` is set, `guestStreaming` mirrors `GUEST_STREAMING` |
 | `GET /ping` | | `{ status: "ok" }`; the app's "Test connection" uses it to check the token |
 | `GET /search?q=&source=` | `source`: `youtube` (default), `ytmusic`, `soundcloud`, `bandcamp`, `audiomack`, `mixcloud`; `q` max 200 chars | `{ results: SearchResult[] }` (max 15) |
 | `POST /resolve` | `{ url }` | `SearchResult` (metadata only, `yt-dlp -J --no-playlist`) |
@@ -361,23 +332,18 @@ request, so it must be encrypted. Put the server behind an HTTPS tunnel:
 
 - **Tailscale** (private): install Tailscale on the server and phone, then
   `tailscale serve --bg 8787` gives you `https://<machine>.<tailnet>.ts.net`.
-  Tailscale Serve binds `127.0.0.1:80/443`; a Caddy on the same host must bind
-  the LAN address (as `deploy/Caddyfile` does), not the wildcard.
-- **Cloudflare Tunnel** (public URL):
-  `cloudflared tunnel --url http://127.0.0.1:8787`, or a named tunnel with
-  Cloudflare Access in front.
-- **Caddy** (public, same host): [`deploy/Caddyfile`](../../deploy/Caddyfile)
-  terminates HTTPS on the LAN address and proxies `127.0.0.1:8787`. Follow
-  [`deploy/README.md`](../../deploy/README.md) for DNS, router, `ufw`, systemd
-  and verification.
+- **Cloudflare Tunnel** (public URL, the only public ingress):
+  [docs/public-hosting.md](../../docs/public-hosting.md) covers the tunnel, the
+  server settings (`HOST=127.0.0.1`, `TRUST_CF_CONNECTING_IP=true`), Supabase,
+  Turnstile and verification.
 
 The tunnel dials `127.0.0.1`, but `npm run server:up` binds the LAN address by
-default. Start it with `--host 127.0.0.1` for a tunnel (the systemd unit sets
-`HOST=0.0.0.0`, so it needs no change).
+default. Start it with `--host 127.0.0.1` for a tunnel (the public systemd unit
+in `docs/public-hosting.md` sets `HOST=127.0.0.1`).
 
 Set `PUBLIC_URL` to the HTTPS URL behind either so the banner and QR code show
-it. Behind a same-host tunnel or Caddy, `TRUST_PROXY` must be set (per-client
-limits otherwise see only the proxy's address); use `TRUST_PROXY=127.0.0.1` so only
+it. Behind a same-host tunnel, `TRUST_PROXY` must be set (per-client limits
+otherwise see only the proxy's address); use `TRUST_PROXY=127.0.0.1` so only
 the loopback proxy's `X-Forwarded-For` is trusted. `TRUST_PROXY=true` is only safe
 when 8787 is bound to loopback and nothing else can reach it; never use `true`
 while 8787 is reachable from the LAN, or clients can spoof their address. Scan
@@ -385,7 +351,7 @@ the QR code (or enter the URL) in the app under Settings, Stream server.
 
 ## Public mode
 
-Public mode runs the server on the internet behind a Cloudflare Tunnel (or Caddy)
+Public mode runs the server on the internet behind a Cloudflare Tunnel
 with an admin-approval gate: a person can sign in with Supabase, but may use the
 API only after an admin approves them. Self-hosters leave `REQUIRE_APPROVAL`
 unset and nothing here applies. Full setup: [`docs/public-hosting.md`](../../docs/public-hosting.md).
@@ -419,10 +385,65 @@ by the visitor's address from `CF-Connecting-IP` (Cloudflare overwrites it, so
 visitors cannot set it). This is off by default and is not automatic: with it off,
 every tunnelled visitor shares one loopback bucket unless `TRUST_PROXY` is set to
 handle `X-Forwarded-For`. Enable it only when cloudflared is the sole path to the
-origin (for example `HOST=127.0.0.1` with no Caddy in front). Behind a same-host
-Caddy, leave it `false`: Caddy forwards unknown headers, so a client could pick its
+origin (for example `HOST=127.0.0.1` with no other proxy in front). Behind a same-host
+reverse proxy, leave it `false`: a proxy that forwards unknown headers, so a client could pick its
 own bucket. A non-loopback peer is never trusted this way. Set
 `TRUST_PROXY=127.0.0.1` as well when a same-host proxy adds `X-Forwarded-For`.
+
+## Guest streaming
+
+Opt-in (`GUEST_STREAMING=true`, off by default): a signed-out visitor can call
+`GET /search`, `POST /resolve` and `POST /stream` without a token. Only a request
+with **no** `Authorization` header is a guest. A request that presents any
+credential is checked as usual: a bad or expired token still gets `401`, and a
+valid one is unchanged. `/playlist`, `/meta/*`, `/session/*`, `/cast/*` and
+downloads stay token-only.
+
+- **Limits** are per client IP, shared across the three routes: at most
+  `GUEST_STREAM_PER_MINUTE` requests per minute (default 10), and at most
+  `GUEST_STREAM_PER_DAY` per day (default 100). Each is a fixed window. Across all
+  clients together, at most `GUEST_GLOBAL_PER_MINUTE` requests per minute (default
+  60). A refused request gets `429` with `Retry-After` (seconds) and
+  `{"error":"guest_limit","window":"minute"|"global"|"day"}`. A request refused by
+  an earlier window does not use up a later one: a minute refusal does not use up
+  the daily cap. All three windows are checked before any is counted, so a refused
+  request spends nothing from the shared global budget either.
+- **Day counters are bounded.** The per-client counters track at most 10,000 client
+  keys; past that, the oldest-tracked key is evicted. Someone who sprays many
+  addresses can push a client out and reset its daily count. This is an accepted
+  trade-off: the global per-minute cap still bounds the total, and the spray needs
+  many addresses.
+- **Hosts.** A guest may send only to hosts in `GUEST_ALLOWED_HOSTS` (default:
+  YouTube, SoundCloud, Bandcamp) on `POST /resolve` and `POST /stream`. The host is
+  matched on the parsed hostname, so lookalikes (`youtube.com.evil.example`) and
+  userinfo tricks (`youtube.com@evil.example`) are refused. A refusal is
+  `403` `{"error":"guest_host_not_allowed"}`, and nothing is fetched. Guest yt-dlp
+  runs are also restricted to the matching extractors, so the generic extractor never
+  runs for a guest. Search by query is not affected.
+- **No cookie retry for guests.** A sign-in refusal (for example an age-gated video)
+  is returned to a guest as yt-dlp reported it. The server never reruns a guest
+  request with its own `cookies.txt`, so a guest cannot use the operator's signed-in
+  session. Signed-in callers keep the retry.
+- **Guest search** looks up at most 3 missing artists per search, one at a time, and
+  stops at once when the guest slot is taken.
+- **Concurrency.** Guests share the `MAX_CONCURRENT_RESOLVES` pool but may hold at
+  most `GUEST_MAX_CONCURRENT` yt-dlp processes at once (default 1), and never the last
+  slot. When guests are full, the request gets `503` `{"error":"guest_busy"}` with
+  `Retry-After`, immediately; signed-in callers are not queued behind it.
+- **Tunnel warning.** With `GUEST_STREAMING=true` and neither `TRUST_PROXY` nor
+  `TRUST_CF_CONNECTING_IP` set, the server logs a warning at startup: behind a tunnel,
+  every guest then shares the loopback address and one per-IP bucket.
+- **Client IP** is the address the other per-client limits use: `request.ip`
+  (`TRUST_PROXY`), or `CF-Connecting-IP` when `TRUST_CF_CONNECTING_IP=true`. A
+  client's own `X-Forwarded-For` or `CF-Connecting-IP` is ignored unless the trust
+  setting says so, so it cannot pick a new bucket.
+- **Approval gate.** `REQUIRE_APPROVAL` checks only verified Supabase users, so it
+  does not block guests on these routes. Token users are still checked.
+- **Off** (default): these routes answer `401` without a token, as before.
+- Guest requests also count toward `RESOLVE_RATE_LIMIT_MAX` and `RATE_LIMIT_MAX`
+  (per IP) and use the `MAX_CONCURRENT_RESOLVES` pool, within `GUEST_MAX_CONCURRENT`.
+- `GET /app-config` returns `guestStreaming: true|false` so the app can offer
+  signed-out playback.
 
 ## Updating yt-dlp
 

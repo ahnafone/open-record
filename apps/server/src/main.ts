@@ -36,6 +36,30 @@ async function main(): Promise<void> {
   // own ~/.config/open-record/cookies.txt happens to exist.
   configureCookies(config.ytdlpCookiesFile, join(config.dataDir, 'cookies.txt'));
 
+  // Behind a tunnel or proxy without a trust setting, request.ip is the proxy's
+  // loopback address, so every guest shares one per-IP bucket.
+  if (config.guestStreaming && config.trustProxy === false && !config.trustCfConnectingIp) {
+    console.warn(
+      [
+        '',
+        '*** WARNING: GUEST_STREAMING=true but neither TRUST_PROXY nor TRUST_CF_CONNECTING_IP is set. ***',
+        '*** Behind a tunnel or reverse proxy, every guest shares ONE per-IP limit (the proxy address). ***',
+        '*** Set TRUST_CF_CONNECTING_IP=true when cloudflared is the only path to the origin, ***',
+        '*** or TRUST_PROXY=<proxy address> when a reverse proxy adds X-Forwarded-For. ***',
+        '',
+      ].join('\n'),
+    );
+  }
+
+  // With one yt-dlp slot in total, guests never get one (the last slot is kept
+  // for signed-in callers), so every guest request answers 503 guest_busy.
+  if (config.guestStreaming && config.maxConcurrentResolves <= 1) {
+    console.warn(
+      'open-record-server: GUEST_STREAMING=true but MAX_CONCURRENT_RESOLVES is 1: ' +
+        'guests never get a yt-dlp slot and will get 503 guest_busy. Set MAX_CONCURRENT_RESOLVES to 2 or more.',
+    );
+  }
+
   // Names only: the service-role key and admin id are never printed.
   if (config.requireApproval) {
     console.log(

@@ -38,6 +38,25 @@ export interface ServerConfig {
   streamCacheTtl: number;
   /** Requests per minute per token for the yt-dlp routes (/search, /stream). */
   resolveRateLimitMax: number;
+  /**
+   * Opt-in (GUEST_STREAMING): unauthenticated callers may use /search, /resolve
+   * and /stream, each client IP under the two guest limits below. Default false:
+   * those routes answer 401 without a token.
+   */
+  guestStreaming: boolean;
+  /** Guest requests per minute per client IP (burst limit). */
+  guestStreamPerMinute: number;
+  /** Guest requests per day per client IP (daily cap). */
+  guestStreamPerDay: number;
+  /** Guest requests per minute across all clients (global cap). */
+  guestGlobalPerMinute: number;
+  /** yt-dlp processes guests may run at once; never the last slot (see configureResolveLimits). */
+  guestMaxConcurrent: number;
+  /**
+   * Hosts a guest may send to /resolve and /stream (lowercase, subdomains
+   * included). Any other host gets 403 before the server fetches anything.
+   */
+  guestAllowedHosts: string[];
   /** Cast discovery and control. False = no mDNS sockets are opened. */
   castEnabled: boolean;
   /**
@@ -99,6 +118,12 @@ export interface AppConfig {
   turnstileSiteKey: string | null;
 }
 
+/** Public part of GET /app-config: the config above plus the guest-streaming switch. */
+export interface PublicAppConfig extends AppConfig {
+  /** True when GUEST_STREAMING is on: signed-out callers may use /search, /resolve, /stream. */
+  guestStreaming: boolean;
+}
+
 export interface SupabaseAuthConfig {
   /** Legacy shared JWT secret (HS256). */
   jwtSecret?: string;
@@ -142,6 +167,37 @@ function trustProxy(raw: string | undefined): boolean | string {
   if (lower === 'true' || lower === '1') return true;
   if (!value || lower === 'false' || lower === '0') return false;
   return value;
+}
+
+/** Media sites guests may use by default: the supported sources, nothing else. */
+export const DEFAULT_GUEST_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'music.youtube.com',
+  'soundcloud.com',
+  'bandcamp.com',
+];
+
+const HOSTNAME = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+/**
+ * GUEST_ALLOWED_HOSTS: comma list of hostnames (subdomains included). Blank or
+ * unset keeps the defaults. Entries must be plain hostnames (no scheme, path,
+ * port or wildcard); anything else is a config error.
+ */
+function guestAllowedHosts(env: Env): string[] {
+  const raw = env['GUEST_ALLOWED_HOSTS']?.trim();
+  if (!raw) return [...DEFAULT_GUEST_HOSTS];
+  const hosts = raw
+    .split(',')
+    .map((h) => h.trim().toLowerCase().replace(/\.$/, ''))
+    .filter(Boolean);
+  for (const host of hosts) {
+    if (!HOSTNAME.test(host)) {
+      throw new ConfigError('GUEST_ALLOWED_HOSTS must be a comma list of hostnames, e.g. youtube.com,soundcloud.com');
+    }
+  }
+  return [...new Set(hosts)];
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -203,6 +259,12 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     maxConcurrentResolves: int(env, 'MAX_CONCURRENT_RESOLVES', 2, 1, 16),
     streamCacheTtl: int(env, 'STREAM_CACHE_TTL', 1800, 0, 86_400),
     resolveRateLimitMax: int(env, 'RESOLVE_RATE_LIMIT_MAX', 30, 1, 100_000),
+    guestStreaming: bool(env, 'GUEST_STREAMING', false),
+    guestStreamPerMinute: int(env, 'GUEST_STREAM_PER_MINUTE', 10, 1, 100_000),
+    guestStreamPerDay: int(env, 'GUEST_STREAM_PER_DAY', 100, 1, 1_000_000),
+    guestGlobalPerMinute: int(env, 'GUEST_GLOBAL_PER_MINUTE', 60, 1, 1_000_000),
+    guestMaxConcurrent: int(env, 'GUEST_MAX_CONCURRENT', 1, 1, 16),
+    guestAllowedHosts: guestAllowedHosts(env),
     castEnabled: bool(env, 'CAST_ENABLED', true),
     castMediaBaseUrl: httpUrl(env, 'CAST_MEDIA_BASE_URL', null),
     castRelayTtlSec: int(env, 'CAST_RELAY_TTL_SEC', 900, 60, 86_400),

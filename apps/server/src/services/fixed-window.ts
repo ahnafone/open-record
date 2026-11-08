@@ -12,7 +12,14 @@ export interface FixedWindowOptions {
  * seconds (at least 1) until the key's window resets when it is over budget.
  * An over-budget hit is not counted.
  */
-export type FixedWindowHit = (key: string) => number;
+export interface FixedWindowHit {
+  (key: string): number;
+  /**
+   * Same answer as calling the counter, but counts nothing: lets a caller check
+   * several windows and only then spend them all.
+   */
+  peek(key: string): number;
+}
 
 /**
  * Fixed-window counter keyed by string (e.g. client IP). When a new key arrives
@@ -35,7 +42,17 @@ export function createFixedWindow({
     }
   };
 
-  return (key) => {
+  const peek = (key: string): number => {
+    const at = now();
+    const bucket = buckets.get(key);
+    if (!bucket || bucket.resetAt <= at) return 0;
+    if (bucket.count >= max) {
+      return Math.max(1, Math.ceil((bucket.resetAt - at) / 1000));
+    }
+    return 0;
+  };
+
+  const hit = (key: string): number => {
     const at = now();
     const bucket = buckets.get(key);
     if (!bucket || bucket.resetAt <= at) {
@@ -57,4 +74,5 @@ export function createFixedWindow({
     bucket.count += 1;
     return 0;
   };
+  return Object.assign(hit, { peek });
 }

@@ -19,6 +19,7 @@ import { hasWebApp, registerWebApp } from './plugins/web';
 import { routes as defaultRoutes, type RouteOptions } from './routes';
 import { type AccessGate, createAccessGate } from './services/access-gate';
 import { configureClientIp } from './services/client-ip';
+import { createGuestLimiter } from './services/guest-limit';
 import { CastService } from './services/cast';
 import { CastDiscovery } from './services/cast-discovery';
 import { loadOrCreateCastSecret, MediaRelay } from './services/media-relay';
@@ -103,8 +104,16 @@ export async function buildApp(
       throw new ConfigError('REQUIRE_APPROVAL=true needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
     }
   }
-  registerAuth(app, verify, accessGate);
-  configureResolveLimits(config.maxConcurrentResolves);
+  // Guest streaming (GUEST_STREAMING): off means guest routes answer 401 as before.
+  const guestLimit = config.guestStreaming
+    ? createGuestLimiter({
+        perMinute: config.guestStreamPerMinute,
+        perDay: config.guestStreamPerDay,
+        globalPerMinute: config.guestGlobalPerMinute,
+      })
+    : undefined;
+  registerAuth(app, verify, accessGate, guestLimit);
+  configureResolveLimits(config.maxConcurrentResolves, undefined, config.guestMaxConcurrent);
 
   // Sessions are in-memory, so they only exist when enabled. `start()` uses an
   // unref-ed interval and `onClose` disposes it: tests and CLI runs still exit.

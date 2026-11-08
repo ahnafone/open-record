@@ -164,7 +164,7 @@ describe('GET /app-config', () => {
     await app.close();
     expect(res.statusCode).toBe(200);
     expect(res.headers['cache-control']).toBe('no-store');
-    expect(res.json()).toEqual({ supabaseUrl: 'https://abc.supabase.co', supabaseAnonKey: 'public-anon-key', turnstileSiteKey: null });
+    expect(res.json()).toEqual({ supabaseUrl: 'https://abc.supabase.co', supabaseAnonKey: 'public-anon-key', turnstileSiteKey: null, guestStreaming: false });
     expect(res.body).not.toContain(env.SUPABASE_JWT_SECRET);
   });
 
@@ -172,7 +172,7 @@ describe('GET /app-config', () => {
     const app = await buildApp(loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_URL: env.SUPABASE_URL }));
     const res = await app.inject({ method: 'GET', url: '/app-config' });
     await app.close();
-    expect(res.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null, turnstileSiteKey: null });
+    expect(res.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null, turnstileSiteKey: null, guestStreaming: false });
     expect(() => loadConfig({ OPEN_RECORD_TOKEN: TOKEN, SUPABASE_ANON_KEY: 'k' })).toThrow(/SUPABASE_URL/);
   });
 });
@@ -212,7 +212,7 @@ describe('web app (WEB_DIR)', () => {
     expect(getStream.body).not.toContain('Open Record');
     expect((await app.inject({ method: 'GET', url: '/health' })).json()).toEqual({ status: 'ok' });
     const appConfig = await app.inject({ method: 'GET', url: '/app-config', headers: html });
-    expect(appConfig.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null, turnstileSiteKey: null });
+    expect(appConfig.json()).toEqual({ supabaseUrl: null, supabaseAnonKey: null, turnstileSiteKey: null, guestStreaming: false });
   });
 });
 

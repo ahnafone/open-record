@@ -11,6 +11,7 @@ import type { SupabaseAuthConfig } from '../config';
 import { type AccessGate } from '../services/access-gate';
 import { clientAddress, clientKey } from '../services/client-ip';
 import { createFixedWindow } from '../services/fixed-window';
+import { type GuestLimiter } from '../services/guest-limit';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
@@ -19,8 +20,20 @@ declare module 'fastify' {
      * Public routes: GET /health, GET /app-config and the web app (WEB_DIR).
      */
     public?: boolean;
+    /**
+     * Set `config: { guest: true }` on a route that signed-out visitors may use
+     * when GUEST_STREAMING is on, under the per-IP guest limits. Only a request
+     * with no Authorization header is a guest; any presented credential is
+     * checked as before.
+     */
+    guest?: boolean;
   }
   interface FastifyRequest {
+    /**
+     * True for a guest request (no Authorization header on a `guest` route with
+     * GUEST_STREAMING on). Guest routes restrict what the caller may fetch.
+     */
+    guest: boolean;
     /**
      * Supabase user id (`sub`) when the request carried a valid Supabase access
      * token; null for the static token (legacy single-user mode) and public routes.
@@ -196,10 +209,23 @@ export async function requireAccount(
  * gate refuses gets `403 access-not-approved`. That is not a credential
  * failure, so it is neither counted nor answered with `WWW-Authenticate`. The
  * static token (`userId: null`) skips the gate.
+ *
+ * Guest access (`guest`, GUEST_STREAMING): a request on a `config: { guest: true }`
+ * route with no Authorization header at all is counted against its client IP
+ * by the guest limiter and allowed through as a guest (`userId` stays null).
+ * Without the limiter the route answers 401 as before. A request that presents
+ * any Authorization header is never a guest, so bad or expired credentials keep
+ * their normal 401/429 handling.
  */
-export function registerAuth(app: FastifyInstance, verify: VerifyToken, gate?: AccessGate): void {
+export function registerAuth(
+  app: FastifyInstance,
+  verify: VerifyToken,
+  gate?: AccessGate,
+  guest?: GuestLimiter,
+): void {
   app.decorateRequest('userId', null);
   app.decorateRequest('userExp', null);
+  app.decorateRequest('guest', false);
   const failedAuth = createFixedWindow({
     max: AUTH_FAILURES_MAX,
     windowMs: AUTH_FAILURES_WINDOW_MS,
@@ -209,6 +235,16 @@ export function registerAuth(app: FastifyInstance, verify: VerifyToken, gate?: A
     if (request.routeOptions.config?.public) return;
 
     const header = request.headers.authorization ?? '';
+    if (!header && guest && request.routeOptions.config?.guest) {
+      const refusal = guest(clientKey(clientAddress(request)));
+      if (refusal) {
+        reply.header('Retry-After', String(refusal.retryAfter));
+        return reply.code(429).send({ error: 'guest_limit', window: refusal.window });
+      }
+      request.guest = true;
+      return;
+    }
+
     const match = /^Bearer\s+(.+)$/i.exec(header);
     const presented = match?.[1].trim() ?? '';
     const verified = presented ? await verify(presented) : null;

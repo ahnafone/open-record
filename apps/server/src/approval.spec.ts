@@ -119,6 +119,7 @@ describe('approval gate (REQUIRE_APPROVAL)', () => {
       supabaseUrl: SUPABASE_URL,
       supabaseAnonKey: 'public-anon-key',
       turnstileSiteKey: '0x4AAAAAAA-public',
+      guestStreaming: false,
     });
     expect(res.body).not.toContain(SERVICE_KEY);
   });
