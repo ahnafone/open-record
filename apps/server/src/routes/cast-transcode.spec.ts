@@ -79,4 +79,21 @@ describe('cast transcode HEAD requests', () => {
       get.destroy();
     }
   });
+
+  it('answers HEAD 503 ffmpeg-missing when ffmpeg is absent, without spawning an encoder', async () => {
+    const { deps, encoders } = fakeDeps();
+    deps.hasFfmpeg = async () => false;
+    const entry = { id: 'entry-2', trackId: 'track-2' } as RelayEntry;
+    const relay = { setStream: () => undefined } as unknown as MediaRelay;
+
+    app = Fastify();
+    app.get('/relay', (request, reply) =>
+      streamTranscoded(entry, new PassThrough() as Readable, relay, request, reply, 0, deps),
+    );
+
+    const head = await app.inject({ method: 'HEAD', url: '/relay' });
+    expect(head.statusCode).toBe(503);
+    expect(head.headers['content-type']).not.toBe('audio/aac');
+    expect(encoders).toHaveLength(0);
+  });
 });

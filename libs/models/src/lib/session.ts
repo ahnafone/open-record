@@ -128,6 +128,11 @@ export type SessionCommand =
       autoplay: boolean;
       shuffle: boolean;
       baseOrderIds?: string[];
+      /**
+       * `order` is already in play order (client-shuffled, e.g. restoring a
+       * shuffled queue). The server keeps it as given instead of reshuffling.
+       */
+      shuffled?: boolean;
     }
   | { type: 'enqueue'; tracks: SessionTrack[]; next: boolean }
   | { type: 'remove'; entryId: string }

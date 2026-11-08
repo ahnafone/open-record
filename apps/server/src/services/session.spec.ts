@@ -50,7 +50,9 @@ function socket(clientId: string): Socket {
     clientId,
     send(message) {
       // A real socket serialises immediately; clone so later mutations are visible.
-      messages.push(JSON.parse(JSON.stringify(message)) as SessionServerMessage);
+      messages.push(
+        JSON.parse(JSON.stringify(message)) as SessionServerMessage,
+      );
     },
     close() {
       closed = true;
@@ -59,7 +61,10 @@ function socket(clientId: string): Socket {
   return { conn, messages, isClosed: () => closed };
 }
 
-function device(clientId: string, overrides: Partial<SessionDevice> = {}): SessionDevice {
+function device(
+  clientId: string,
+  overrides: Partial<SessionDevice> = {},
+): SessionDevice {
   return {
     id: clientId,
     deviceId: `device-${clientId}`,
@@ -85,7 +90,10 @@ function castDevice(castId: string): SessionDevice {
   };
 }
 
-function track(entryId: string, overrides: Partial<SessionTrack> = {}): SessionTrack {
+function track(
+  entryId: string,
+  overrides: Partial<SessionTrack> = {},
+): SessionTrack {
   return {
     entryId,
     id: `song:${entryId}`,
@@ -97,9 +105,17 @@ function track(entryId: string, overrides: Partial<SessionTrack> = {}): SessionT
   };
 }
 
-function join(userId: string, clientId: string, overrides: Partial<SessionDevice> = {}) {
+function join(
+  userId: string,
+  clientId: string,
+  overrides: Partial<SessionDevice> = {},
+) {
   const joined = socket(clientId);
-  const snapshot = service.join(userId, joined.conn, device(clientId, overrides));
+  const snapshot = service.join(
+    userId,
+    joined.conn,
+    device(clientId, overrides),
+  );
   return { ...joined, snapshot };
 }
 
@@ -130,7 +146,11 @@ async function setQueue(
   });
 }
 
-async function transferToDevice(targetClientId: string, clientId = 'a', userId = 'u') {
+async function transferToDevice(
+  targetClientId: string,
+  clientId = 'a',
+  userId = 'u',
+) {
   return service.command(userId, clientId, {
     type: 'transfer',
     target: {
@@ -166,7 +186,8 @@ class StubHooks implements SessionCastHooks {
     next: { castId: string; state: SessionState } | null;
     force: boolean;
   }[] = [];
-  controlCalls: { userId: string; castId: string; command: SessionCommand }[] = [];
+  controlCalls: { userId: string; castId: string; command: SessionCommand }[] =
+    [];
   stateCalls: { userId: string; castId: string; state: SessionState }[] = [];
   owner: { userId: string; deviceId: string; deviceName: string } | null = null;
   events: string[] = [];
@@ -185,7 +206,13 @@ class StubHooks implements SessionCastHooks {
     next: { castId: string; state: SessionState } | null,
     opts?: { force?: boolean },
   ): Promise<void> {
-    this.targetCalls.push({ userId, requester, previousCastId, next, force: opts?.force === true });
+    this.targetCalls.push({
+      userId,
+      requester,
+      previousCastId,
+      next,
+      force: opts?.force === true,
+    });
     if (!next) {
       this.events.push(`stop:${userId}`);
       if (this.owner?.userId === userId) this.owner = null;
@@ -202,15 +229,27 @@ class StubHooks implements SessionCastHooks {
       this.onLost?.(previous.userId, next.castId);
     }
     if (this.targetError) throw this.targetError;
-    this.owner = { userId, deviceId: requester.deviceId, deviceName: requester.name };
+    this.owner = {
+      userId,
+      deviceId: requester.deviceId,
+      deviceName: requester.name,
+    };
   }
 
-  async onControl(userId: string, castId: string, command: SessionCommand): Promise<void> {
+  async onControl(
+    userId: string,
+    castId: string,
+    command: SessionCommand,
+  ): Promise<void> {
     this.controlCalls.push({ userId, castId, command });
     if (this.controlError) throw this.controlError;
   }
 
-  async onState(userId: string, castId: string, state: SessionState): Promise<void> {
+  async onState(
+    userId: string,
+    castId: string,
+    state: SessionState,
+  ): Promise<void> {
     // Clone: later commits mutate the live state object.
     this.stateCalls.push({
       userId,
@@ -253,7 +292,9 @@ describe('session join and rooms', () => {
     const devices = a.messages.filter((message) => message.type === 'devices');
     expect(devices).toHaveLength(1);
     const last = devices[devices.length - 1];
-    expect(last?.type === 'devices' ? last.devices.map((row) => row.id) : []).toEqual(['a', 'b']);
+    expect(
+      last?.type === 'devices' ? last.devices.map((row) => row.id) : [],
+    ).toEqual(['a', 'b']);
   });
 
   it('replaces only the same clientId socket on reconnect', async () => {
@@ -268,7 +309,9 @@ describe('session join and rooms', () => {
     const before = first.messages.length;
     await service.command('u', 'a', { type: 'pause' });
     expect(first.messages).toHaveLength(before);
-    expect(second.messages.some((message) => message.type === 'state')).toBe(true);
+    expect(second.messages.some((message) => message.type === 'state')).toBe(
+      true,
+    );
   });
 
   it('keeps two clients with one deviceId apart and isolates rooms', async () => {
@@ -288,7 +331,9 @@ describe('session join and rooms', () => {
 
   it('rejects a hello whose device id differs from the connection clientId', () => {
     const joined = socket('a');
-    expect(() => service.join('u', joined.conn, device('other'))).toThrow('invalid-device');
+    expect(() => service.join('u', joined.conn, device('other'))).toThrow(
+      'invalid-device',
+    );
   });
 
   it('rejects commands from unknown or offline clients', async () => {
@@ -306,7 +351,9 @@ describe('session join and rooms', () => {
 
     now += 31_000;
     service.sweep(now);
-    expect(service.devices('u').find((row) => row.id === 'a')?.online).toBe(true); // target stays online
+    expect(service.devices('u').find((row) => row.id === 'a')?.online).toBe(
+      true,
+    ); // target stays online
     expect((await service.command('u', 'a', { type: 'pause' })).ok).toBe(true);
     expect(a.snapshot.serverTime).toBe(START);
   });
@@ -360,7 +407,10 @@ describe('presence and idle rooms', () => {
     service.leave('v', castRoom.conn);
     now += 200 * 60_000;
     service.sweep(now);
-    expect(service.snapshot('v')?.target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(service.snapshot('v')?.target).toEqual({
+      kind: 'cast',
+      castId: 'cast-1',
+    });
     expect(hooks.owner?.userId).toBe('v');
   });
 });
@@ -379,7 +429,11 @@ describe('transfer and the cast lock', () => {
     const result = await transferToDevice('b');
     const state = stateOf();
     expect(result.ok).toBe(true);
-    expect(state.target).toEqual({ kind: 'device', clientId: 'b', deviceId: 'device-b' });
+    expect(state.target).toEqual({
+      kind: 'device',
+      clientId: 'b',
+      deviceId: 'device-b',
+    });
     expect(state.cursor).toBe(1);
     expect(state.positionSec).toBeCloseTo(12.5);
     expect(state.playing).toBe(true);
@@ -403,7 +457,10 @@ describe('transfer and the cast lock', () => {
     expect(call?.previousCastId).toBeNull();
     expect(call?.force).toBe(false);
     expect(call?.next?.castId).toBe('cast-1');
-    expect(call?.next?.state.target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(call?.next?.state.target).toEqual({
+      kind: 'cast',
+      castId: 'cast-1',
+    });
     expect(call?.next?.state.positionSec).toBeCloseTo(7);
     expect(hooks.owner?.userId).toBe('u');
     expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
@@ -460,7 +517,10 @@ describe('transfer and the cast lock', () => {
     expect(result).toEqual({ ok: false, error: 'cast-busy' });
     const loser = stateOf('v');
     expect(loser.target).toBeNull();
-    expect(loser.castOwner).toEqual({ deviceId: 'device-a', deviceName: 'Device a' });
+    expect(loser.castOwner).toEqual({
+      deviceId: 'device-a',
+      deviceName: 'Device a',
+    });
     expect(loser.revision).toBe(before + 1);
     expect(stateOf('u').target).toEqual({ kind: 'cast', castId: 'cast-1' });
   });
@@ -504,7 +564,10 @@ describe('transfer and the cast lock', () => {
     const winnerRevision = stateOf('v').revision;
     hooks.events.length = 0;
 
-    const result = await service.command('v', 'b', { type: 'takeOver', castId: 'cast-1' });
+    const result = await service.command('v', 'b', {
+      type: 'takeOver',
+      castId: 'cast-1',
+    });
 
     expect(result.ok).toBe(true);
     expect(hooks.targetCalls[hooks.targetCalls.length - 1]?.force).toBe(true);
@@ -541,7 +604,10 @@ describe('transfer and the cast lock', () => {
       w: stateOf('w').revision,
     };
 
-    const takeover = service.command('w', 'c', { type: 'takeOver', castId: 'cast-1' });
+    const takeover = service.command('w', 'c', {
+      type: 'takeOver',
+      castId: 'cast-1',
+    });
     const transfer = service.command('v', 'b', {
       type: 'transfer',
       target: { kind: 'cast', castId: 'cast-1' },
@@ -558,7 +624,10 @@ describe('transfer and the cast lock', () => {
     expect(stateOf('w').revision).toBe(revisions.w + 1);
     // The loser only recorded the busy owner.
     expect(stateOf('v').target).toBeNull();
-    expect(stateOf('v').castOwner).toEqual({ deviceId: 'device-c', deviceName: 'Device c' });
+    expect(stateOf('v').castOwner).toEqual({
+      deviceId: 'device-c',
+      deviceName: 'Device c',
+    });
     expect(stateOf('v').revision).toBe(revisions.v + 1);
   });
 
@@ -629,7 +698,11 @@ describe('transfer and the cast lock', () => {
     release();
 
     expect(await pending).toEqual({ ok: false, error: 'target-changed' });
-    expect(stateOf().target).toEqual({ kind: 'device', clientId: 'b', deviceId: 'device-b' });
+    expect(stateOf().target).toEqual({
+      kind: 'device',
+      clientId: 'b',
+      deviceId: 'device-b',
+    });
     expect(hooks.events).toContain('stop:u');
     expect(hooks.owner).toBeNull();
   });
@@ -674,6 +747,241 @@ describe('transfer and the cast lock', () => {
     expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
     expect(hooks.owner?.userId).toBe('u');
   });
+
+  it('pauses the speaker when the user pauses during a pending cast transfer', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    expect((await service.command('u', 'a', { type: 'pause' })).ok).toBe(true);
+    release();
+
+    expect((await pending).ok).toBe(true);
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(stateOf().playing).toBe(false);
+    expect(hooks.controlCalls.at(-1)).toMatchObject({
+      castId: 'cast-1',
+      command: { type: 'pause' },
+    });
+  });
+
+  it('does not report failure when the speaker sync outlives the transfer timeout after commit', async () => {
+    service = new SessionService({ now: () => now, castTransferTimeoutMs: 20 });
+    const hooks = castHooks();
+    // The receiver never answers the structural reload.
+    hooks.onState = () => new Promise<void>(() => undefined);
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    await setQueue(['a', 'b'], 1);
+    release();
+
+    expect(await pending).toEqual({ ok: true, revision: stateOf().revision });
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(stateOf().cursor).toBe(1);
+  });
+
+  it('leaves a timed-out transfer paused on the old speaker and pauses that speaker', async () => {
+    service = new SessionService({ now: () => now, castTransferTimeoutMs: 20 });
+    const hooks = castHooks();
+    hooks.castDevices.push(castDevice('cast-2'));
+    join('u', 'a');
+    await setQueue(['a'], 0);
+    expect(
+      (
+        await service.command('u', 'a', {
+          type: 'transfer',
+          target: { kind: 'cast', castId: 'cast-1' },
+        })
+      ).ok,
+    ).toBe(true);
+    now += 5_000;
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      if (args[3]?.castId === 'cast-2') await gate;
+      return onTarget(...args);
+    };
+
+    const result = await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-2' },
+    });
+
+    expect(result).toEqual({ ok: false, error: 'cast-unavailable' });
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(stateOf().playing).toBe(false);
+    expect(stateOf().positionSec).toBeCloseTo(5);
+    expect(hooks.controlCalls.at(-1)).toMatchObject({
+      castId: 'cast-1',
+      command: { type: 'pause' },
+    });
+
+    // The late attempt releases only the speaker it loaded, never the old one's session.
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(stateOf().playing).toBe(false);
+  });
+
+  it('releases a timed-out transfer when a later attempt to the same speaker fails and the late hook resolves', async () => {
+    service = new SessionService({ now: () => now, castTransferTimeoutMs: 20 });
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    let loads = 0;
+    hooks.onTarget = async (...args) => {
+      if (args[3] === null) return onTarget(...args);
+      loads += 1;
+      if (loads === 1) {
+        // Attempt A: abandoned by the timeout, its hook still pending.
+        await gate;
+        return onTarget(...args);
+      }
+      // Attempt B: fails before touching the speaker.
+      throw new Error('speaker-down');
+    };
+
+    const a = await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    expect(a).toEqual({ ok: false, error: 'cast-unavailable' });
+    const b = await service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    expect(b.ok).toBe(false);
+
+    // A's hook finally loads the speaker. Nothing owns it now: A must release it.
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hooks.targetCalls.at(-1)?.next).toBeNull();
+    expect(hooks.owner).toBeNull();
+    expect(stateOf().target).toBeNull();
+  });
+
+  it('reports a committed transfer as successful when a speaker reload hook throws synchronously', async () => {
+    const hooks = castHooks();
+    hooks.onState = () => {
+      throw new Error('receiver exploded');
+    };
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    // Cursor move during the transfer forces a structural reload through onState.
+    await setQueue(['a', 'b'], 1);
+    release();
+
+    expect(await pending).toEqual({ ok: true, revision: stateOf().revision });
+    expect(stateOf().target).toEqual({ kind: 'cast', castId: 'cast-1' });
+    expect(stateOf().cursor).toBe(1);
+  });
+
+  it('anchors a rebased transfer at the time it commits, after the hook latency', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const onTarget = hooks.onTarget.bind(hooks);
+    hooks.onTarget = async (...args) => {
+      started();
+      await gate;
+      return onTarget(...args);
+    };
+
+    const pending = service.command('u', 'a', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await hookStarted;
+    now += 2_000;
+    await setQueue(['a', 'b'], 1); // live playhead restarts at 0 at +2 s
+    now += 5_000; // the speaker answers 5 s later
+    release();
+
+    expect((await pending).ok).toBe(true);
+    expect(stateOf().cursor).toBe(1);
+    expect(stateOf().positionSec).toBeCloseTo(5);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -717,7 +1025,11 @@ describe('revisions and target reports', () => {
 
     report('b', 'tick', { positionSec: 99, entryId: 'a' });
     report('b', 'playing', { positionSec: 99, playing: false, entryId: 'a' });
-    report('b', 'native-skip', { entryId: 'b', positionSec: 99, playing: true });
+    report('b', 'native-skip', {
+      entryId: 'b',
+      positionSec: 99,
+      playing: true,
+    });
 
     expect(stateOf().revision).toBe(revision);
     expect(stateOf().cursor).toBe(0);
@@ -731,14 +1043,22 @@ describe('revisions and target reports', () => {
     await transferToDevice('a');
     const before = stateOf().revision;
 
-    report('a', 'native-skip', { entryId: 'b', positionSec: 40, playing: true });
+    report('a', 'native-skip', {
+      entryId: 'b',
+      positionSec: 40,
+      playing: true,
+    });
     expect(stateOf().cursor).toBe(1);
     expect(stateOf().positionSec).toBe(40);
     expect(stateOf().playing).toBe(true);
     expect(stateOf().revision).toBe(before + 1);
 
     const after = stateOf().revision;
-    report('a', 'native-skip', { entryId: 'vanished', positionSec: 12, playing: true });
+    report('a', 'native-skip', {
+      entryId: 'vanished',
+      positionSec: 12,
+      playing: true,
+    });
     expect(stateOf().cursor).toBe(1);
     expect(stateOf().revision).toBe(after);
   });
@@ -788,7 +1108,12 @@ describe('revisions and target reports', () => {
 
     await service.command('u', 'a', { type: 'setRepeat', repeat: 'off' });
     await service.command('u', 'a', { type: 'playIndex', index: 2 });
-    report('a', 'ended', { entryId: 'c', positionSec: 180, playing: true, durationSec: 200 });
+    report('a', 'ended', {
+      entryId: 'c',
+      positionSec: 180,
+      playing: true,
+      durationSec: 200,
+    });
     expect(stateOf().cursor).toBe(2);
     expect(stateOf().playing).toBe(false);
     expect(stateOf().positionSec).toBe(200);
@@ -841,7 +1166,10 @@ describe('queue commands', () => {
       tracks: [track('e1')],
       next: true,
     });
-    expect(enqueueDuplicate).toEqual({ ok: false, error: 'duplicate-entry-id' });
+    expect(enqueueDuplicate).toEqual({
+      ok: false,
+      error: 'duplicate-entry-id',
+    });
   });
 
   it('accepts entries with an empty artist or album (remote import metadata)', async () => {
@@ -867,27 +1195,39 @@ describe('queue commands', () => {
     await setQueue(['a', 'b'], 0);
     const revision = stateOf().revision;
 
-    expect(await service.command('u', 'a', { type: 'playEntry', entryId: 'nope' })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'playEntry', entryId: 'nope' }),
+    ).toEqual({
       ok: false,
       error: 'entry-not-found',
     });
-    expect(await service.command('u', 'a', { type: 'playIndex', index: 3 })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'playIndex', index: 3 }),
+    ).toEqual({
       ok: false,
       error: 'index-out-of-range',
     });
-    expect(await service.command('u', 'a', { type: 'remove', entryId: 'nope' })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'remove', entryId: 'nope' }),
+    ).toEqual({
       ok: false,
       error: 'entry-not-found',
     });
-    expect(await service.command('u', 'a', { type: 'move', from: 0, to: 9 })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'move', from: 0, to: 9 }),
+    ).toEqual({
       ok: false,
       error: 'index-out-of-range',
     });
-    expect(await service.command('u', 'a', { type: 'seek', positionSec: -1 })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'seek', positionSec: -1 }),
+    ).toEqual({
       ok: false,
       error: 'invalid-command',
     });
-    expect(await service.command('u', 'a', { type: 'setCastVolume', volume: 0.5 })).toEqual({
+    expect(
+      await service.command('u', 'a', { type: 'setCastVolume', volume: 0.5 }),
+    ).toEqual({
       ok: false,
       error: 'invalid-command',
     });
@@ -895,13 +1235,20 @@ describe('queue commands', () => {
       (
         await service.command('u', 'a', {
           type: 'transfer',
-          target: { kind: 'device', clientId: 'ghost', deviceId: 'device-ghost' },
+          target: {
+            kind: 'device',
+            clientId: 'ghost',
+            deviceId: 'device-ghost',
+          },
         })
       ).error,
     ).toBe('unknown-client');
     expect(stateOf().revision).toBe(revision);
 
-    const tooMany = Array.from({ length: SESSION_MAX_ENTRIES + 1 }, (_, index) => track(`m${index}`));
+    const tooMany = Array.from(
+      { length: SESSION_MAX_ENTRIES + 1 },
+      (_, index) => track(`m${index}`),
+    );
     expect(
       (
         await service.command('u', 'a', {
@@ -916,7 +1263,10 @@ describe('queue commands', () => {
 
     const tooLarge = Array.from({ length: SESSION_MAX_ENTRIES }, (_, index) =>
       track(`l${index}`, {
-        source: { site: 'youtube', url: `https://example.com/${'a'.repeat(2000)}${index}` },
+        source: {
+          site: 'youtube',
+          url: `https://example.com/${'a'.repeat(2000)}${index}`,
+        },
       }),
     );
     expect(
@@ -931,20 +1281,36 @@ describe('queue commands', () => {
       ).error,
     ).toBe('queue-too-large');
 
-    const tooManyEnqueue = Array.from({ length: 101 }, (_, index) => track(`q${index}`));
+    const tooManyEnqueue = Array.from({ length: 101 }, (_, index) =>
+      track(`q${index}`),
+    );
     expect(
-      (await service.command('u', 'a', { type: 'enqueue', tracks: tooManyEnqueue, next: true })).error,
+      (
+        await service.command('u', 'a', {
+          type: 'enqueue',
+          tracks: tooManyEnqueue,
+          next: true,
+        })
+      ).error,
     ).toBe('queue-too-large');
   });
 
   it('enqueues play-next at cursor + 1 and appends otherwise', async () => {
     join('u', 'a');
     await setQueue(['a', 'b', 'c'], 0);
-    await service.command('u', 'a', { type: 'enqueue', tracks: [track('next')], next: true });
+    await service.command('u', 'a', {
+      type: 'enqueue',
+      tracks: [track('next')],
+      next: true,
+    });
     expect(entryIds()).toEqual(['a', 'next', 'b', 'c']);
     expect(stateOf().cursor).toBe(0);
 
-    await service.command('u', 'a', { type: 'enqueue', tracks: [track('end')], next: false });
+    await service.command('u', 'a', {
+      type: 'enqueue',
+      tracks: [track('end')],
+      next: false,
+    });
     expect(entryIds()).toEqual(['a', 'next', 'b', 'c', 'end']);
   });
 
@@ -1010,7 +1376,9 @@ describe('queue commands', () => {
     await service.command('u', 'a', { type: 'setShuffle', shuffle: true });
     const shuffled = stateOf();
     expect(shuffled.shuffle).toBe(true);
-    expect([...shuffled.order.map((entry) => entry.entryId)].sort()).toEqual([...original].sort());
+    expect([...shuffled.order.map((entry) => entry.entryId)].sort()).toEqual(
+      [...original].sort(),
+    );
     expect(shuffled.order[shuffled.cursor]?.entryId).toBe(cursorEntry);
     expect(shuffled.baseOrderIds).toEqual(original);
 
@@ -1069,12 +1437,36 @@ describe('queue commands', () => {
     expect(invalid).toEqual({ ok: false, error: 'invalid-command' });
   });
 
+  it('keeps an already-shuffled setQueue order as given (no reshuffle)', async () => {
+    join('u', 'a');
+    const playOrder = [track('c'), track('a'), track('d'), track('b')];
+    const result = await service.command('u', 'a', {
+      type: 'setQueue',
+      order: playOrder,
+      cursor: 2,
+      autoplay: true,
+      shuffle: true,
+      shuffled: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(stateOf().shuffle).toBe(true);
+    expect(entryIds()).toEqual(['c', 'a', 'd', 'b']);
+    expect(stateOf().order[stateOf().cursor]?.entryId).toBe('d');
+    // No base given: the incoming play order becomes the restore base.
+    expect(stateOf().baseOrderIds).toEqual(['c', 'a', 'd', 'b']);
+  });
+
   it('clear empties a device target but keeps a cast target', async () => {
     join('u', 'a');
     await setQueue(['a', 'b'], 0);
     await transferToDevice('a');
     await service.command('u', 'a', { type: 'clear' });
-    expect(stateOf()).toMatchObject({ order: [], cursor: -1, playing: false, target: null });
+    expect(stateOf()).toMatchObject({
+      order: [],
+      cursor: -1,
+      playing: false,
+      target: null,
+    });
 
     const hooks = castHooks();
     await setQueue(['a', 'b'], 0);
@@ -1162,7 +1554,9 @@ describe('cast target operations', () => {
     expect(stateOf().castSeekRestarts).toBeUndefined();
 
     // A missing room is a no-op, not a crash.
-    expect(() => service.setCastSeekRestarts('nobody', 'cast-1', true)).not.toThrow();
+    expect(() =>
+      service.setCastSeekRestarts('nobody', 'cast-1', true),
+    ).not.toThrow();
   });
 
   it('forwards transport and volume commands to the cast target', async () => {
@@ -1192,7 +1586,9 @@ describe('cast target operations', () => {
 
     await service.command('u', 'a', { type: 'next' });
     expect(stateOf().cursor).toBe(1);
-    expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({ type: 'next' });
+    expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({
+      type: 'next',
+    });
   });
 
   it('forwards stop to the cast and reloads structural changes through onState', async () => {
@@ -1225,7 +1621,10 @@ describe('cast target operations', () => {
     expect(hooks.stateCalls).toHaveLength(1);
     const applied = hooks.stateCalls[0];
     expect(applied?.castId).toBe('cast-1');
-    expect(applied?.state.order.map((entry) => entry.entryId)).toEqual(['c', 'd']);
+    expect(applied?.state.order.map((entry) => entry.entryId)).toEqual([
+      'c',
+      'd',
+    ]);
   });
 
   it('castEnded advances, loads via onControl and propagates load failures', async () => {
@@ -1244,7 +1643,9 @@ describe('cast target operations', () => {
     expect(stateOf().playing).toBe(true);
     expect(stateOf().revision).toBe(before + 1);
     expect(stateOf().updatedBy).toBeNull();
-    expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({ type: 'play' });
+    expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({
+      type: 'play',
+    });
 
     await service.command('u', 'a', { type: 'playIndex', index: 2 });
     await service.castEnded('u', 'cast-1');
@@ -1369,7 +1770,10 @@ describe('devices list', () => {
 
     const joined = join('u', 'a');
     const revision = joined.snapshot.devicesRevision;
-    expect(joined.snapshot.devices.map((row) => row.id)).toEqual(['a', 'cast-1']);
+    expect(joined.snapshot.devices.map((row) => row.id)).toEqual([
+      'a',
+      'cast-1',
+    ]);
 
     // The same visible set must not bump again.
     expect(service.devices('u')).toHaveLength(2);
@@ -1378,7 +1782,11 @@ describe('devices list', () => {
     hooks.castDevices = [castDevice('cast-1'), castDevice('cast-2')];
     const next = service.touch('u', 'a', device('a'));
     expect(next.devicesRevision).toBe(revision + 1);
-    expect(next.devices.map((row) => row.id)).toEqual(['a', 'cast-1', 'cast-2']);
+    expect(next.devices.map((row) => row.id)).toEqual([
+      'a',
+      'cast-1',
+      'cast-2',
+    ]);
   });
 
   it('reports the target as online and stale through devices()', async () => {

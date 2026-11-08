@@ -316,8 +316,13 @@ export class SessionStore {
   private castUploadAbort: AbortController | null = null;
   /** A local publish is in flight; a second one must not start. */
   private publishing = false;
-  /** A publish request arrived mid-publish (a skip); checked once it finishes. */
-  private publishDirty = false;
+  /** A local seek was made while the hold was on; reported once it ends. */
+  private seekHeld = false;
+  /**
+   * Latest server state that arrived mid-publish. Not applied then: the echoes
+   * of this publish would rewind a skip. Checked once the publish finishes.
+   */
+  private pendingIncoming: SessionState | null = null;
   /** Automatic re-publishing is paused until this time after a failed publish. */
   private publishRetryAt = 0;
 
@@ -370,8 +375,9 @@ export class SessionStore {
       const isTarget = this.isTarget();
       const entryId = isTarget ? this.engineEntryId() : '';
       const status = this.engine.status();
-      if (!isTarget || this.applyingRemote) {
-        // Keep the baseline so applying a remote state cannot echo back.
+      if (!isTarget || this.applyingRemote || this.holdingEcho()) {
+        // Keep the baseline so applying a remote state, or a publish (whose
+        // queue the session does not mirror yet), cannot echo back.
         this.observedEntryId = entryId;
         this.observedStatus = status;
         return;
@@ -414,6 +420,7 @@ export class SessionStore {
       this.engine.position();
       const status = this.engine.status();
       if (!this.started || !this.isTarget() || this.applyingRemote) return;
+      if (this.holdingEcho()) return;
       if (status !== 'playing' || !this.engineEntryId()) return;
       this.report('tick');
     });
@@ -492,39 +499,112 @@ export class SessionStore {
    */
   async publishLocal(): Promise<boolean> {
     if (!this.port || !this.available()) return false;
-    if (this.publishing) {
-      // A skip made while publishing was not sent. Note it; the publish in
-      // flight is checked against the engine once it finishes.
-      this.publishDirty = true;
-      return false;
-    }
+    // A publish already in flight owns the queue. A skip made meanwhile is
+    // caught by the track check once it finishes, so nothing is queued here.
+    if (this.publishing) return false;
     if (!this.canPublish()) return false;
 
     this.publishing = true;
-    this.publishDirty = false;
+    this.pendingIncoming = null;
+    // Set when the second pass succeeded: its own echo supersedes held state.
+    let superseded = false;
+    // Track id of the last successful pass, or null.
+    let published: string | null = null;
     try {
-      let attempt = await this.publishQueue();
-      // Bounded: one more pass when the engine moved to another track mid-publish.
-      if (
-        attempt !== null &&
-        this.publishDirty &&
-        this.engine.current()?.id !== attempt
-      ) {
-        this.publishDirty = false;
-        attempt = await this.publishQueue();
+      published = await this.publishQueue();
+      // Bounded: one more pass when the engine left the published track
+      // mid-publish. Native skips (media keys) bypass PlayerStore, so only this
+      // comparison sees them. Echoes never trigger a pass. The first pass may
+      // already have transferred the target to this client.
+      if (published !== null && this.engine.current()?.id !== published) {
+        published = await this.publishQueue();
+        superseded = published !== null;
       }
-      return attempt !== null;
+      return published !== null;
     } finally {
       this.publishing = false;
-      this.publishDirty = false;
+      const pending = this.pendingIncoming;
+      this.pendingIncoming = null;
+      // Replayed before the held state is settled: applying that state can
+      // change the engine's status, which would hide what the hold swallowed.
+      this.flushHeldSeek();
+      this.replayHeldEvents(published, superseded);
+      if (pending) this.settlePendingIncoming(pending, superseded);
     }
   }
 
-  /** Whether a local queue may be published now (no target yet, playing here). */
+  /** Report a local seek made while the hold was on, now that it is over. */
+  private flushHeldSeek(): void {
+    if (!this.seekHeld) return;
+    this.seekHeld = false;
+    if (this.isTarget()) this.emitReport('tick', undefined, true);
+  }
+
+  /**
+   * Engine events swallowed by the hold, replayed once it ends: a skip made
+   * during the second pass (not published, so the server still has the old
+   * cursor), and a terminal status. Baselines followed the engine during the
+   * hold, so the observer would not report them.
+   */
+  private replayHeldEvents(published: string | null, superseded: boolean): void {
+    if (!this.isTarget()) return;
+    if (
+      superseded &&
+      published !== null &&
+      this.engine.current()?.id !== published &&
+      this.engineEntryId()
+    ) {
+      this.emitReport('native-skip');
+    }
+    // A state applied by the hold owns the engine: leave its status alone.
+    if (this.applyingRemote) return;
+    const status = this.engine.status();
+    if (status === 'ended') this.emitReport('ended');
+    else if (status === 'error') this.emitReport('playing');
+  }
+
+  /**
+   * Apply the server state that arrived mid-publish, once the publish is over.
+   * Runs whenever this client is the target, even if the publish failed: the
+   * server is authoritative then. A state for another track is stale only when
+   * a second pass succeeded (its own echo follows); otherwise it is a remote
+   * command made during the publish and is applied. A playing state while the
+   * engine is paused is applied paused, and the server is told to pause.
+   */
+  private settlePendingIncoming(state: SessionState, superseded: boolean): void {
+    if (!this.isTarget()) return;
+    const cursorId =
+      state.cursor >= 0 ? state.order[state.cursor]?.id : undefined;
+    if (superseded && cursorId !== this.engine.current()?.id) return;
+    // An emptied queue (a failed publish's discard) must not stop playback
+    // that is still running here.
+    if (state.cursor < 0 && this.localPlaybackActive()) return;
+    if (state.playing && !this.localPlaybackActive()) {
+      void this.command({ type: 'pause' }).then((paused) => {
+        if (!paused.ok) {
+          this.recordRefusal(paused.error ?? 'Could not pause playback.');
+        }
+      });
+      this.scheduleApply({ ...state, playing: false });
+      return;
+    }
+    this.scheduleApply(state);
+  }
+
+  /**
+   * True while engine changes are not this client's own observations: a publish
+   * is in flight, or a server state is held until it ends. Reports are
+   * suppressed then, and the observation baselines only follow the engine.
+   */
+  private holdingEcho(): boolean {
+    return this.publishing || this.pendingIncoming !== null;
+  }
+
+  /** Whether a local queue may be published now (no other target, playing here). */
   private canPublish(): boolean {
     return (
       this.port?.connection() === 'open' &&
-      !this.target() &&
+      (!this.target() || this.isTarget()) &&
       this.localPlaybackActive() &&
       !!this.deviceId() &&
       this.engine.current() !== null
@@ -539,19 +619,34 @@ export class SessionStore {
     if (!this.canPublish()) return null;
     const current = this.engine.current();
     if (!current) return null;
-    const entries = [current, ...this.engine.upcoming()].map((track) =>
-      toSessionTrack(track, newEntryId()),
-    );
+    // The queue indices keep the natural order: upcoming tracks are in play
+    // order, which differs from the queue order while shuffle is on.
+    const planned = [
+      { track: current, queueIndex: this.engine.currentIndex() },
+      ...this.engine.upcomingEntries(),
+    ].map(({ track, queueIndex }) => ({
+      queueIndex,
+      entry: toSessionTrack(track, newEntryId()),
+    }));
+    const entries = planned.map((item) => item.entry);
     // Autoplay reads the engine when each send happens, so a pause during the
-    // publish is not overridden by a stale `true`. `shuffle` stays false: the
-    // order above already is the play order, and `true` would make the server
-    // reshuffle Up Next. The engine keeps its own shuffle state.
+    // publish is not overridden by a stale `true`. The order above already is
+    // the play order: with shuffle on, `shuffled` tells the server to keep that
+    // order, and `baseOrderIds` (the same entries in queue order) lets shuffle
+    // off restore the natural order.
+    const shuffle = this.engine.shuffle();
+    const baseOrderIds = shuffle
+      ? [...planned]
+          .sort((a, b) => a.queueIndex - b.queueIndex)
+          .map((item) => item.entry.entryId)
+      : undefined;
     const setQueue = (): SessionCommand => ({
       type: 'setQueue',
       order: entries,
       cursor: 0,
       autoplay: this.localPlaybackActive(),
-      shuffle: false,
+      shuffle,
+      ...(shuffle && baseOrderIds ? { shuffled: true, baseOrderIds } : {}),
     });
     let result = await this.command(setQueue());
     if (!result.ok) {
@@ -764,7 +859,7 @@ export class SessionStore {
     >,
   ): void {
     if (!this.started || !this.port || !this.isTarget()) return;
-    if (this.applyingRemote) return;
+    if (this.applyingRemote || this.holdingEcho()) return;
     this.emitReport(reason, extra);
   }
 
@@ -772,11 +867,18 @@ export class SessionStore {
    * Report a seek this client just made, bypassing the tick throttle and the
    * playing check: the server must learn the new anchor at once, or its next
    * tick still carries the old position and drags the engine back to it.
+   * While a publish or held echo is pending the seek is recorded and sent when
+   * the hold ends: the grace window must cover it, or a stale tick drags the
+   * engine back.
    */
   reportSeek(): void {
     if (!this.started || !this.port || !this.isTarget()) return;
     if (this.applyingRemote) return;
     this.lastLocalSeekAt = Date.now();
+    if (this.holdingEcho()) {
+      this.seekHeld = true;
+      return;
+    }
     this.emitReport('tick', undefined, true);
   }
 
@@ -942,6 +1044,7 @@ export class SessionStore {
     this.targetActive = false;
     this.applyingRemote = false;
     this.applyPending = null;
+    this.pendingIncoming = null;
     this.needsGesture.set(false);
     // Local-only playback must survive a session that never owned the engine.
     if (wasActive && !options.keepPlaying) void this.engine.pause();
@@ -1027,6 +1130,9 @@ export class SessionStore {
     const ownerGone =
       next === null || (next.target === null && next.order.length > 0);
     if (!nowTarget && ownerGone && this.localPlaybackActive()) {
+      // A publish in flight already re-establishes the target. Its own echo
+      // (target null) must not restart it or hold a second publish.
+      if (this.publishing) return;
       this.stopTargetPlayback({ keepPlaying: true });
       this.keepLocalPlayback();
       return;
@@ -1037,7 +1143,8 @@ export class SessionStore {
     }
     if (nowTarget) {
       this.targetActive = true;
-      this.scheduleApply(next);
+      if (this.publishing) this.pendingIncoming = next;
+      else this.scheduleApply(next);
     } else if (wasTarget) {
       // This client stopped being the target: stop owning the speakers.
       this.stopTargetPlayback();
@@ -1251,9 +1358,21 @@ export class SessionStore {
 
   // ---- Target: reports ----------------------------------------------------
 
+  /**
+   * Session entry of the engine's current track. The engine queue mirrors the
+   * session order only after an applied state; a publish sends just the
+   * current and upcoming tracks, so the index can point elsewhere. The index
+   * is used when it names the current track, otherwise the track id is matched.
+   */
   private engineEntryId(): string {
+    const state = this.session();
     const index = this.engine.currentIndex();
-    return index >= 0 ? (this.entryIdAt(index) ?? '') : '';
+    if (!state || index < 0) return '';
+    const current = this.engine.current();
+    const atIndex = state.order[index];
+    if (atIndex && atIndex.id === current?.id) return atIndex.entryId;
+    if (!current) return '';
+    return state.order.find((entry) => entry.id === current.id)?.entryId ?? '';
   }
 
   private emitReport(

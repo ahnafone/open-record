@@ -22,6 +22,7 @@ import {
   type SessionServerMessage,
   type SessionSnapshot,
   type SessionState,
+  type SessionTarget,
   type SessionTrack,
 } from '@open-record/models';
 
@@ -50,13 +51,23 @@ export interface SessionCastHooks {
     opts?: { force?: boolean },
   ): Promise<void>;
   /** Transport/volume commands for an active cast target. */
-  onControl(userId: string, castId: string, command: SessionCommand): Promise<void>;
+  onControl(
+    userId: string,
+    castId: string,
+    command: SessionCommand,
+  ): Promise<void>;
   /** Structural command applied while a cast is targeted (reload/stop). */
-  onState?(userId: string, castId: string, state: SessionState): void | Promise<void>;
+  onState?(
+    userId: string,
+    castId: string,
+    state: SessionState,
+  ): void | Promise<void>;
 }
 
 export class CastBusyError extends Error {
-  constructor(readonly owner: { userId: string; deviceId: string; deviceName: string }) {
+  constructor(
+    readonly owner: { userId: string; deviceId: string; deviceName: string },
+  ) {
     super('cast-busy');
     this.name = 'CastBusyError';
   }
@@ -71,6 +82,39 @@ const PRESENCE_REMOVE_MS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MIN = 120;
 /** A cast transfer that has not finished by then is abandoned (see `boundedTransferToCast`). */
 const CAST_TRANSFER_TIMEOUT_MS = 30_000;
+/** Speaker position drift tolerated after a transfer before it is re-seeked. */
+const TRANSFER_SEEK_TOLERANCE_SEC = 2;
+
+/**
+ * One cast transfer attempt. `abandoned`: the timeout gave up on it. `committed`:
+ * the session now points at the speaker, so the attempt can no longer fail.
+ */
+interface TransferTicket {
+  abandoned: boolean;
+  committed: boolean;
+}
+
+/**
+ * Transfer attempts currently running against one speaker, abandoned ones
+ * included (their hook may still be pending). `stranded` is set when an
+ * abandoned attempt finished while another was still running: the last attempt
+ * to finish releases the speaker if the session is not on it.
+ */
+interface CastAttempts {
+  inFlight: number;
+  stranded: { requester: SessionDevice } | null;
+}
+/**
+ * Runs a cast hook and resolves once it settles. A synchronous throw becomes a
+ * rejection (caught here) instead of escaping the caller's critical section.
+ */
+function settle(call: () => unknown): Promise<void> {
+  return new Promise<unknown>((resolve) => resolve(call())).then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
 const DEFAULT_TARGET_STALE_MIN = 30;
 /**
  * A duplicate `ended` for the same entry arrives back-to-back with the first
@@ -126,7 +170,9 @@ function defaultState(now: number): SessionState {
 /** Identity of the playback target: a cast or a device, by its id. */
 function targetKey(target: SessionState['target'] | undefined): string {
   if (!target) return 'none';
-  return target.kind === 'cast' ? `cast:${target.castId}` : `device:${target.clientId}`;
+  return target.kind === 'cast'
+    ? `cast:${target.castId}`
+    : `device:${target.clientId}`;
 }
 
 function cloneState(state: SessionState): SessionState {
@@ -166,14 +212,19 @@ function isInteger(value: unknown): value is number {
 }
 
 function isText(value: unknown, maxLength = MAX_TEXT_LEN): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+  return (
+    typeof value === 'string' && value.length > 0 && value.length <= maxLength
+  );
 }
 
 /**
  * Any string within the cap, including `''`: remote/import metadata can have an
  * empty artist or album, and §1.7 only caps these fields.
  */
-function isCappedText(value: unknown, maxLength = MAX_TEXT_LEN): value is string {
+function isCappedText(
+  value: unknown,
+  maxLength = MAX_TEXT_LEN,
+): value is string {
   return typeof value === 'string' && value.length <= maxLength;
 }
 
@@ -187,14 +238,27 @@ function isUrl(value: unknown): value is string {
 
 function isSessionTrack(value: unknown): value is SessionTrack {
   if (!isRecord(value)) return false;
-  if (!isId(value['entryId']) || !isId(value['id']) || !isId(value['providerId'])) return false;
-  if (!isCappedText(value['title']) || !isCappedText(value['artist'])) return false;
-  if (value['album'] !== undefined && !isCappedText(value['album'])) return false;
-  if (value['durationSec'] !== undefined && !isNonNegativeFinite(value['durationSec'])) return false;
+  if (
+    !isId(value['entryId']) ||
+    !isId(value['id']) ||
+    !isId(value['providerId'])
+  )
+    return false;
+  if (!isCappedText(value['title']) || !isCappedText(value['artist']))
+    return false;
+  if (value['album'] !== undefined && !isCappedText(value['album']))
+    return false;
+  if (
+    value['durationSec'] !== undefined &&
+    !isNonNegativeFinite(value['durationSec'])
+  )
+    return false;
   if (value['artUrl'] !== undefined && !isUrl(value['artUrl'])) return false;
-  if (value['catalogFile'] !== undefined && !isId(value['catalogFile'])) return false;
+  if (value['catalogFile'] !== undefined && !isId(value['catalogFile']))
+    return false;
   if (value['uploadId'] !== undefined && !isId(value['uploadId'])) return false;
-  if (value['local'] !== undefined && typeof value['local'] !== 'boolean') return false;
+  if (value['local'] !== undefined && typeof value['local'] !== 'boolean')
+    return false;
   if (value['source'] !== undefined) {
     const source = value['source'];
     if (!isRecord(source)) return false;
@@ -208,9 +272,12 @@ function isSessionTrackArray(value: unknown): value is SessionTrack[] {
   return Array.isArray(value) && value.every(isSessionTrack);
 }
 
-function isSessionTargetPayload(value: unknown): value is Extract<SessionCommand, { type: 'transfer' }>['target'] {
+function isSessionTargetPayload(
+  value: unknown,
+): value is Extract<SessionCommand, { type: 'transfer' }>['target'] {
   if (!isRecord(value)) return false;
-  if (value['kind'] === 'device') return isId(value['clientId']) && isId(value['deviceId']);
+  if (value['kind'] === 'device')
+    return isId(value['clientId']) && isId(value['deviceId']);
   if (value['kind'] === 'cast') return isId(value['castId']);
   return false;
 }
@@ -246,20 +313,35 @@ function isSessionCommand(value: unknown): value is SessionCommand {
         isInteger(value['cursor']) &&
         typeof value['autoplay'] === 'boolean' &&
         typeof value['shuffle'] === 'boolean' &&
-        (value['baseOrderIds'] === undefined || isBaseOrderIds(value['baseOrderIds']))
+        (value['baseOrderIds'] === undefined ||
+          isBaseOrderIds(value['baseOrderIds'])) &&
+        (value['shuffled'] === undefined ||
+          typeof value['shuffled'] === 'boolean')
       );
     case 'enqueue':
-      return isSessionTrackArray(value['tracks']) && typeof value['next'] === 'boolean';
+      return (
+        isSessionTrackArray(value['tracks']) &&
+        typeof value['next'] === 'boolean'
+      );
     case 'remove':
       return isId(value['entryId']);
     case 'move':
-      return isInteger(value['from']) && value['from'] >= 0 && isInteger(value['to']) && value['to'] >= 0;
+      return (
+        isInteger(value['from']) &&
+        value['from'] >= 0 &&
+        isInteger(value['to']) &&
+        value['to'] >= 0
+      );
     case 'replace':
       return isId(value['entryId']) && isSessionTrack(value['track']);
     case 'setShuffle':
       return typeof value['shuffle'] === 'boolean';
     case 'setRepeat':
-      return value['repeat'] === 'off' || value['repeat'] === 'all' || value['repeat'] === 'one';
+      return (
+        value['repeat'] === 'off' ||
+        value['repeat'] === 'all' ||
+        value['repeat'] === 'one'
+      );
     case 'transfer':
       return isSessionTargetPayload(value['target']);
     case 'takeOver':
@@ -275,13 +357,26 @@ function isSessionReport(value: unknown): value is SessionReportMessage {
   if (!isRecord(value)) return false;
   if (value['type'] !== 'report') return false;
   const reason = value['reason'];
-  if (reason !== 'tick' && reason !== 'playing' && reason !== 'ended' && reason !== 'native-skip') {
+  if (
+    reason !== 'tick' &&
+    reason !== 'playing' &&
+    reason !== 'ended' &&
+    reason !== 'native-skip'
+  ) {
     return false;
   }
-  if (typeof value['entryId'] !== 'string' || value['entryId'].length > MAX_ENTRY_ID_LEN) return false;
+  if (
+    typeof value['entryId'] !== 'string' ||
+    value['entryId'].length > MAX_ENTRY_ID_LEN
+  )
+    return false;
   if (!isNonNegativeFinite(value['positionSec'])) return false;
   if (typeof value['playing'] !== 'boolean') return false;
-  if (value['durationSec'] !== undefined && !isNonNegativeFinite(value['durationSec'])) return false;
+  if (
+    value['durationSec'] !== undefined &&
+    !isNonNegativeFinite(value['durationSec'])
+  )
+    return false;
   return true;
 }
 
@@ -310,7 +405,10 @@ function hasDuplicateIds(order: readonly SessionTrack[]): boolean {
   return false;
 }
 
-function isPermutationOfOrder(ids: readonly string[], order: readonly SessionTrack[]): boolean {
+function isPermutationOfOrder(
+  ids: readonly string[],
+  order: readonly SessionTrack[],
+): boolean {
   if (ids.length !== order.length) return false;
   const available = new Set(order.map((entry) => entry.entryId));
   if (available.size !== ids.length) return false;
@@ -342,15 +440,18 @@ export class SessionService {
   /** Per-user tail of cast transfers: transfers for one user run one at a time. */
   private readonly castTransfers = new Map<string, Promise<unknown>>();
   /** Newest transfer attempt per cast: decides which attempt may release a speaker. */
-  private readonly castAttempts = new Map<string, { abandoned: boolean }>();
+  private readonly castAttempts = new Map<string, CastAttempts>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: SessionServiceOptions = {}) {
     this.nowFn = opts.now ?? Date.now;
-    this.idleTimeoutMs = (opts.idleTimeoutMin ?? DEFAULT_IDLE_TIMEOUT_MIN) * 60_000;
-    this.targetStaleMs = (opts.targetStaleMin ?? DEFAULT_TARGET_STALE_MIN) * 60_000;
+    this.idleTimeoutMs =
+      (opts.idleTimeoutMin ?? DEFAULT_IDLE_TIMEOUT_MIN) * 60_000;
+    this.targetStaleMs =
+      (opts.targetStaleMin ?? DEFAULT_TARGET_STALE_MIN) * 60_000;
     this.targetStaleAfterMs = opts.targetStaleAfterMs ?? TARGET_STALE_AFTER_MS;
-    this.castTransferTimeoutMs = opts.castTransferTimeoutMs ?? CAST_TRANSFER_TIMEOUT_MS;
+    this.castTransferTimeoutMs =
+      opts.castTransferTimeoutMs ?? CAST_TRANSFER_TIMEOUT_MS;
   }
 
   /** Set by T5.6 once CastService exists. */
@@ -383,7 +484,11 @@ export class SessionService {
     (this.timer as { unref?: () => void }).unref?.();
   }
 
-  join(userId: string, conn: SessionConnection, device: SessionDevice): SessionSnapshot {
+  join(
+    userId: string,
+    conn: SessionConnection,
+    device: SessionDevice,
+  ): SessionSnapshot {
     if (device.id !== conn.clientId) throw new Error('invalid-device');
     const now = this.nowFn();
     const room = this.roomFor(userId, now);
@@ -429,7 +534,11 @@ export class SessionService {
   }
 
   /** REST polling: upsert the client/device, refresh presence, return the snapshot. */
-  touch(userId: string, clientId: string, device: SessionDevice): SessionSnapshot {
+  touch(
+    userId: string,
+    clientId: string,
+    device: SessionDevice,
+  ): SessionSnapshot {
     const now = this.nowFn();
     const room = this.roomFor(userId, now);
     const previous = room.devices.get(clientId);
@@ -454,13 +563,22 @@ export class SessionService {
     return this.snapshotFor(room, clientId, now, devices);
   }
 
-  async command(userId: string, clientId: string, command: SessionCommand): Promise<CommandResult> {
+  async command(
+    userId: string,
+    clientId: string,
+    command: SessionCommand,
+  ): Promise<CommandResult> {
     const room = this.rooms.get(userId);
     const now = this.nowFn();
-    if (!room || !room.devices.has(clientId) || !this.isOnline(room, clientId, now)) {
+    if (
+      !room ||
+      !room.devices.has(clientId) ||
+      !this.isOnline(room, clientId, now)
+    ) {
       return { ok: false, error: 'unknown-client' };
     }
-    if (!isSessionCommand(command)) return { ok: false, error: 'invalid-command' };
+    if (!isSessionCommand(command))
+      return { ok: false, error: 'invalid-command' };
 
     const state = room.session;
     const target = state.target;
@@ -481,8 +599,10 @@ export class SessionService {
     const staleCleared = this.noteContact(room, clientId, now);
     room.lastActivity = now;
 
-    if (command.type === 'transfer') return this.transfer(userId, room, clientId, command.target, now);
-    if (command.type === 'takeOver') return this.takeOver(userId, room, clientId, command.castId);
+    if (command.type === 'transfer')
+      return this.transfer(userId, room, clientId, command.target, now);
+    if (command.type === 'takeOver')
+      return this.takeOver(userId, room, clientId, command.castId);
 
     let mutated = false;
     let forward: SessionCommand | null = null;
@@ -543,7 +663,11 @@ export class SessionService {
       case 'previous': {
         const length = state.order.length;
         if (length === 0) break;
-        const previous = previousCursor(state.cursor, length, anchoredPosition(state, now));
+        const previous = previousCursor(
+          state.cursor,
+          length,
+          anchoredPosition(state, now),
+        );
         state.cursor = previous.cursor;
         state.positionSec = 0;
         state.playing = true;
@@ -558,7 +682,9 @@ export class SessionService {
         }
         const duration = state.order[state.cursor]?.durationSec;
         const position =
-          duration && duration > 0 ? Math.min(command.positionSec, duration) : command.positionSec;
+          duration && duration > 0
+            ? Math.min(command.positionSec, duration)
+            : command.positionSec;
         state.positionSec = position;
         room.lastEndedEntryId = null;
         mutated = true;
@@ -566,7 +692,9 @@ export class SessionService {
         break;
       }
       case 'playEntry': {
-        const index = state.order.findIndex((entry) => entry.entryId === command.entryId);
+        const index = state.order.findIndex(
+          (entry) => entry.entryId === command.entryId,
+        );
         if (index < 0) return { ok: false, error: 'entry-not-found' };
         state.cursor = index;
         state.positionSec = 0;
@@ -576,7 +704,8 @@ export class SessionService {
         break;
       }
       case 'playIndex': {
-        if (command.index >= state.order.length) return { ok: false, error: 'index-out-of-range' };
+        if (command.index >= state.order.length)
+          return { ok: false, error: 'index-out-of-range' };
         state.cursor = command.index;
         state.positionSec = 0;
         state.playing = true;
@@ -586,11 +715,19 @@ export class SessionService {
       }
       case 'setQueue': {
         const order = command.order.map((entry) => ({ ...entry }));
-        if (hasDuplicateIds(order)) return { ok: false, error: 'duplicate-entry-id' };
-        if (order.length > SESSION_MAX_ENTRIES || orderByteLength(order) > SESSION_MAX_ORDER_BYTES) {
+        if (hasDuplicateIds(order))
+          return { ok: false, error: 'duplicate-entry-id' };
+        if (
+          order.length > SESSION_MAX_ENTRIES ||
+          orderByteLength(order) > SESSION_MAX_ORDER_BYTES
+        ) {
           return { ok: false, error: 'queue-too-large' };
         }
-        if (order.length === 0 && command.baseOrderIds && command.baseOrderIds.length > 0) {
+        if (
+          order.length === 0 &&
+          command.baseOrderIds &&
+          command.baseOrderIds.length > 0
+        ) {
           return { ok: false, error: 'invalid-command' };
         }
         const clampedCursor = clampCursor(order.length, command.cursor);
@@ -605,12 +742,17 @@ export class SessionService {
             if (!isPermutationOfOrder(command.baseOrderIds, order)) {
               return { ok: false, error: 'invalid-command' };
             }
-            baseOrderIds = order.length > 0 ? [...command.baseOrderIds] : undefined;
+            baseOrderIds =
+              order.length > 0 ? [...command.baseOrderIds] : undefined;
           } else {
             // The incoming order is the natural order to restore later.
-            baseOrderIds = order.length > 0 ? order.map((entry) => entry.entryId) : undefined;
+            baseOrderIds =
+              order.length > 0
+                ? order.map((entry) => entry.entryId)
+                : undefined;
           }
-          playOrder = shuffled(order);
+          // `shuffled`: the client already sent play order; keep it as given.
+          if (!command.shuffled) playOrder = shuffled(order);
         }
         state.order = playOrder;
         state.shuffle = command.shuffle;
@@ -627,32 +769,42 @@ export class SessionService {
         break;
       }
       case 'enqueue': {
-        if (command.tracks.length === 0) return { ok: false, error: 'invalid-command' };
-        if (command.tracks.length > MAX_ENQUEUE_TRACKS) return { ok: false, error: 'queue-too-large' };
+        if (command.tracks.length === 0)
+          return { ok: false, error: 'invalid-command' };
+        if (command.tracks.length > MAX_ENQUEUE_TRACKS)
+          return { ok: false, error: 'queue-too-large' };
         const additions = command.tracks.map((entry) => ({ ...entry }));
         if (hasDuplicateIds([...state.order, ...additions])) {
           return { ok: false, error: 'duplicate-entry-id' };
         }
         if (
           state.order.length + additions.length > SESSION_MAX_ENTRIES ||
-          orderByteLength([...state.order, ...additions]) > SESSION_MAX_ORDER_BYTES
+          orderByteLength([...state.order, ...additions]) >
+            SESSION_MAX_ORDER_BYTES
         ) {
           return { ok: false, error: 'queue-too-large' };
         }
         this.freezePosition(state, now);
-        const at = command.next ? Math.max(0, state.cursor + 1) : state.order.length;
+        const at = command.next
+          ? Math.max(0, state.cursor + 1)
+          : state.order.length;
         const baseBefore = state.baseOrderIds
           ? [...state.baseOrderIds]
           : state.order.map((entry) => entry.entryId);
         state.order.splice(at, 0, ...additions);
         if (state.shuffle) {
-          state.baseOrderIds = [...baseBefore, ...additions.map((entry) => entry.entryId)];
+          state.baseOrderIds = [
+            ...baseBefore,
+            ...additions.map((entry) => entry.entryId),
+          ];
         }
         mutated = true;
         break;
       }
       case 'remove': {
-        const index = state.order.findIndex((entry) => entry.entryId === command.entryId);
+        const index = state.order.findIndex(
+          (entry) => entry.entryId === command.entryId,
+        );
         if (index < 0) return { ok: false, error: 'entry-not-found' };
         this.freezePosition(state, now);
         const length = state.order.length;
@@ -682,14 +834,19 @@ export class SessionService {
           if (index < state.cursor) state.cursor -= 1;
         }
         if (state.unavailable) {
-          const filtered = state.unavailable.filter((entryId) => entryId !== command.entryId);
+          const filtered = state.unavailable.filter(
+            (entryId) => entryId !== command.entryId,
+          );
           state.unavailable = filtered.length > 0 ? filtered : undefined;
         }
         if (state.baseOrderIds) {
-          const filtered = state.baseOrderIds.filter((entryId) => entryId !== command.entryId);
+          const filtered = state.baseOrderIds.filter(
+            (entryId) => entryId !== command.entryId,
+          );
           state.baseOrderIds = filtered.length > 0 ? filtered : undefined;
         }
-        if (state.cursor < 0 || !state.order[state.cursor]) state.positionSec = 0;
+        if (state.cursor < 0 || !state.order[state.cursor])
+          state.positionSec = 0;
         mutated = true;
         break;
       }
@@ -705,20 +862,26 @@ export class SessionService {
           if (!moved) return { ok: false, error: 'index-out-of-range' };
           state.order.splice(command.to, 0, moved);
           if (currentEntryId) {
-            state.cursor = state.order.findIndex((entry) => entry.entryId === currentEntryId);
+            state.cursor = state.order.findIndex(
+              (entry) => entry.entryId === currentEntryId,
+            );
           }
           mutated = true;
         }
         break;
       }
       case 'replace': {
-        const index = state.order.findIndex((entry) => entry.entryId === command.entryId);
+        const index = state.order.findIndex(
+          (entry) => entry.entryId === command.entryId,
+        );
         if (index < 0) return { ok: false, error: 'entry-not-found' };
         this.freezePosition(state, now);
         // Queue identity is the entryId; the command replaces the track on it.
         state.order[index] = { ...command.track, entryId: command.entryId };
         if (state.unavailable) {
-          const filtered = state.unavailable.filter((entryId) => entryId !== command.entryId);
+          const filtered = state.unavailable.filter(
+            (entryId) => entryId !== command.entryId,
+          );
           state.unavailable = filtered.length > 0 ? filtered : undefined;
         }
         mutated = true;
@@ -733,7 +896,9 @@ export class SessionService {
           state.order = shuffled(state.order);
           state.shuffle = true;
         } else {
-          const byId = new Map(state.order.map((entry) => [entry.entryId, entry]));
+          const byId = new Map(
+            state.order.map((entry) => [entry.entryId, entry]),
+          );
           const restored: SessionTrack[] = [];
           for (const entryId of state.baseOrderIds ?? []) {
             const entry = byId.get(entryId);
@@ -765,7 +930,8 @@ export class SessionService {
         break;
       }
       case 'setCastVolume': {
-        if (state.target?.kind !== 'cast') return { ok: false, error: 'invalid-command' };
+        if (state.target?.kind !== 'cast')
+          return { ok: false, error: 'invalid-command' };
         this.freezePosition(state, now);
         state.castVolume = command.volume;
         mutated = true;
@@ -865,7 +1031,10 @@ export class SessionService {
           this.commitStaleClear(room, now, staleCleared); // vanished / out of order
           return;
         }
-        if (room.lastEndedEntryId === report.entryId && now - room.lastEndedAt < ENDED_DEDUPE_MS) {
+        if (
+          room.lastEndedEntryId === report.entryId &&
+          now - room.lastEndedAt < ENDED_DEDUPE_MS
+        ) {
           this.commitStaleClear(room, now, staleCleared); // the same end echoed twice
           return;
         }
@@ -883,7 +1052,8 @@ export class SessionService {
           state.playing = true;
         } else {
           // Repeat off at the end: stop on the track's duration.
-          const duration = report.durationSec ?? current.durationSec ?? report.positionSec;
+          const duration =
+            report.durationSec ?? current.durationSec ?? report.positionSec;
           state.positionSec = duration;
           state.playing = false;
         }
@@ -899,7 +1069,9 @@ export class SessionService {
       case 'native-skip': {
         // Device targets only; a cast advances through CastService.
         if (target.kind !== 'device') return;
-        const index = state.order.findIndex((entry) => entry.entryId === report.entryId);
+        const index = state.order.findIndex(
+          (entry) => entry.entryId === report.entryId,
+        );
         if (index < 0) {
           this.commitStaleClear(room, now, staleCleared); // entry vanished
           return;
@@ -1022,7 +1194,8 @@ export class SessionService {
     // Phase 5's CastService refines the load path (it owns the queue/plan). The
     // call is made even when repeat-off ends playback so CastService can tear
     // the receiver down; its rejection is the caller's ack.
-    if (this.castHooks) await this.castHooks.onControl(userId, castId, { type: 'play' });
+    if (this.castHooks)
+      await this.castHooks.onControl(userId, castId, { type: 'play' });
   }
 
   sweep(now: number): void {
@@ -1031,7 +1204,8 @@ export class SessionService {
       for (const [clientId, entry] of room.devices) {
         if (this.isTargetClient(room, clientId)) continue;
         if (this.hasConnection(room, clientId)) continue;
-        if (now - entry.lastSeenAt > PRESENCE_REMOVE_MS) room.devices.delete(clientId);
+        if (now - entry.lastSeenAt > PRESENCE_REMOVE_MS)
+          room.devices.delete(clientId);
       }
 
       const target = room.session.target;
@@ -1043,7 +1217,8 @@ export class SessionService {
           const state = room.session;
           const duration = state.order[state.cursor]?.durationSec;
           const position = anchoredPosition(state, now);
-          state.positionSec = duration && duration > 0 ? Math.min(position, duration) : position;
+          state.positionSec =
+            duration && duration > 0 ? Math.min(position, duration) : position;
           state.playing = false;
           state.target = null;
           delete state.targetStale;
@@ -1052,7 +1227,10 @@ export class SessionService {
           state.updatedAt = now;
           room.lastActivity = now;
           this.broadcast(room, { type: 'state', session: state });
-        } else if (silence >= this.targetStaleAfterMs && room.session.targetStale !== true) {
+        } else if (
+          silence >= this.targetStaleAfterMs &&
+          room.session.targetStale !== true
+        ) {
           const state = room.session;
           state.targetStale = true;
           state.positionSec = anchoredPosition(state, now);
@@ -1082,7 +1260,8 @@ export class SessionService {
       this.timer = null;
     }
     for (const room of this.rooms.values()) {
-      for (const connection of room.connections.values()) this.closeQuietly(connection);
+      for (const connection of room.connections.values())
+        this.closeQuietly(connection);
     }
     this.rooms.clear();
   }
@@ -1118,12 +1297,18 @@ export class SessionService {
     now: number,
   ): Promise<CommandResult> {
     if (target.kind === 'device') {
-      if (!room.devices.has(target.clientId) || !this.isOnline(room, target.clientId, now)) {
+      if (
+        !room.devices.has(target.clientId) ||
+        !this.isOnline(room, target.clientId, now)
+      ) {
         return { ok: false, error: 'unknown-client' };
       }
       const device = room.devices.get(target.clientId);
       if (!device) return { ok: false, error: 'unknown-client' };
-      if (room.session.target?.kind === 'device' && room.session.target.clientId === target.clientId) {
+      if (
+        room.session.target?.kind === 'device' &&
+        room.session.target.clientId === target.clientId
+      ) {
         if (room.session.targetStale) {
           this.freezePosition(room.session, now);
           delete room.session.targetStale;
@@ -1135,19 +1320,30 @@ export class SessionService {
       // Pausing the previous target: a cast speaker must be stopped explicitly;
       // a device target has no separate playback to stop.
       const previousCastId =
-        room.session.target?.kind === 'cast' ? room.session.target.castId : null;
+        room.session.target?.kind === 'cast'
+          ? room.session.target.castId
+          : null;
       if (previousCastId && this.castHooks) {
         const requester = this.deviceRow(room, clientId, now);
         if (!requester) return { ok: false, error: 'unknown-client' };
         try {
-          await this.castHooks.onTarget(userId, requester, previousCastId, null);
+          await this.castHooks.onTarget(
+            userId,
+            requester,
+            previousCastId,
+            null,
+          );
         } catch (error) {
           return { ok: false, error: errorText(error, 'cast-unavailable') };
         }
       }
 
       const state = room.session;
-      state.target = { kind: 'device', clientId: target.clientId, deviceId: device.deviceId };
+      state.target = {
+        kind: 'device',
+        clientId: target.clientId,
+        deviceId: device.deviceId,
+      };
       this.freezePosition(state, now);
       delete state.targetStale;
       delete state.castOwner;
@@ -1184,12 +1380,15 @@ export class SessionService {
     const prior = this.castTransfers.get(userId) ?? Promise.resolve();
     const run = prior
       .catch(() => undefined)
-      .then(() => this.boundedTransferToCast(userId, room, clientId, castId, force));
+      .then(() =>
+        this.boundedTransferToCast(userId, room, clientId, castId, force),
+      );
     this.castTransfers.set(userId, run);
     run
       .catch(() => undefined)
       .then(() => {
-        if (this.castTransfers.get(userId) === run) this.castTransfers.delete(userId);
+        if (this.castTransfers.get(userId) === run)
+          this.castTransfers.delete(userId);
       });
     return run;
   }
@@ -1206,16 +1405,54 @@ export class SessionService {
     castId: string,
     force: boolean,
   ): Promise<CommandResult> {
-    const ticket = { abandoned: false };
+    const ticket: TransferTicket = { abandoned: false, committed: false };
+    // What the session pointed at when this attempt started (queued transfers run after the previous one).
+    const startTarget = room.session.target;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<CommandResult>((resolve) => {
       timer = setTimeout(() => {
+        // Once committed the transfer succeeded; a slow speaker sync must not report failure.
+        if (ticket.committed) return;
         ticket.abandoned = true;
+        this.pauseAbandonedTransfer(userId, room, clientId, startTarget);
         resolve({ ok: false, error: 'cast-unavailable' });
       }, this.castTransferTimeoutMs);
     });
-    const attempt = this.runTransferToCast(userId, room, clientId, castId, force, ticket);
+    const attempt = this.runTransferToCast(
+      userId,
+      room,
+      clientId,
+      castId,
+      force,
+      ticket,
+    );
     return Promise.race([attempt, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * A timed-out transfer leaves the session where it was, paused at its last
+   * position, when it still points at the old speaker. The old speaker is
+   * paused too (a no-op if the hook already stopped it).
+   */
+  private pauseAbandonedTransfer(
+    userId: string,
+    room: Room,
+    clientId: string,
+    startTarget: SessionTarget | null,
+  ): void {
+    if (startTarget?.kind !== 'cast') return;
+    const live = room.session;
+    if (targetKey(live.target) !== targetKey(startTarget)) return;
+    const now = this.nowFn();
+    this.freezePosition(live, now);
+    live.playing = false;
+    live.updatedBy = clientId;
+    this.commit(room, now);
+    const hooks = this.castHooks;
+    if (hooks)
+      void settle(() =>
+        hooks.onControl(userId, startTarget.castId, { type: 'pause' }),
+      );
   }
 
   private async runTransferToCast(
@@ -1224,7 +1461,64 @@ export class SessionService {
     clientId: string,
     castId: string,
     force: boolean,
-    ticket: { abandoned: boolean },
+    ticket: TransferTicket,
+  ): Promise<CommandResult> {
+    let attempts = this.castAttempts.get(castId);
+    if (!attempts) {
+      attempts = { inFlight: 0, stranded: null };
+      this.castAttempts.set(castId, attempts);
+    }
+    attempts.inFlight += 1;
+    try {
+      return await this.attemptTransferToCast(
+        userId,
+        room,
+        clientId,
+        castId,
+        force,
+        ticket,
+        attempts,
+      );
+    } finally {
+      attempts.inFlight -= 1;
+      if (attempts.inFlight === 0) {
+        this.castAttempts.delete(castId);
+        // Every attempt has settled, so nothing can still commit to this speaker.
+        if (
+          attempts.stranded &&
+          targetKey(room.session.target) !== `cast:${castId}`
+        ) {
+          await this.releaseSpeaker(
+            userId,
+            attempts.stranded.requester,
+            castId,
+          );
+        }
+      }
+    }
+  }
+
+  /** Stops the speaker. Failures are ignored: it is already gone or owned elsewhere. */
+  private async releaseSpeaker(
+    userId: string,
+    requester: SessionDevice,
+    castId: string,
+  ): Promise<void> {
+    try {
+      await this.castHooks?.onTarget(userId, requester, castId, null);
+    } catch {
+      // The speaker is already gone or owned elsewhere.
+    }
+  }
+
+  private async attemptTransferToCast(
+    userId: string,
+    room: Room,
+    clientId: string,
+    castId: string,
+    force: boolean,
+    ticket: TransferTicket,
+    attempts: CastAttempts,
   ): Promise<CommandResult> {
     // Taken here, not from the caller: this runs after any queued transfer.
     const now = this.nowFn();
@@ -1239,19 +1533,22 @@ export class SessionService {
     if (!requester) return { ok: false, error: 'unknown-client' };
 
     const previous = room.session;
-    const previousCastId = previous.target?.kind === 'cast' ? previous.target.castId : null;
+    const previousCastId =
+      previous.target?.kind === 'cast' ? previous.target.castId : null;
     const previousTarget = targetKey(previous.target);
     const revisionBefore = previous.revision;
     const next = cloneState(previous);
     next.target = { kind: 'cast', castId };
-    next.positionSec = anchoredPosition(previous, now);
+    // The speaker starts at the moment its hook runs, not at `now` (which
+    // precedes any queue wait): anchor the start position there.
+    const startedAt = this.nowFn();
+    next.positionSec = anchoredPosition(previous, startedAt);
     next.updatedBy = clientId;
-    next.updatedAt = now;
+    next.updatedAt = startedAt;
     next.revision = previous.revision + 1;
     delete next.targetStale;
     delete next.castOwner;
 
-    this.castAttempts.set(castId, ticket);
     try {
       await hooks.onTarget(
         userId,
@@ -1284,25 +1581,21 @@ export class SessionService {
     // The speaker is now running `next`. Nothing may commit it to the session if
     // this attempt was abandoned by the timeout, or if the target moved meanwhile
     // (a device transfer landed): release the speaker and fail instead.
-    const releaseCast = async (): Promise<void> => {
-      try {
-        await hooks.onTarget(userId, requester, castId, null);
-      } catch {
-        // The speaker is already gone or owned elsewhere.
-      }
-    };
+    // Hook latency counts: the drift checks below use the time the hook returned.
+    const landedAt = this.nowFn();
     if (ticket.abandoned) {
-      // Only the newest attempt for this speaker may release it: a later transfer
-      // to the same cast may already own it.
-      if (this.castAttempts.get(castId) === ticket) {
-        this.castAttempts.delete(castId);
-        await releaseCast();
+      // Not when this session already plays on the speaker (an earlier transfer to
+      // the same cast committed). Another attempt still running on it decides the
+      // speaker's fate when it finishes, so defer to it instead of racing it.
+      if (targetKey(room.session.target) !== `cast:${castId}`) {
+        if (attempts.inFlight > 1) attempts.stranded = { requester };
+        else await this.releaseSpeaker(userId, requester, castId);
       }
       return { ok: false, error: 'cast-unavailable' };
     }
     const live = room.session;
     if (targetKey(live.target) !== previousTarget) {
-      await releaseCast();
+      await this.releaseSpeaker(userId, requester, castId);
       return { ok: false, error: 'target-changed' };
     }
 
@@ -1312,16 +1605,19 @@ export class SessionService {
     if (live.revision !== revisionBefore) {
       committed = cloneState(live);
       committed.target = { kind: 'cast', castId };
-      committed.positionSec = anchoredPosition(live, now);
+      committed.positionSec = anchoredPosition(live, landedAt);
       committed.updatedBy = clientId;
-      committed.updatedAt = now;
+      committed.updatedAt = landedAt;
       committed.revision = live.revision + 1;
       delete committed.targetStale;
       delete committed.castOwner;
       // Unavailable flags name entries; re-derive them against the live order.
       const planned = new Set(next.unavailable ?? []);
-      const unavailable = committed.order.filter((entry) => planned.has(entry.entryId));
-      if (unavailable.length > 0) committed.unavailable = unavailable.map((entry) => entry.entryId);
+      const unavailable = committed.order.filter((entry) =>
+        planned.has(entry.entryId),
+      );
+      if (unavailable.length > 0)
+        committed.unavailable = unavailable.map((entry) => entry.entryId);
       else delete committed.unavailable;
       if (next.castVolume !== undefined) committed.castVolume = next.castVolume;
       else delete committed.castVolume;
@@ -1330,22 +1626,75 @@ export class SessionService {
     // The speaker loaded the entry `next` pointed at. If the live queue now points
     // elsewhere (cursor moved, or the entry was replaced), the speaker must reload.
     const loaded = next.cursor >= 0 ? next.order[next.cursor] : undefined;
-    const liveEntry = committed.cursor >= 0 ? committed.order[committed.cursor] : undefined;
-    const reloadNeeded = JSON.stringify(loaded ?? null) !== JSON.stringify(liveEntry ?? null);
+    const liveEntry =
+      committed.cursor >= 0 ? committed.order[committed.cursor] : undefined;
+    const reloadNeeded =
+      JSON.stringify(loaded ?? null) !== JSON.stringify(liveEntry ?? null);
 
+    // Commit is final from here: a late timeout must not report failure.
+    ticket.committed = true;
     room.session = committed;
     room.lastTargetContactAt = now;
     room.lastActivity = now;
     this.broadcast(room, { type: 'state', session: committed });
     this.refreshDevices(room, true, undefined, now);
-    if (reloadNeeded && this.castHooks?.onState) {
-      try {
-        await this.castHooks.onState(userId, castId, committed);
-      } catch {
-        // CastService reports its own failures (unavailable + paused).
+    this.syncSpeakerAfterCommit(
+      userId,
+      castId,
+      next,
+      committed,
+      reloadNeeded,
+      landedAt,
+    );
+    return { ok: true, revision: room.session.revision };
+  }
+
+  /**
+   * Brings the speaker in line with the committed session. `loaded` is what the
+   * speaker started with (`next`), observed at `landedAt`. Structural changes
+   * reload through `onState`; otherwise play/pause and seek drift go through
+   * `onControl`, the same path live transport commands use. Detached: the
+   * transfer is already committed and must not wait on the speaker.
+   */
+  private syncSpeakerAfterCommit(
+    userId: string,
+    castId: string,
+    loaded: SessionState,
+    committed: SessionState,
+    reloadNeeded: boolean,
+    landedAt: number,
+  ): void {
+    const hooks = this.castHooks;
+    if (!hooks) return;
+    const work: Promise<void>[] = [];
+    if (reloadNeeded) {
+      work.push(settle(() => hooks.onState?.(userId, castId, committed)));
+    } else {
+      // Both calls enqueue on the speaker in order; no await between them.
+      const sessionPos = anchoredPosition(committed, landedAt);
+      const speakerPos = anchoredPosition(loaded, landedAt);
+      if (Math.abs(sessionPos - speakerPos) > TRANSFER_SEEK_TOLERANCE_SEC) {
+        work.push(
+          settle(() =>
+            hooks.onControl(userId, castId, {
+              type: 'seek',
+              positionSec: sessionPos,
+            }),
+          ),
+        );
+      }
+      if (committed.playing !== loaded.playing) {
+        work.push(
+          settle(() =>
+            hooks.onControl(userId, castId, {
+              type: committed.playing ? 'play' : 'pause',
+            }),
+          ),
+        );
       }
     }
-    return { ok: true, revision: room.session.revision };
+    // CastService reports its own failures (unavailable + paused).
+    void Promise.all(work);
   }
 
   /**
@@ -1367,7 +1716,11 @@ export class SessionService {
   }
 
   /** Contact that cleared `targetStale` still needs its revision bump when no other change happened. */
-  private commitStaleClear(room: Room, now: number, staleCleared: boolean): void {
+  private commitStaleClear(
+    room: Room,
+    now: number,
+    staleCleared: boolean,
+  ): void {
     if (!staleCleared) return;
     room.session.positionSec = anchoredPosition(room.session, now);
     room.session.revision += 1;
@@ -1412,7 +1765,11 @@ export class SessionService {
     return false;
   }
 
-  private deviceRow(room: Room, clientId: string, now: number): SessionDevice | null {
+  private deviceRow(
+    room: Room,
+    clientId: string,
+    now: number,
+  ): SessionDevice | null {
     const entry = room.devices.get(clientId);
     if (!entry) return null;
     return {
@@ -1421,7 +1778,9 @@ export class SessionService {
       name: entry.name,
       platform: entry.platform,
       online: this.isOnline(room, clientId, now),
-      ...(this.isTargetClient(room, clientId) && room.session.targetStale ? { stale: true } : {}),
+      ...(this.isTargetClient(room, clientId) && room.session.targetStale
+        ? { stale: true }
+        : {}),
       lastSeenAt: entry.lastSeenAt,
       ...(entry.model ? { model: entry.model } : {}),
       capabilities: { ...entry.capabilities },
@@ -1471,7 +1830,11 @@ export class SessionService {
       if (broadcast) {
         this.broadcast(
           room,
-          { type: 'devices', devices: rows, devicesRevision: room.devicesRevision },
+          {
+            type: 'devices',
+            devices: rows,
+            devicesRevision: room.devicesRevision,
+          },
           exceptConnectionId,
         );
       }
@@ -1496,7 +1859,11 @@ export class SessionService {
     };
   }
 
-  private broadcast(room: Room, message: SessionServerMessage, exceptConnectionId?: string): void {
+  private broadcast(
+    room: Room,
+    message: SessionServerMessage,
+    exceptConnectionId?: string,
+  ): void {
     for (const connection of room.connections.values()) {
       if (connection.id === exceptConnectionId) continue;
       try {
@@ -1516,4 +1883,7 @@ export class SessionService {
   }
 }
 
-type SessionTargetPayload = Extract<SessionCommand, { type: 'transfer' }>['target'];
+type SessionTargetPayload = Extract<
+  SessionCommand,
+  { type: 'transfer' }
+>['target'];

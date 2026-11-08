@@ -389,7 +389,8 @@ async function serveRemote(
     return fail(request, reply, entry, 503, 'ffmpeg-missing');
   }
 
-  if (status === 206) {
+  // HEAD answers headers only and never reads the body: skip the refetch.
+  if (status === 206 && request.method !== 'HEAD') {
     // A player may send Range even for a URL it expects to be transcoded. A 206
     // body is a SLICE of the source, which ffmpeg cannot decode; refetch the
     // whole object (this second request deliberately carries no Range header).

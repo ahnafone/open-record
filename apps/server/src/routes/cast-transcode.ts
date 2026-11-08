@@ -67,13 +67,6 @@ export async function streamTranscoded(
   offsetSec: number,
   ffmpeg: TranscodeDeps,
 ): Promise<FastifyReply> {
-  // Fastify serves HEAD through the GET handler. A HEAD (or probe) must not
-  // supersede the live encoder of this entry nor spawn one: headers only.
-  if (request.method === 'HEAD') {
-    source.destroy();
-    return reply.code(200).headers(TRANSCODE_HEADERS).send();
-  }
-
   // Source errors can fire during the ffmpeg probe below; they must not become
   // uncaught 'error' events on the stream.
   source.once('error', () => undefined);
@@ -82,6 +75,14 @@ export async function streamTranscoded(
     source.destroy();
     request.log.info({ trackId: entry.trackId, status: 503 }, 'cast relay failed');
     return reply.code(503).send({ error: 'ffmpeg-missing' });
+  }
+
+  // Fastify serves HEAD through the GET handler. A HEAD (or probe) must not
+  // supersede the live encoder of this entry nor spawn one: headers only, and
+  // only once ffmpeg is known to exist (the stream it promises needs it).
+  if (request.method === 'HEAD') {
+    source.destroy();
+    return reply.code(200).headers(TRANSCODE_HEADERS).send();
   }
 
   // Supersede the previous attempt for this entry before starting a new encoder

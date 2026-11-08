@@ -46,6 +46,17 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
   const duration = signal(0);
   const current = computed(() => queue()[currentIndex()] ?? null);
   const isPlaying = computed(() => status() === 'playing');
+  /** Play order as queue indices; null means queue order (no shuffle). */
+  const playOrder = signal<readonly number[] | null>(null);
+  const upcomingEntries = computed(() => {
+    const indexes = playOrder() ?? queue().map((_, i) => i);
+    const position = indexes.indexOf(currentIndex());
+    return indexes.slice(position + 1).map((queueIndex) => ({
+      track: queue()[queueIndex] as Track,
+      queueIndex,
+      playNext: false,
+    }));
+  });
 
   const applyOrder = vi.fn(
     async (
@@ -102,8 +113,9 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     play,
     pause,
     seekIfDrifted,
-    upcoming: computed(() => queue().slice(currentIndex() + 1)),
-    upcomingEntries: computed(() => []),
+    upcoming: computed(() => upcomingEntries().map((entry) => entry.track)),
+    upcomingEntries,
+    playOrder,
     playNextIndices: signal<readonly number[]>([]),
     shuffle: signal(false),
     repeat: signal('off'),
@@ -2008,6 +2020,345 @@ describe('SessionStore', () => {
     expect(setQueues[1]?.order.map((entry) => entry.id)).toEqual(['b']);
     expect(setQueues[1]?.cursor).toBe(0);
     expect(engine.current()?.id).toBe('b');
+  });
+
+  it('keeps the engine on a track skipped during publish, and republishes it', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b')]);
+    engine.currentIndex.set(0);
+    let skipped = false;
+    let echoed = false;
+    port.result = (command) => {
+      if (command.type === 'setQueue' && !skipped) {
+        skipped = true;
+        void player.next();
+      }
+      // Mid-publish the server echoes the first queue (cursor on `a`) and
+      // this client as target. That echo must not rewind the skip.
+      if (command.type === 'transfer' && !echoed) {
+        echoed = true;
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order: [wire('e1', 'a')],
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    const setQueues = port.commands.flatMap((entry) =>
+      entry.command.type === 'setQueue' ? [entry.command] : [],
+    );
+    expect(setQueues).toHaveLength(2);
+    expect(setQueues[1]?.order.map((entry) => entry.id)).toEqual(['b']);
+    expect(engine.current()?.id).toBe('b');
+    expect(engine.applyOrder).not.toHaveBeenCalled();
+  });
+
+  it('publishes a shuffled queue in play order, flagged as shuffled', async () => {
+    const { port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('b'), catalogTrack('a')]);
+    engine.currentIndex.set(0);
+    engine.shuffle.set(true);
+
+    await player.play();
+    await settle(40);
+
+    const setQueue = port.commands[0]?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order.map((entry) => entry.id)).toEqual(['b', 'a']);
+    expect(setQueue.shuffle).toBe(true);
+    expect(setQueue.shuffled).toBe(true);
+  });
+
+  it('sends the natural order with a shuffled publish so shuffle off can restore it', async () => {
+    const { port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('c'), catalogTrack('d')]);
+    engine.currentIndex.set(2);
+    engine.playOrder.set([2, 3, 0, 1]);
+    engine.shuffle.set(true);
+
+    await player.play();
+    await settle(40);
+
+    const setQueue = port.commands[0]?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order.map((entry) => entry.id)).toEqual(['c', 'd', 'a', 'b']);
+    // The natural order a, b, c, d, as the same entry ids in queue order.
+    const [c, d, a, b] = setQueue.order;
+    expect(setQueue.baseOrderIds).toEqual([
+      a?.entryId,
+      b?.entryId,
+      c?.entryId,
+      d?.entryId,
+    ]);
+  });
+
+  it('reports nothing for the publish window when the engine index is past the published queue', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('c'), catalogTrack('d')]);
+    engine.currentIndex.set(2);
+    engine.playOrder.set([2, 3, 0, 1]);
+    engine.shuffle.set(true);
+    let order: SessionTrack[] = [];
+    let echoed = false;
+    port.result = (command) => {
+      if (command.type === 'setQueue') order = command.order;
+      if (command.type === 'transfer' && !echoed) {
+        echoed = true;
+        // The echo makes this client the target while the engine is still on
+        // `c`, which sits at index 2 of the full queue but index 0 here.
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+        engine.position.set(12);
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(store.isTarget()).toBe(true);
+    expect(port.reports()).toEqual([]);
+  });
+
+  it('applies a remote command that lands mid-publish', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('c')]);
+    engine.currentIndex.set(0);
+    let order: SessionTrack[] = [];
+    let pushed = false;
+    port.result = (command) => {
+      if (command.type === 'setQueue') order = command.order;
+      if (command.type === 'transfer' && !pushed) {
+        pushed = true;
+        // Another controller pressed next after the queue was sent: cursor on `b`.
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 1,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(port.commands.filter((entry) => entry.command.type === 'setQueue')).toHaveLength(1);
+    expect(engine.current()?.id).toBe('b');
+  });
+
+  it('settles the held state from the first pass when the second pass fails', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('c')]);
+    engine.currentIndex.set(0);
+    let order: SessionTrack[] = [];
+    let skipped = false;
+    let echoed = false;
+    port.result = (command) => {
+      if (command.type === 'setQueue') {
+        order = command.order;
+        if (!skipped) {
+          skipped = true;
+          void player.next();
+        } else {
+          // The re-pass is refused, so no second echo follows.
+          return { ok: false, error: 'refused' };
+        }
+      }
+      if (command.type === 'transfer' && !echoed) {
+        echoed = true;
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    // The server is authoritative once this client is the target: the held
+    // first-pass state is applied, and the refusal is shown.
+    expect(store.error()).toBe('refused');
+    expect(engine.current()?.id).toBe('a');
+  });
+
+  it('does not republish when the server echoes the queue with no target', async () => {
+    const { port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b')]);
+    engine.currentIndex.set(0);
+    port.result = (command) => {
+      if (command.type === 'setQueue') {
+        // The server broadcasts the queue to its sender before any target exists.
+        port.push({
+          type: 'state',
+          session: session({
+            revision: 2,
+            order: command.order,
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(port.commands.filter((entry) => entry.command.type === 'setQueue')).toHaveLength(1);
+  });
+
+  it('reports a skip that landed during the second pass once the hold ends', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('c'), catalogTrack('d')]);
+    engine.currentIndex.set(0);
+    let order: SessionTrack[] = [];
+    let setQueues = 0;
+    port.result = (command) => {
+      if (command.type === 'setQueue') {
+        setQueues++;
+        order = command.order;
+        // A skip during each pass: a -> b in the first, b -> c in the second.
+        void player.next();
+      }
+      if (command.type === 'transfer' && setQueues === 2) {
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(setQueues).toBe(2);
+    expect(engine.current()?.id).toBe('c');
+    // The server still has `b` as the cursor: tell it about the skip to `c`.
+    expect(port.reports().at(-1)).toMatchObject({
+      reason: 'native-skip',
+      entryId: order[1]?.entryId,
+    });
+  });
+
+  it('sends a seek made during a publish once the hold ends', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b')]);
+    engine.currentIndex.set(0);
+    engine.position.set(30);
+    let order: SessionTrack[] = [];
+    port.result = (command) => {
+      if (command.type === 'setQueue') order = command.order;
+      if (command.type === 'transfer') {
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 0,
+            positionSec: 30,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+        // The user seeks while the publish is still held.
+        engine.position.set(90);
+        store.reportSeek();
+        expect(port.reports()).toEqual([]);
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(port.reports().at(-1)).toMatchObject({
+      reason: 'tick',
+      entryId: order[0]?.entryId,
+      positionSec: 90,
+    });
+  });
+
+  it('replays an end of track that happened while the publish was held', async () => {
+    const { store, port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b')]);
+    engine.currentIndex.set(0);
+    let order: SessionTrack[] = [];
+    port.result = (command) => {
+      if (command.type === 'setQueue') order = command.order;
+      if (command.type === 'transfer') {
+        port.push({
+          type: 'state',
+          session: device(store, {
+            revision: 2,
+            order,
+            cursor: 0,
+            playing: true,
+            updatedAt: Date.now(),
+          }),
+        });
+        // The track finishes while the publish is still held.
+        engine.status.set('ended');
+      }
+      return { ok: true };
+    };
+
+    await player.play();
+    await settle(60);
+
+    expect(port.reports()).toContainEqual(
+      expect.objectContaining({ reason: 'ended', entryId: order[0]?.entryId }),
+    );
+    expect(port.reports().filter((report) => report.reason === 'ended')).toHaveLength(1);
   });
 
   it('stays inert without a SessionPort (local-only mode)', async () => {
