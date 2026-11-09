@@ -144,6 +144,7 @@ function setup(
     wantsNeighbours?: boolean;
     retryDelaysMs?: readonly number[];
     resolve?: (track: Track) => Promise<PlayableSource>;
+    resolveNeighbour?: PlayerEngineOptions['resolveNeighbour'];
     transientError?: PlayerEngineOptions['transientError'];
   } = {},
 ) {
@@ -152,6 +153,7 @@ function setup(
     random: seeded(),
     retryDelaysMs: opts.retryDelaysMs,
     transientError: opts.transientError,
+    resolveNeighbour: opts.resolveNeighbour,
   });
   const ids = () => player.current()?.id;
   return { fake, player, ids };
@@ -1188,6 +1190,30 @@ describe('PlayerEngine', () => {
       expect(fake.preloads.at(-1)?.previous?.id).toBe('b');
     });
 
+    it('hands next to preload before a slow previous resolves', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { player, fake } = setup({
+        resolve: async (t) => {
+          // The previous neighbour (`a`) is slow; next (`c`) is not.
+          if (t.id === 'a') await gate;
+          return { url: `/${t.id}.mp3`, kind: 'bundled' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 1 });
+      await flush();
+
+      // next arrives while previous is still resolving, with previous absent.
+      expect(fake.preloads).toHaveLength(1);
+      expect(fake.preloads[0]?.next?.id).toBe('c');
+      expect(fake.preloads[0]?.previous).toBeUndefined();
+
+      release();
+      await flush();
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('a');
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+    });
+
     it('resolves a cached neighbour again when its art changed', async () => {
       const resolved: string[] = [];
       const { player, fake } = setup({
@@ -1226,6 +1252,30 @@ describe('PlayerEngine', () => {
       await player.play();
       await flush();
       expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+    });
+
+    it('resolves neighbours one at a time, next before previous', async () => {
+      const started: string[] = [];
+      let inFlight = 0;
+      let peak = 0;
+      const { player, fake } = setup({
+        resolveNeighbour: async (t) => {
+          started.push(t.id);
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          await flush();
+          inFlight--;
+          return { url: `/${t.id}.mp3`, kind: 'remote' };
+        },
+      });
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 1 });
+      await flush();
+      await flush();
+
+      expect(started).toEqual(['c', 'a']);
+      expect(peak).toBe(1);
+      expect(fake.preloads.at(-1)?.next?.id).toBe('c');
+      expect(fake.preloads.at(-1)?.previous?.id).toBe('a');
     });
 
     it('leaves a gap for a neighbour that fails to resolve', async () => {

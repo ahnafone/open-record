@@ -46,6 +46,7 @@ import { appRoutes } from './app.routes';
 import { createBackgroundWork } from './background-work';
 import { connectDesktop, getDesktopBridge } from './desktop-bridge';
 import { createDeviceStorage } from './device-storage';
+import { createNeighbourResolver } from './neighbour-resolver';
 import { lookupRemoteArtist, metadataFetch } from './metadata-fetch';
 import { createNetworkStatus } from './network-status';
 import { PlatformPairingScanner } from './pairing-scanner';
@@ -337,12 +338,14 @@ export const appConfig: ApplicationConfig = {
       resolve: (track) => sources.resolve(track),
       // Imported covers for lock-screen / media-key artwork.
       resolveArt: (track) => local.artUrl(track),
-      // Neighbours are pre-resolved only when playable without a server call:
-      // unsaved remote tracks are left out (no stream request for them).
-      resolveNeighbour: (track) =>
-        track.providerId === REMOTE_PROVIDER_ID
-          ? remote.resolveSaved(track.id)
-          : sources.resolve(track),
+      // Native: unsaved remote neighbours are left out (no stream request).
+      // Web: they are resolved like playback, so the preloaded URL matches.
+      resolveNeighbour: createNeighbourResolver({
+        native: Capacitor.isNativePlatform(),
+        remoteProviderId: REMOTE_PROVIDER_ID,
+        resolve: (track) => sources.resolve(track),
+        resolveSaved: (trackId) => remote.resolveSaved(trackId),
+      }),
       // Busy / rate limited: stay on the track with a retry hint (no skip).
       transientError: (err) => (isBusy(err) ? remoteErrorMessage(err) : undefined),
     }),

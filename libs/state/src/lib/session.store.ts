@@ -321,6 +321,18 @@ export class SessionStore {
   } | null = null;
   /** Revision whose engine drift was already reconciled (one retry per revision). */
   private reconciledRevision = -1;
+  /**
+   * The track a command just started fresh, and the `updatedAt` of the state
+   * that started it. Same-song states not newer than that are echoes of the
+   * start; their anchor is stale, so they must not catch-up seek the track.
+   */
+  private freshStart: { trackId: string; updatedAt: number } | null = null;
+  /**
+   * A fresh start whose audio was still loading when its state was applied.
+   * The forced tick that re-bases the server anchor waits for the engine to
+   * report `playing` for this track; it is cleared when the track changes.
+   */
+  private pendingFreshTick: string | null = null;
   private observedEntryId = '';
   private observedStatus: PlayerStatus = 'idle';
   private lastReportAt = Number.NEGATIVE_INFINITY;
@@ -449,6 +461,24 @@ export class SessionStore {
       ) {
         this.report('playing');
       }
+    });
+
+    // A fresh start that was still loading: re-base the server anchor once its
+    // track actually plays, once. A track change drops the pending re-base.
+    effect(() => {
+      // Read the signals before the early return: this effect must re-run when
+      // the engine changes, even while nothing is pending.
+      const status = this.engine.status();
+      const currentId = this.engine.current()?.id;
+      const pending = this.pendingFreshTick;
+      if (pending === null) return;
+      if (currentId !== pending) {
+        this.pendingFreshTick = null;
+        return;
+      }
+      if (status !== 'playing') return;
+      this.pendingFreshTick = null;
+      if (this.isTarget()) this.emitReport('tick', undefined, true);
     });
 
     // Throttled position ticks while the target plays.
@@ -1542,6 +1572,22 @@ export class SessionStore {
       !sameSong &&
       state.positionSec <= FRESH_START_SEC &&
       anchorAtReceipt <= FRESH_START_RECEIPT_SEC;
+    const trackId = tracks[cursor]?.id;
+    if (freshStart && trackId !== undefined) {
+      this.freshStart = { trackId, updatedAt: state.updatedAt };
+    } else if (!sameSong) {
+      this.freshStart = null;
+    }
+    // A same-song state not newer than the start is an echo of it: its anchor
+    // is from before the track started, so a catch-up seek would skip ahead.
+    // A newer state (a remote seek, or the forced tick's re-base) still corrects.
+    const startEcho =
+      sameSong &&
+      this.freshStart?.trackId === trackId &&
+      state.updatedAt <= this.freshStart.updatedAt;
+    if (sameSong && this.freshStart?.trackId === trackId && !startEcho) {
+      this.freshStart = null;
+    }
     await this.engine.applyOrder(tracks, cursor, {
       autoplay: state.playing,
       positionSec: sameSong ? undefined : state.positionSec,
@@ -1551,7 +1597,7 @@ export class SessionStore {
     if (!this.isTarget()) return;
     // The same song kept its position: a seek held during a publish is newer
     // than this anchor, so correcting to it would undo the seek.
-    if (!(keepPosition && sameSong) && !freshStart) {
+    if (!(keepPosition && sameSong) && !freshStart && !startEcho) {
       // A reload starts at 0, and the anchor moved while the state travelled.
       // seekIfDrifted is a no-op unless this track has settled.
       await this.engine.seekIfDrifted(
@@ -1570,6 +1616,18 @@ export class SessionStore {
         } catch {
           blocked = true;
         }
+      }
+      // A load still in flight with play intent starts playback itself when it
+      // is ready. `play()` is a no-op while loading, so that is not a refusal:
+      // reporting `playing: false` here would pause the session for a track
+      // that is about to play.
+      const loadingToPlay =
+        this.engine.status() === 'loading' && this.engine.intendsToPlay;
+      if (loadingToPlay && !blocked) {
+        this.needsGesture.set(false);
+        // The re-base for a fresh start waits for the audio to start.
+        if (freshStart && trackId !== undefined) this.pendingFreshTick = trackId;
+        return;
       }
       if (blocked || this.engine.status() !== 'playing') {
         // Autoplay was refused: stay paused, offer the one-tap resume, and

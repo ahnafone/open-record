@@ -973,6 +973,137 @@ describe('SessionStore', () => {
     );
   });
 
+  it('does not catch-up seek a fresh track on a later echo of its start', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    const start = device(store, {
+      order: [wire('e0', 'catalog:a')],
+      cursor: 0,
+      playing: true,
+      positionSec: 0,
+      updatedAt: Date.now(),
+      revision: 1,
+    });
+    port.push(welcome(store, start));
+    await settle();
+    engine.seekIfDrifted.mockClear();
+    // Playback ran 5 s; a repeat of the start's state still anchors at 0.
+    vi.advanceTimersByTime(5000);
+    port.push({ type: 'state', session: { ...start, revision: 2 } });
+    await settle();
+    expect(engine.seekIfDrifted).not.toHaveBeenCalled();
+  });
+
+  it('does not report a refusal while the load it started is still in flight', async () => {
+    const { store, port, engine } = await setup();
+    // applyOrder returns while the load is still in flight: play() is a no-op.
+    const base = engine.applyOrder.getMockImplementation();
+    if (!base) throw new Error('fake engine has no applyOrder');
+    engine.applyOrder.mockImplementationOnce(async (order, cursor, opts) => {
+      const result = await base(order, cursor, opts);
+      engine.status.set('loading');
+      engine.intendsToPlay = true;
+      return result;
+    });
+    engine.play.mockImplementationOnce(async () => undefined);
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(store.needsGesture()).toBe(false);
+    expect(
+      port.reports().some((r) => r.reason === 'playing' && r.playing === false),
+    ).toBe(false);
+  });
+
+  it('sends the fresh-start re-base tick once, after a still-loading start plays', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    const forced = () =>
+      emit.mock.calls.filter(([reason, , force]) => reason === 'tick' && force === true)
+        .length;
+    const emit = vi.spyOn(
+      store as unknown as { emitReport: (...args: unknown[]) => void },
+      'emitReport',
+    );
+    const base = engine.applyOrder.getMockImplementation();
+    if (!base) throw new Error('fake engine has no applyOrder');
+    // The start's audio is still loading when its state is applied.
+    engine.applyOrder.mockImplementationOnce(async (order, cursor, opts) => {
+      const result = await base(order, cursor, opts);
+      engine.status.set('loading');
+      engine.intendsToPlay = true;
+      return result;
+    });
+    engine.play.mockImplementationOnce(async () => undefined);
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          positionSec: 0,
+          updatedAt: Date.now(),
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(forced()).toBe(0);
+
+    engine.intendsToPlay = false;
+    engine.status.set('playing');
+    await settle();
+    expect(forced()).toBe(1);
+
+    // Pausing and resuming the same track does not send it again.
+    engine.status.set('paused');
+    await settle();
+    engine.status.set('playing');
+    await settle();
+    expect(forced()).toBe(1);
+  });
+
+  it('a newer same-song state after a fresh start still seeks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    const start = device(store, {
+      order: [wire('e0', 'catalog:a')],
+      cursor: 0,
+      playing: true,
+      positionSec: 0,
+      updatedAt: Date.now(),
+      revision: 1,
+    });
+    port.push(welcome(store, start));
+    await settle();
+    engine.seekIfDrifted.mockClear();
+    // A remote seek to 30 s is newer than the start: it must correct the engine.
+    vi.advanceTimersByTime(1000);
+    port.push({
+      type: 'state',
+      session: { ...start, positionSec: 30, updatedAt: Date.now(), revision: 2 },
+    });
+    await settle();
+    expect(engine.seekIfDrifted).toHaveBeenCalledWith(
+      30,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('reports a local seek at once and ignores in-flight stale ticks', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000_000);

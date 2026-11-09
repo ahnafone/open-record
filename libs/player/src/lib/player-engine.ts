@@ -1108,31 +1108,57 @@ export class PlayerEngine {
   }
 
   /**
+   * One neighbour's media, reusing a `known` entry for the same track identity.
+   * Undefined when the track is absent or fails to resolve.
+   */
+  /** Media from `known` for this track identity, without resolving. */
+  private cachedNeighbour(
+    track: Track | undefined,
+    known?: ReadonlyMap<string, ResolvedMedia>,
+  ): EngineMedia | undefined {
+    if (!track) return undefined;
+    const cached = known?.get(track.id);
+    return cached && cached.key === this.trackMediaKey(track) ? cached.media : undefined;
+  }
+
+  private async resolveNeighbourMedia(
+    track: Track | undefined,
+    known?: ReadonlyMap<string, ResolvedMedia>,
+  ): Promise<EngineMedia | undefined> {
+    if (!track) return undefined;
+    const cached = this.cachedNeighbour(track, known);
+    if (cached) return cached;
+    try {
+      // neighbourResolver must agree with resolve for the same track, or spare
+      // adoption will miss (the spare is keyed by the resolved URL).
+      const neighbour = this.neighbourResolver ?? ((x: Track) => this.resolve(x));
+      const source = await neighbour(track);
+      return source ? await this.mediaFor(track, source) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Neighbours for native engines; failures just leave a gap. `known` lets
    * web preload reuse media already resolved for a track, but only while the
-   * track's source and art identity are unchanged.
+   * track's source and art identity are unchanged. `sequential` (web preload)
+   * resolves one at a time, next first: the server caps concurrent resolves.
    */
   private async resolveNeighbours(
     known?: ReadonlyMap<string, ResolvedMedia>,
+    sequential = false,
   ): Promise<EngineNeighbours> {
     const at = (cursor: number): Track | undefined =>
       cursor === -1 ? undefined : this._queue()[this._order()[cursor]];
-    const safe = async (t?: Track) => {
-      if (!t) return undefined;
-      const cached = known?.get(t.id);
-      if (cached && cached.key === this.trackMediaKey(t)) return cached.media;
-      try {
-        // neighbourResolver must agree with resolve for the same track, or spare
-        // adoption will miss (the spare is keyed by the resolved URL).
-        const neighbour = this.neighbourResolver ?? ((x: Track) => this.resolve(x));
-        const source = await neighbour(t);
-        return source ? await this.mediaFor(t, source) : undefined;
-      } catch {
-        return undefined;
-      }
-    };
+    const safe = (t?: Track) => this.resolveNeighbourMedia(t, known);
     // In repeat-one the native player must not auto-advance on track end.
     const next = this._repeat() === 'one' ? undefined : at(this.peek(1));
+    if (sequential) {
+      const nextMedia = await safe(next);
+      const previous = await safe(at(this.peek(-1)));
+      return { previous, next: nextMedia };
+    }
     const [previous, nextMedia] = await Promise.all([
       safe(at(this.peek(-1))),
       safe(next),
@@ -1167,28 +1193,35 @@ export class PlayerEngine {
         // last window's (a skipped-back track is then not resolved again).
         const known = new Map(this.preloadedMedia);
         if (this.loadedMedia) known.set(this.loadedMedia.media.id, this.loadedMedia);
-        const neighbours = await this.resolveNeighbours(known);
-        if (token !== this.loadToken || key !== `${token}|${this.neighbourKey()}`) {
-          return;
-        }
+        const stale = () =>
+          token !== this.loadToken || key !== `${token}|${this.neighbourKey()}`;
         const kept = new Map<string, ResolvedMedia>();
         if (this.loadedMedia) kept.set(this.loadedMedia.media.id, this.loadedMedia);
-        const pairs: [Track | undefined, EngineMedia | undefined][] = [
-          [prevTrack, neighbours.previous],
-          [nextTrack, neighbours.next],
-        ];
-        for (const [track, media] of pairs) {
-          if (track && media) {
-            kept.set(media.id, { media, key: this.trackMediaKey(track) });
-          }
-        }
+        const remember = (track: Track | undefined, media: EngineMedia | undefined) => {
+          if (track && media) kept.set(media.id, { media, key: this.trackMediaKey(track) });
+        };
+        // Next goes out first: a slow or failed previous must not delay it. A
+        // side that is not resolved yet keeps its already-buffered media (if any);
+        // an absent side in a preload call means "drop", so each call carries both.
+        const cachedPrevious = this.cachedNeighbour(prevTrack, known);
+        remember(prevTrack, cachedPrevious);
+        const nextMedia = await this.resolveNeighbourMedia(nextTrack, known);
+        if (stale()) return;
+        remember(nextTrack, nextMedia);
+        this.preloadedMedia = new Map(kept);
+        this.engine.preload?.({ previous: cachedPrevious, next: nextMedia });
+        // Cached previous media is returned without a resolve, so this only
+        // waits when the previous side was not known.
+        const previous = await this.resolveNeighbourMedia(prevTrack, known);
+        if (stale()) return;
+        remember(prevTrack, previous);
         this.preloadedMedia = kept;
         // A neighbour that failed to resolve leaves a gap: allow a retry on the
         // next trigger (playing again, or a queue/order change).
-        if ((prevTrack && !neighbours.previous) || (nextTrack && !neighbours.next)) {
+        if ((prevTrack && !previous) || (nextTrack && !nextMedia)) {
           this.preloadKey = '';
         }
-        this.engine.preload?.(neighbours);
+        this.engine.preload?.({ previous, next: nextMedia });
       } catch {
         // Preload is best effort; the real load reports errors.
       }
