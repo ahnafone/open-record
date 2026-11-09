@@ -1,7 +1,16 @@
-# Open Record v0.0.1 (beta)
+# Open Record v0.0.2 (beta)
 
 Open Record is a vinyl record-shop listening room: browse the crates, build playlists, import your
-own music and play it on a virtual turntable. This is the first beta.
+own music and play it on a virtual turntable. This is the second beta.
+
+## What's new in v0.0.2
+
+- **Artist and album pages:** artist and album names are now tappable links.
+- **Options menu in the player:** the player bar, mini player and now-playing screen have an options menu.
+- **Copy source link:** available from track menus and the now-playing menu.
+- **Smoother playback:** the next and previous tracks are pre-buffered (preloaded on web), and seeking no longer glitches while a track is loading.
+- **Artist photos:** artist pages fetch photos from Deezer and cache them locally.
+- **Under the hood:** dependency cleanup, proxy-neutral self-hosting docs and website deploy fixes.
 
 ## Highlights
 
@@ -34,7 +43,7 @@ Download links always point at the latest release. File names are the same as be
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.1; macOS installers coming later |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.2; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+. Signed release APK; beta-tested |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | **Not tested yet.** Needs a Mac, Xcode and a free Apple ID |
 
@@ -49,7 +58,7 @@ There is no App Store, TestFlight, Play Store or enterprise build.
   expires after **7 days** and must be re-signed from Xcode.
 - **Desktop:** installers are **unsigned**, so Windows (SmartScreen) shows warnings. There is **no
   auto-update**: install the new version over the old one. Your library is kept in the app's data folder.
-- **macOS installers are not part of v0.0.1.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
+- **macOS installers are not part of v0.0.2.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
 - **Streaming and saving** depend on a stream-link server and `yt-dlp`. Links expire. With your own
   server, streaming works on the same network as the server, not on mobile data. Guest streaming on the
   public web app is rate-limited and only on servers that enable it.

@@ -8,7 +8,7 @@ The window loads a fixed local address, `http://127.0.0.1:47900`, not a public s
 
 > **Unsigned builds.** SmartScreen will warn you on Windows, and there is no
 > auto-update. Windows installers are CI-built and untested here. macOS installers are
-> not published in v0.0.1; [build from source](#build-from-source) instead.
+> not published in v0.0.2; [build from source](#build-from-source) instead.
 
 ## Download and install
 
@@ -20,7 +20,7 @@ Get your file from the
 | Linux x64 (recommended) | `OpenRecord-linux-amd64.deb`       | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64               | `OpenRecord-linux-x86_64.AppImage` | `chmod +x`, then run it                         |
 | Windows x64             | `OpenRecord-windows-x64.exe`       | Run, then launch from the Start menu            |
-| macOS (Apple Silicon and Intel) | Not published in v0.0.1 | [Build from source](#build-from-source) |
+| macOS (Apple Silicon and Intel) | Not published in v0.0.2 | [Build from source](#build-from-source) |
 
 ### Linux
 
@@ -45,7 +45,7 @@ binaries on first launch.
 
 ### macOS
 
-Not published in v0.0.1, and there is no macOS DMG on the release page. Build the app from
+Not published in v0.0.2, and there is no macOS DMG on the release page. Build the app from
 source instead: see [Build from source](#build-from-source).
 
 <!-- Restore this section when macOS DMGs are published again.
@@ -70,7 +70,7 @@ npm run desktop:dist
 `desktop:dist` builds the web UI and server, fetches the bundled yt-dlp and ffmpeg, and writes
 the installer for the current OS to `dist/apps/desktop/release/`. On macOS, set
 `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder skips signing-identity lookup, as CI
-does. Local builds are unsigned and are not tested by the project on macOS for v0.0.1.
+does. Local builds are unsigned and are not tested by the project on macOS for v0.0.2.
 
 ## First run
 

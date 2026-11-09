@@ -34,7 +34,7 @@ jobs:
             arch: x64
             artifact: open-record-windows-x64
             builder_args: --win --x64
-          # macOS is skipped for v0.0.1: GitHub rejects the macos-14 runner
+          # macOS is currently skipped: GitHub rejects the macos-14 runner
           # configuration for this repo ("not supported"). Re-add the
           # macos-arm64 / macos-x64 entries once a macOS runner works.
     steps:

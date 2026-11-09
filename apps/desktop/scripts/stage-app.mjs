@@ -44,7 +44,7 @@ if (missing.length > 0) {
 // and dependency-free: everything else lives in extraResources.
 const pkg = {
   name: 'open-record-desktop',
-  version: '0.0.1',
+  version: '0.0.2',
   main: 'main.cjs',
 };
 
@@ -59,7 +59,7 @@ for (const file of [...REQUIRED, 'package.json']) {
   if (!existsSync(path) || statSync(path).size === 0) fail(`staging failed: ${path} is missing or empty`);
 }
 const stagedPkg = JSON.parse(readFileSync(join(out, 'package.json'), 'utf8'));
-if (stagedPkg.main !== 'main.cjs' || stagedPkg.version !== '0.0.1') {
+if (stagedPkg.main !== 'main.cjs' || stagedPkg.version !== '0.0.2') {
   fail('staged package.json has unexpected main/version fields');
 }
 if (stagedPkg.dependencies || stagedPkg.devDependencies) {

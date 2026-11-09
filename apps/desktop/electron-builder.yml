@@ -46,7 +46,7 @@ extraResources:
     to: THIRD_PARTY_NOTICES.md
 
 extraMetadata:
-  version: 0.0.1
+  version: 0.0.2
   description: Open Record desktop app
   author: Open Record contributors
   # Electron's Linux app_id / WM_CLASS; linux.syncDesktopName uses it for the
