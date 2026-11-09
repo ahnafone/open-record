@@ -5,5 +5,5 @@
 // eslint-disable-next-line @nx/enforce-module-boundaries
 import { version } from '../../../../../package.json';
 
-/** Version of the root package (e.g. `0.0.2`). */
+/** Version of the root package (e.g. `0.0.3`). */
 export const APP_VERSION: string = version;
