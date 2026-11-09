@@ -15,6 +15,7 @@ export {
   OrIconButton,
   type IconButtonVariant,
 } from './lib/icon-button/icon-button';
+export { OrArtistLinks } from './lib/artist-links/artist-links';
 export { OrChip } from './lib/chip/chip';
 export { OrSwitch } from './lib/switch/switch';
 export { OrTag } from './lib/tag/tag';

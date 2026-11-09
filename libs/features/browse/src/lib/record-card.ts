@@ -8,8 +8,11 @@ import {
   output,
 } from '@angular/core';
 import type { Track } from '@open-record/models';
-import { LibraryStore } from '@open-record/state';
-import { OrIcon, OrSleeve, OrTag } from '@open-record/ui';
+import {
+  ArtistCreditPipe,
+  LibraryStore,
+} from '@open-record/state';
+import { OrArtistLinks, OrIcon, OrSleeve, OrTag } from '@open-record/ui';
 import { injectTrackArt } from './track-art';
 
 /**
@@ -21,19 +24,21 @@ import { injectTrackArt } from './track-art';
  */
 @Component({
   selector: 'or-record-card',
-  imports: [OrIcon, OrSleeve, OrTag],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrSleeve, OrTag],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     '[class.is-current]': 'current()',
   },
   template: `
-    <button
-      class="card"
-      type="button"
-      [attr.aria-label]="ariaLabel()"
-      [attr.aria-current]="current() ? 'true' : null"
-      (click)="pick.emit()"
-    >
+    <div class="card">
+      <!-- Stretched play action; the artist links sit above it. -->
+      <button
+        class="card-play"
+        type="button"
+        [attr.aria-label]="ariaLabel()"
+        [attr.aria-current]="current() ? 'true' : null"
+        (click)="pick.emit()"
+      ></button>
       <or-sleeve
         class="sleeve"
         size="thumb"
@@ -42,7 +47,7 @@ import { injectTrackArt } from './track-art';
         [fallbackLabel]="track().title + ' sleeve unavailable'"
       />
       <span class="title">{{ track().title }}</span>
-      <span class="artist">{{ track().artist }}</span>
+      <span class="artist"><or-artist-links [credit]="track().artist | artistCredit" /></span>
       <span class="detail">
         @if (current()) {
           <or-icon [name]="playing() ? 'disc' : 'pause'" [size]="13" />
@@ -54,7 +59,7 @@ import { injectTrackArt } from './track-art';
           <span class="detail-text">{{ detail() }}</span>
         }
       </span>
-    </button>
+    </div>
   `,
   styles: `
     :host {
@@ -62,7 +67,7 @@ import { injectTrackArt } from './track-art';
       inline-size: 132px;
     }
     .card {
-      appearance: none;
+      position: relative;
       display: grid;
       align-content: start;
       gap: var(--spacing-xxs);
@@ -74,8 +79,22 @@ import { injectTrackArt } from './track-art';
       color: inherit;
       font: inherit;
       text-align: left;
-      cursor: pointer;
       transition: transform var(--duration-fast) var(--ease-standard);
+    }
+    /* Covers the whole card; the content above it lets taps through except links. */
+    .card-play {
+      position: absolute;
+      inset: 0;
+      appearance: none;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      cursor: pointer;
+    }
+    .card > :not(.card-play) {
+      pointer-events: none;
     }
     /* Hover only where a pointer can hover: no sticky hover after a tap. */
     @media (hover: hover) {
@@ -91,7 +110,7 @@ import { injectTrackArt } from './track-art';
     .card:active {
       transform: scale(0.97);
     }
-    .card:focus-visible {
+    .card-play:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
     }

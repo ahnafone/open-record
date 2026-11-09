@@ -1,4 +1,4 @@
-import { lookupMetadata } from './lookup';
+import { lookupArtistImage, lookupMetadata } from './lookup';
 import { normalizeArtist, normalizeTitle, splitArtistTitle } from './normalize';
 import { pickBest } from './score';
 import type { MetadataFetch } from './providers';
@@ -97,5 +97,28 @@ describe('lookupMetadata', () => {
   it('rejects when both providers fail', async () => {
     const fetchFn: MetadataFetch = async () => ({ ok: false, status: 503, text: async () => '' });
     await expect(lookupMetadata({ title: 'Down Song' }, fetchFn)).rejects.toThrow('metadata providers unavailable');
+  });
+});
+
+describe('lookupArtistImage', () => {
+  const jsonFetch =
+    (body: unknown): MetadataFetch =>
+    async () => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const portrait = 'https://e-cdns-images.dzcdn.net/images/artist/abc123/1000x1000-000000-80-0-0.jpg';
+  const placeholder = 'https://e-cdns-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg';
+
+  it('accepts only an exact folded-name match and rejects placeholder portraits', async () => {
+    // Each case uses its own name: results are cached per folded name.
+    const near = { id: 7, name: 'Beyonce Knowles Tribute', picture_xl: portrait };
+    expect(
+      await lookupArtistImage('Beyonce', jsonFetch({ data: [near, { id: 42, name: 'Beyoncé', picture_xl: portrait }] })),
+    ).toEqual({ id: '42', imageUrl: portrait });
+    expect(await lookupArtistImage('Adele', jsonFetch({ data: [{ ...near, name: 'Adele Tribute' }] }))).toBeNull();
+    expect(
+      await lookupArtistImage('Sia', jsonFetch({ data: [{ id: 9, name: 'Sia', picture_xl: placeholder }] })),
+    ).toBeNull();
+    await expect(lookupArtistImage('Daft Punk', jsonFetch({ error: { type: 'QuotaException' } }))).rejects.toThrow(
+      'Deezer API error',
+    );
   });
 });

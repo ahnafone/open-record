@@ -1,4 +1,5 @@
-import type { MetadataMatch, MetadataQuery } from './types';
+import { fold } from './normalize';
+import type { ArtistImage, MetadataMatch, MetadataQuery } from './types';
 
 /** Minimal request init the lookup uses; a global `fetch` or an injected native transport both fit. */
 export interface MetadataFetchInit {
@@ -33,6 +34,16 @@ const httpUrl = (v: unknown): string | undefined => {
   if (!s) return undefined;
   if (/^https:\/\//i.test(s)) return s;
   return /^http:\/\//i.test(s) ? 'https://' + s.slice('http://'.length) : undefined;
+};
+
+/**
+ * Deezer portrait as https. Deezer answers artists without a picture with a
+ * default silhouette whose hash segment is empty (`/images/artist//...`): dropped.
+ */
+const deezerPicture = (v: unknown): string | undefined => {
+  const s = str(v);
+  if (!s || !/^https:\/\//i.test(s) || /\/images\/artist\/\//.test(s)) return undefined;
+  return s;
 };
 
 async function getJson(fetchFn: MetadataFetch, url: string): Promise<Json> {
@@ -95,16 +106,52 @@ export function parseDeezer(body: Json): MetadataMatch[] {
     const title = str(r['title']);
     const artist = str(artistObj['name']);
     if (!title || !artist) continue;
+    const artistId = num(artistObj['id']);
     out.push({
       title,
       artist,
       album: str(albumObj['title']),
       artworkUrl: httpUrl(albumObj['cover_xl']),
       durationSec: num(r['duration']),
+      artistId: artistId !== undefined ? String(artistId) : undefined,
+      artistImageUrl: deezerPicture(artistObj['picture_xl']),
       source: 'deezer',
     });
   }
   return out;
+}
+
+/**
+ * First artist in a Deezer artist search whose folded name equals the folded
+ * query exactly (diacritics and case ignored) and that has a real portrait.
+ */
+export function pickDeezerArtist(body: Json, name: string): ArtistImage | null {
+  const wanted = fold(name);
+  if (!wanted) return null;
+  const data = Array.isArray(body['data']) ? (body['data'] as Json[]) : [];
+  for (const r of data) {
+    if (!r || typeof r !== 'object') continue;
+    const found = str(r['name']);
+    if (!found || fold(found) !== wanted) continue;
+    const imageUrl = deezerPicture(r['picture_xl']);
+    if (!imageUrl) continue;
+    const id = num(r['id']);
+    return { id: id !== undefined ? String(id) : undefined, imageUrl };
+  }
+  return null;
+}
+
+/** Deezer artist search for one name. Throws on transport or Deezer `error` responses. */
+export async function searchDeezerArtist(name: string, fetchFn: MetadataFetch): Promise<ArtistImage | null> {
+  const query = name.trim().slice(0, 200);
+  if (!query) return null;
+  const url = new URL('https://api.deezer.com/search/artist');
+  url.searchParams.set('q', query);
+  url.searchParams.set('limit', '5');
+  const body = await getJson(fetchFn, url.toString());
+  // Deezer reports quota/other errors with HTTP 200 and an `error` object.
+  if (body['error']) throw new Error('Deezer API error');
+  return pickDeezerArtist(body, query);
 }
 
 export async function searchItunes(q: MetadataQuery, fetchFn: MetadataFetch): Promise<MetadataMatch[]> {

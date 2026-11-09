@@ -24,6 +24,7 @@ import {
 import { filter, map, take } from 'rxjs';
 import { Capacitor } from '@capacitor/core';
 import {
+  ArtistsStore,
   AuthStore,
   AutoDownloadStore,
   LibraryStore,
@@ -109,6 +110,7 @@ export class App {
   protected readonly player = inject(PlayerStore);
   protected readonly viewport = inject(OrViewport);
   private readonly playlists = inject(PlaylistsStore);
+  private readonly artists = inject(ArtistsStore);
 
   private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthStore);
@@ -178,6 +180,12 @@ export class App {
     const { data, params } = this.screen();
     if (data.screen === 'playlist') {
       return this.playlists.playlist(params['id'] ?? '')?.name ?? 'Playlist';
+    }
+    if (data.screen === 'artist') {
+      return this.artists.artist(params['key'] ?? '')?.name ?? 'Artist';
+    }
+    if (data.screen === 'album') {
+      return this.artists.album(params['key'] ?? '')?.title ?? 'Album';
     }
     return data.title ?? '';
   });

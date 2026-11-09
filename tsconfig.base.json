@@ -33,6 +33,8 @@
       "@open-record/features/playlist": [
         "./libs/features/playlist/src/index.ts"
       ],
+      "@open-record/features/artist": ["./libs/features/artist/src/index.ts"],
+      "@open-record/features/album": ["./libs/features/album/src/index.ts"],
       "@open-record/features/now-playing": [
         "./libs/features/now-playing/src/index.ts"
       ],

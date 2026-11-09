@@ -16,6 +16,8 @@ export type {
 } from './lib/migrations';
 export { StoragePort } from './lib/storage-port';
 export type {
+  ArtistImageRecord,
+  ArtistImagesRepository,
   ImportedTrack,
   ImportedTracksRepository,
   ImportSession,

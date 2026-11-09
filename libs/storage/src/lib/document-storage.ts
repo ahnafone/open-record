@@ -2,6 +2,8 @@ import { Playlist, Track } from '@open-record/models';
 import { JsonValue, StorageBackend } from './backend';
 import { COLLECTIONS } from './migrations';
 import {
+  ArtistImageRecord,
+  ArtistImagesRepository,
   ImportedTrack,
   ImportedTracksRepository,
   ImportSession,
@@ -170,6 +172,13 @@ export class DocumentStorage extends StoragePort {
       return merged;
     },
     clear: async () => (await this.db()).clear(COLLECTIONS.playCounts),
+  };
+
+  readonly artistImages: ArtistImagesRepository = {
+    get: async (key) =>
+      (await this.db()).get<ArtistImageRecord>(COLLECTIONS.artistImages, key),
+    save: async (record) =>
+      (await this.db()).put(COLLECTIONS.artistImages, record.key, record),
   };
 
   readonly importedTracks: ImportedTracksRepository = {

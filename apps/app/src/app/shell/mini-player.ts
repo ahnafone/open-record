@@ -9,8 +9,14 @@ import { Capacitor } from '@capacitor/core';
 // Eager shell trigger for the one picker mounted by the shell (like App).
 // eslint-disable-next-line @nx/enforce-module-boundaries
 import { DevicePickerService } from '@open-record/features/now-playing';
-import { LibraryStore, PlayerStore, SessionStore } from '@open-record/state';
 import {
+  ArtistCreditPipe,
+  LibraryStore,
+  PlayerStore,
+  SessionStore,
+} from '@open-record/state';
+import {
+  OrArtistLinks,
   OrIcon,
   OrIconButton,
   OrProgressLine,
@@ -27,7 +33,7 @@ import {
  */
 @Component({
   selector: 'or-mini-player',
-  imports: [OrIcon, OrIconButton, OrProgressLine, OrSleeve, OrSpinner],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrIconButton, OrProgressLine, OrSleeve, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (player.current(); as track) {
@@ -48,15 +54,17 @@ import {
           </span>
         }
       </button>
-      <button
-        class="info"
-        type="button"
-        [attr.aria-label]="openLabel()"
-        (click)="open.emit()"
-      >
+      <div class="info">
+        <!-- Opens Now Playing; the artist link sits above it and navigates to the artist. -->
+        <button
+          class="info-play"
+          type="button"
+          [attr.aria-label]="openLabel()"
+          (click)="open.emit()"
+        ></button>
         <span class="title">{{ track.title }}</span>
-        <span class="artist">{{ track.artist }}</span>
-      </button>
+        <span class="artist"><or-artist-links [credit]="track.artist | artistCredit" /></span>
+      </div>
       @if (session.available()) {
         <button
           class="device"
@@ -106,7 +114,7 @@ import {
       top: -1px;
     }
     button.art,
-    button.info {
+    button.info-play {
       appearance: none;
       border: 0;
       padding: 0;
@@ -115,6 +123,16 @@ import {
       font: inherit;
       cursor: pointer;
       border-radius: var(--rounded-sleeve);
+    }
+    /* Covers the title block; the artist link above it still navigates. */
+    .info-play {
+      position: absolute;
+      inset: 0;
+      border-radius: var(--rounded-md);
+    }
+    .info > .title,
+    .info > .artist {
+      pointer-events: none;
     }
     .art {
       position: relative;
@@ -135,6 +153,7 @@ import {
       color: var(--color-primary);
     }
     .info {
+      position: relative;
       display: grid;
       min-width: 0;
       min-height: var(--spacing-touch);
@@ -142,6 +161,10 @@ import {
       padding: 0 var(--spacing-xs);
       text-align: left;
       border-radius: var(--rounded-md);
+    }
+    .info-play:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
     }
     .title,
     .artist {

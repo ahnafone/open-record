@@ -1,8 +1,8 @@
 import { TtlLru } from './cache';
 import { fold } from './normalize';
-import { searchDeezer, searchItunes, type MetadataFetch } from './providers';
+import { searchDeezer, searchDeezerArtist, searchItunes, type MetadataFetch } from './providers';
 import { pickBest, prepareQuery } from './score';
-import type { MetadataMatch, MetadataQuery } from './types';
+import type { ArtistImage, MetadataMatch, MetadataQuery } from './types';
 
 const HIT_TTL_MS = 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 60 * 60 * 1000;
@@ -10,6 +10,38 @@ const MISS_TTL_MS = 60 * 60 * 1000;
 const PARTIAL_TTL_MS = 60 * 1000;
 const cache = new TtlLru<MetadataMatch | null>(500);
 const inflight = new Map<string, Promise<MetadataMatch | null>>();
+
+const ARTIST_HIT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ARTIST_MISS_TTL_MS = 24 * 60 * 60 * 1000;
+const artistCache = new TtlLru<ArtistImage | null>(500);
+const artistInflight = new Map<string, Promise<ArtistImage | null>>();
+
+/**
+ * Deezer portrait for an artist name (exact folded-name match only). Resolves
+ * null when there is no usable portrait; rejects when Deezer fails, which is
+ * never cached. Concurrent calls for the same name share one request.
+ */
+export async function lookupArtistImage(name: string, fetchFn: MetadataFetch): Promise<ArtistImage | null> {
+  const key = fold(name);
+  if (!key) return null;
+  const cached = artistCache.get(key);
+  if (cached !== undefined) return cached;
+  const pending = artistInflight.get(key);
+  if (pending) return pending;
+
+  const run = (async () => {
+    const image = await searchDeezerArtist(name, fetchFn);
+    artistCache.set(key, image, image ? ARTIST_HIT_TTL_MS : ARTIST_MISS_TTL_MS);
+    return image;
+  })();
+
+  artistInflight.set(key, run);
+  try {
+    return await run;
+  } finally {
+    artistInflight.delete(key);
+  }
+}
 
 export interface MetadataLookupResult {
   match: MetadataMatch | null;

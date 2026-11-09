@@ -35,8 +35,10 @@ import {
   trackMatches,
   type TrackSort,
   type TrackSortKey,
+  ArtistCreditPipe,
 } from '@open-record/state';
 import {
+  OrArtistLinks,
   OrDownloadProgress,
   OrButton,
   OrDialog,
@@ -175,7 +177,7 @@ const ROW_STYLES = `
       color: var(--color-primary);
     }
     .track-main {
-      appearance: none;
+      position: relative;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
       align-items: center;
@@ -190,9 +192,24 @@ const ROW_STYLES = `
       color: inherit;
       font: inherit;
       text-align: left;
+    }
+    /* Covers the whole row; the content above it lets taps through except links. */
+    .track-play {
+      position: absolute;
+      inset: 0;
+      appearance: none;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
       cursor: pointer;
     }
-    .track-main:focus-visible,
+    .track-main > or-sleeve,
+    .text {
+      pointer-events: none;
+    }
+    .track-play:focus-visible,
     .sort:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
@@ -377,7 +394,8 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
   selector: 'or-playlist-page',
-  imports: [
+  imports: [ArtistCreditPipe, 
+    OrArtistLinks,
     OrDownloadProgress,
     AddRecordsDialog,
     OrButton,
@@ -572,18 +590,20 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
                   </button>
                 </div>
                 <div class="c-title" role="cell">
-                  <button
-                    type="button"
-                    class="track-main"
-                    [attr.aria-label]="playLabel(t, current)"
-                    [attr.aria-current]="current ? 'true' : null"
-                    (click)="playFrom(i)"
-                  >
+                  <div class="track-main">
+                    <!-- Stretched play action; the artist links sit above it. -->
+                    <button
+                      type="button"
+                      class="track-play"
+                      [attr.aria-label]="playLabel(t, current)"
+                      [attr.aria-current]="current ? 'true' : null"
+                      (click)="playFrom(i)"
+                    ></button>
                     <or-sleeve [src]="art(t)" [label]="t.title" [playing]="playing" />
                     <span class="text">
                       <span class="title">{{ t.title }}</span>
                       <span class="artist">
-                        {{ t.artist }}@if (t.album) {<span class="album-inline"> · {{ t.album }}</span>}@if (isCurated()) {<span class="album-inline"> · played {{ row.added }}</span>}
+                        <or-artist-links [credit]="t.artist | artistCredit" />@if (t.album) {<span class="album-inline"> · <or-artist-links [credit]="t.artist | artistCredit: t.album" [showArtist]="false" /></span>}@if (isCurated()) {<span class="album-inline"> · played {{ row.added }}</span>}
                       </span>
                       @if (imported || row.source || state || streamOnly) {
                         <span class="tags">
@@ -611,9 +631,9 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
                         </span>
                       }
                     </span>
-                  </button>
+                  </div>
                 </div>
-                <div class="c-album" role="cell">{{ t.album ?? '' }}</div>
+                <div class="c-album" role="cell"><or-artist-links [credit]="t.artist | artistCredit: t.album" [showArtist]="false" /></div>
                 <div class="c-source" role="cell">{{ row.source ?? '—' }}</div>
                 <div class="c-added" role="cell">{{ row.added }}</div>
                 <div class="c-duration" role="cell">{{ row.duration }}</div>

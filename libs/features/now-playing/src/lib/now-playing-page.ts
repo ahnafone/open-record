@@ -23,8 +23,10 @@ import {
   REMOTE_PROVIDER_ID,
   SessionStore,
   SourceFixService,
+  ArtistCreditPipe,
 } from '@open-record/state';
 import {
+  OrArtistLinks,
   OrButton,
   OrEmptyState,
   OrIcon,
@@ -72,8 +74,9 @@ interface UpNextRow {
  */
 @Component({
   selector: 'or-now-playing-page',
-  imports: [
+  imports: [ArtistCreditPipe, 
     RouterLink,
+    OrArtistLinks,
     OrButton,
     OrEmptyState,
     OrIcon,
@@ -118,9 +121,9 @@ interface UpNextRow {
             <h2 class="title" tabindex="-1" data-now-playing-title>
               {{ track.title }}
             </h2>
-            <p class="artist">{{ track.artist }}</p>
+            <p class="artist"><or-artist-links [credit]="track.artist | artistCredit" /></p>
             @if (albumLine(track); as album) {
-              <p class="album">{{ album }}</p>
+              <p class="album"><or-artist-links [credit]="track.artist | artistCredit: album" [showArtist]="false" /></p>
             }
           </div>
           @if (canFix(track)) {
@@ -275,25 +278,27 @@ interface UpNextRow {
         <ol class="queue">
           @for (row of upNextWindow.items(); track row.queueIndex) {
             <li class="row" [class.current]="row.current">
-              <button
-                type="button"
-                class="row-main"
-                [disabled]="row.disabled"
-                [attr.aria-current]="row.current ? 'true' : null"
-                [attr.aria-label]="
-                  'Play ' +
-                  row.track.title +
-                  ' by ' +
-                  row.track.artist +
-                  (row.playNext ? ', queued to play next' : '') +
-                  (row.note ? ', ' + row.note : '')
-                "
-                (click)="player.playAt(row.queueIndex)"
-              >
+              <div class="row-main" [class.is-disabled]="row.disabled">
+                <!-- Stretched play action; the artist links sit above it. -->
+                <button
+                  type="button"
+                  class="row-play"
+                  [disabled]="row.disabled"
+                  [attr.aria-current]="row.current ? 'true' : null"
+                  [attr.aria-label]="
+                    'Play ' +
+                    row.track.title +
+                    ' by ' +
+                    row.track.artist +
+                    (row.playNext ? ', queued to play next' : '') +
+                    (row.note ? ', ' + row.note : '')
+                  "
+                  (click)="player.playAt(row.queueIndex)"
+                ></button>
                 <or-sleeve size="thumb" [src]="art(row.track)" />
                 <span class="row-txt">
                   <span class="row-title">{{ row.track.title }}</span>
-                  <span class="row-artist">{{ row.track.artist }}</span>
+                  <span class="row-artist"><or-artist-links [credit]="row.track.artist | artistCredit" /></span>
                   @if (row.playNext || row.note || row.current) {
                     <span class="row-tags">
                       @if (row.current) {
@@ -311,7 +316,7 @@ interface UpNextRow {
                 @if (row.track.durationSec) {
                   <span class="time">{{ fmt(row.track.durationSec) }}</span>
                 }
-              </button>
+              </div>
               <or-icon-button
                 icon="more"
                 data-upnext-options
@@ -570,7 +575,7 @@ interface UpNextRow {
         color-mix(in srgb, var(--color-border) 32%, transparent);
     }
     .row-main {
-      appearance: none;
+      position: relative;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto;
       gap: 10px;
@@ -584,17 +589,35 @@ interface UpNextRow {
       color: inherit;
       font: inherit;
       text-align: left;
-      cursor: pointer;
       transition: background var(--duration-fast) var(--ease-standard);
+    }
+    /* Covers the whole row; the content above it lets taps through except links. */
+    .row-play {
+      position: absolute;
+      inset: 0;
+      appearance: none;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      cursor: pointer;
+    }
+    .row-play:disabled {
+      cursor: not-allowed;
+    }
+    .row-main > or-sleeve,
+    .row-txt,
+    .time {
+      pointer-events: none;
     }
     .row-main:hover {
       background: color-mix(in srgb, var(--color-text) 5%, transparent);
     }
-    .row-main:disabled {
+    .row-main.is-disabled {
       opacity: 0.55;
-      cursor: not-allowed;
     }
-    .row-main:focus-visible,
+    .row-play:focus-visible,
     .link-btn:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;

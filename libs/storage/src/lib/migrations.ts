@@ -49,6 +49,8 @@ export const COLLECTIONS = {
   metadataTracks: 'metadata_tracks',
   /** Per-track play counts. Added in v7. */
   playCounts: 'play_counts',
+  /** Cached Deezer artist portraits, keyed by artist key (misses hold a null imageUrl). Added in v8. */
+  artistImages: 'artist_images',
 } as const;
 
 /** Well-known keys in the `settings` collection. */
@@ -195,6 +197,13 @@ export const MIGRATIONS: readonly Migration[] = [
     description: 'Play counts collection (one record per played track)',
     async up(ctx) {
       await ctx.createCollection('play_counts');
+    },
+  },
+  {
+    version: 8,
+    description: 'Artist images collection (cached Deezer portraits, hits and misses)',
+    async up(ctx) {
+      await ctx.createCollection('artist_images');
     },
   },
 ];

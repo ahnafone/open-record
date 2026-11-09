@@ -16,8 +16,10 @@ import {
   formatAddedAt,
   formatDuration,
   sourceLabel,
+  ArtistCreditPipe,
 } from '@open-record/state';
 import {
+  OrArtistLinks,
   OrIcon,
   OrIconButton,
   OrSleeve,
@@ -38,7 +40,7 @@ import {
  */
 @Component({
   selector: 'or-library-row',
-  imports: [OrIcon, OrIconButton, OrSleeve, OrSpinner, OrTag],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrIconButton, OrSleeve, OrSpinner, OrTag],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     '[class.is-current]': 'current()',
@@ -47,15 +49,19 @@ import {
     @let t = track();
     @let isCurrent = current();
     @let isSaved = saved();
-    <button
-      class="record-main"
-      type="button"
-      [attr.aria-label]="
-        isCurrent ? null : 'Play ' + t.title + ' by ' + t.artist
-      "
-      [attr.aria-current]="isCurrent ? 'true' : null"
-      (click)="playTrack.emit()"
-    >
+    <div class="record-main">
+      <!-- Stretched play action; the text and artist links sit above it. -->
+      <button
+        class="record-play"
+        type="button"
+        [attr.aria-label]="
+          isCurrent
+            ? t.title + ' by ' + t.artist + ', ' + (player.isPlaying() ? 'on the turntable' : 'paused')
+            : 'Play ' + t.title + ' by ' + t.artist
+        "
+        [attr.aria-current]="isCurrent ? 'true' : null"
+        (click)="playTrack.emit()"
+      ></button>
       <span class="sleeve-slot">
         <or-sleeve
           size="thumb"
@@ -71,12 +77,11 @@ import {
               <or-icon name="pause" [size]="22" />
             }
           </span>
-          <span class="sr-only">{{ player.isPlaying() ? 'On the turntable' : 'Paused' }}</span>
         }
       </span>
       <span class="info">
         <span class="title">{{ t.title }}</span>
-        <span class="artist">{{ t.artist }}@if (t.album) {<span class="album-inline"> · {{ t.album }}</span>}</span>
+        <span class="artist"><or-artist-links [credit]="t.artist | artistCredit" />@if (t.album) {<span class="album-inline"> · <or-artist-links [credit]="t.artist | artistCredit: t.album" [showArtist]="false" /></span>}</span>
         <span class="detail">
           @if (source(); as src) {
             <or-tag class="source-tag">{{ src }}</or-tag>
@@ -101,9 +106,9 @@ import {
           }
         </span>
       </span>
-    </button>
+    </div>
     <!-- Desktop table cells (hidden below 900px, where the row shows them inline). -->
-    <span class="c-album">{{ t.album ?? '' }}</span>
+    <span class="c-album"><or-artist-links [credit]="t.artist | artistCredit: t.album" [showArtist]="false" /></span>
     <span class="c-source">{{ source() ?? '—' }}</span>
     <span class="c-added">{{ added() }}</span>
     <span class="dur">{{ duration() }}</span>
@@ -131,6 +136,7 @@ import {
       display: contents;
     }
     .record-main {
+      position: relative;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
       gap: 10px;
@@ -144,11 +150,26 @@ import {
       color: inherit;
       font: inherit;
       text-align: left;
+    }
+    /* Covers the whole row; the content above it lets taps through except links. */
+    .record-play {
+      position: absolute;
+      inset: 0;
+      appearance: none;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
       cursor: pointer;
     }
-    .record-main:focus-visible {
+    .record-play:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
+    }
+    .sleeve-slot,
+    .info {
+      pointer-events: none;
     }
     .info {
       display: grid;

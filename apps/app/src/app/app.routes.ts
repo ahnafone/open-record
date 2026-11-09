@@ -28,6 +28,8 @@ export interface ScreenData {
     | 'search'
     | 'library'
     | 'playlist'
+    | 'artist'
+    | 'album'
     | 'now-playing'
     | 'settings'
     | 'account'
@@ -73,6 +75,30 @@ export const appRoutes: Route[] = [
     canActivate: [requireWebAccount],
     loadComponent: () =>
       import('@open-record/features/playlist').then((m) => m.PlaylistPage),
+  },
+  {
+    path: 'artist/:key',
+    title: 'Artist · Open Record',
+    data: {
+      screen: 'artist',
+      root: false,
+      title: 'Artist',
+    } satisfies ScreenData,
+    canActivate: [requireWebAccount],
+    loadComponent: () =>
+      import('@open-record/features/artist').then((m) => m.ArtistPage),
+  },
+  {
+    path: 'album/:key',
+    title: 'Album · Open Record',
+    data: {
+      screen: 'album',
+      root: false,
+      title: 'Album',
+    } satisfies ScreenData,
+    canActivate: [requireWebAccount],
+    loadComponent: () =>
+      import('@open-record/features/album').then((m) => m.AlbumPage),
   },
   {
     path: 'curated/:id',

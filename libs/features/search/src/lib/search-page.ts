@@ -21,8 +21,10 @@ import {
   downloadState,
   formatDuration,
   sourceLabel,
+  ArtistCreditPipe,
 } from '@open-record/state';
 import {
+  OrArtistLinks,
   OrButton,
   OrChip,
   OrEmptyState,
@@ -80,6 +82,7 @@ const ROW_STYLES = `
       border-block-start: 0;
     }
     .record-main {
+      position: relative;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
       align-items: center;
@@ -94,8 +97,23 @@ const ROW_STYLES = `
       color: inherit;
       font: inherit;
       text-align: start;
-      cursor: pointer;
       transition: transform var(--duration-fast) var(--ease-standard);
+    }
+    /* Covers the whole row; the content above it lets taps through except links. */
+    .record-play {
+      position: absolute;
+      inset: 0;
+      appearance: none;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: var(--rounded-md);
+      cursor: pointer;
+    }
+    .record-main > or-sleeve,
+    .info {
+      pointer-events: none;
     }
     /* Hover only where a pointer can hover (no sticky hover after a tap). */
     @media (hover: hover) {
@@ -111,7 +129,7 @@ const ROW_STYLES = `
     .record-main:active {
       transform: scale(0.97);
     }
-    .record-main:focus-visible {
+    .record-play:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
     }
@@ -203,8 +221,9 @@ const ROW_STYLES = `
  */
 @Component({
   selector: 'or-search-page',
-  imports: [
+  imports: [ArtistCreditPipe, 
     DownloadSources,
+    OrArtistLinks,
     OrButton,
     OrChip,
     OrEmptyState,
@@ -292,13 +311,15 @@ const ROW_STYLES = `
           @let source = sourceLabel(t.source?.site);
           @let streamOnly = !status && t.providerId === remoteId;
           <li class="record" [class.is-current]="current">
-            <button
-              class="record-main"
-              type="button"
-              [attr.aria-label]="rowLabel(t, current)"
-              [attr.aria-current]="current ? 'true' : null"
-              (click)="play(t, current)"
-            >
+            <div class="record-main">
+              <!-- Stretched play action; the artist links sit above it. -->
+              <button
+                class="record-play"
+                type="button"
+                [attr.aria-label]="rowLabel(t, current)"
+                [attr.aria-current]="current ? 'true' : null"
+                (click)="play(t, current)"
+              ></button>
               <or-sleeve
                 size="thumb"
                 [src]="art(t)"
@@ -306,7 +327,7 @@ const ROW_STYLES = `
               />
               <span class="info">
                 <span class="title">{{ t.title }}</span>
-                <span class="artist">{{ t.artist }}@if (t.album) { · {{ t.album }}}</span>
+                <span class="artist"><or-artist-links [credit]="t.artist | artistCredit: t.album" /></span>
                 @if (detail(t); as d) {
                   <span class="detail">{{ d }}</span>
                 }
@@ -345,7 +366,7 @@ const ROW_STYLES = `
                   </span>
                 }
               </span>
-            </button>
+            </div>
             <span class="dur">{{ formatDuration(t.durationSec) }}</span>
             <or-icon-button
               icon="bookmark"

@@ -17,8 +17,10 @@ import {
   LibraryStore,
   PlayerStore,
   SessionStore,
+  ArtistCreditPipe,
 } from '@open-record/state';
 import {
+  OrArtistLinks,
   OrIcon,
   OrIconButton,
   OrSleeve,
@@ -44,7 +46,7 @@ function formatTime(totalSec: number): string {
  */
 @Component({
   selector: 'or-player-bar',
-  imports: [OrIcon, OrIconButton, OrSleeve, OrSlider, OrSpinner],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrIconButton, OrSleeve, OrSlider, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="track">
@@ -59,7 +61,7 @@ function formatTime(totalSec: number): string {
         </button>
         <div class="info">
           <span class="title">{{ track.title }}</span>
-          <span class="artist">{{ track.artist }}</span>
+          <span class="artist"><or-artist-links [credit]="track.artist | artistCredit" /></span>
         </div>
       } @else {
         <span class="idle">Nothing on the turntable</span>

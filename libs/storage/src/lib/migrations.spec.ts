@@ -158,7 +158,7 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([4, 5, 6, 7]);
+    expect(result.applied).toEqual([4, 5, 6, 7, 8]);
     expect(await backend.get(COLLECTIONS.importedTracks, 'local:1')).toMatchObject({ status: 'saved', filePath: 'imported/1.audio.mp3' });
     expect(await backend.get(COLLECTIONS.importedTracks, 'remote:2')).toMatchObject({ status: 'saving', filePath: '' });
   });
@@ -175,7 +175,7 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([6, 7]);
+    expect(result.applied).toEqual([6, 7, 8]);
     expect(await backend.getAll(COLLECTIONS.metadataTracks)).toEqual([blob[0], blob[1]]);
     expect(await backend.get(COLLECTIONS.metadataTracks, 'spotify:2')).toEqual(blob[1]);
     // The legacy blob is kept as a fallback for older builds.
@@ -192,8 +192,21 @@ describe('runMigrations', () => {
 
     const result = await runMigrations(backend, MIGRATIONS);
 
-    expect(result.applied).toEqual([7]);
+    expect(result.applied).toEqual([7, 8]);
     expect(backend.tables.has(COLLECTIONS.playCounts)).toBe(true);
     expect(await backend.getAll(COLLECTIONS.playCounts)).toEqual([]);
+  });
+
+  it('v8 creates an empty artist_images collection', async () => {
+    const backend = new InMemoryBackend();
+    await runMigrations(backend, MIGRATIONS.slice(0, 7));
+    // Same stand-in as v7: drop the table v1 created so v8 has to recreate it.
+    backend.tables.delete(COLLECTIONS.artistImages);
+
+    const result = await runMigrations(backend, MIGRATIONS);
+
+    expect(result.applied).toEqual([8]);
+    expect(backend.tables.has(COLLECTIONS.artistImages)).toBe(true);
+    expect(await backend.getAll(COLLECTIONS.artistImages)).toEqual([]);
   });
 });

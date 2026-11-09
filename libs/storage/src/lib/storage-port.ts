@@ -139,6 +139,22 @@ export interface ImportedTracksRepository {
   clear(): Promise<void>;
 }
 
+/**
+ * Cached artist portrait lookup. `imageUrl` null is a remembered miss.
+ * `key` is the artist key; `fetchedAt` is epoch milliseconds.
+ */
+export interface ArtistImageRecord {
+  key: string;
+  name: string;
+  imageUrl: string | null;
+  fetchedAt: number;
+}
+
+export interface ArtistImagesRepository {
+  get(key: string): Promise<ArtistImageRecord | undefined>;
+  save(record: ArtistImageRecord): Promise<void>;
+}
+
 export type ImportSessionKind = 'files' | 'spotify' | 'youtube';
 
 /**
@@ -198,6 +214,7 @@ export abstract class StoragePort {
   abstract readonly playlists: PlaylistRepository;
   abstract readonly savedRecords: SavedRecordsRepository;
   abstract readonly playCounts: PlayCountsRepository;
+  abstract readonly artistImages: ArtistImagesRepository;
   abstract readonly importedTracks: ImportedTracksRepository;
   abstract readonly queueState: QueueStateRepository;
   abstract readonly settings: SettingsRepository;
