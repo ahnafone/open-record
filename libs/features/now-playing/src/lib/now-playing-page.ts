@@ -6,9 +6,11 @@ import {
   afterNextRender,
   booleanAttribute,
   computed,
+  effect,
   inject,
   input,
   signal,
+  untracked,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import type { Track } from '@open-record/models';
@@ -34,6 +36,8 @@ import {
   OrSpinner,
   OrTag,
   OrToast,
+  copyText,
+  isHttpUrl,
   lazyWindow,
 } from '@open-record/ui';
 import { DevicePickerService } from './device-picker';
@@ -109,13 +113,25 @@ interface UpNextRow {
           {{ eyebrowText() }}
         </button>
         <span class="sr-only" aria-live="polite">{{ eyebrowText() }}</span>
-        <h2 class="title" tabindex="-1" data-now-playing-title>
-          {{ track.title }}
-        </h2>
-        <p class="artist">{{ track.artist }}</p>
-        @if (albumLine(track); as album) {
-          <p class="album">{{ album }}</p>
-        }
+        <div class="title-row" [class.is-route]="!panel()">
+          <div class="title-block">
+            <h2 class="title" tabindex="-1" data-now-playing-title>
+              {{ track.title }}
+            </h2>
+            <p class="artist">{{ track.artist }}</p>
+            @if (albumLine(track); as album) {
+              <p class="album">{{ album }}</p>
+            }
+          </div>
+          @if (canFix(track)) {
+            <or-icon-button
+              class="track-options"
+              icon="more"
+              [label]="'Options for ' + track.title"
+              (click)="trackOptionsOpen.set(true)"
+            />
+          }
+        </div>
         <div class="tags">
           @if (isImported(track)) {
             <or-tag ivory>Imported</or-tag>
@@ -318,8 +334,25 @@ interface UpNextRow {
       }
 
       <or-modal
+        [open]="trackOptionsOpen()"
+        [heading]="track.title"
+        closable
+        (dismissed)="trackOptionsOpen.set(false)"
+      >
+        <div orModalActions>
+          @if (canFix(track)) {
+            <or-button block (click)="fixFromTrackOptions(track)">Fix source</or-button>
+          }
+          @if (httpUrl(track.source?.url ?? '')) {
+            <or-button block (click)="copyTrackSource(track)">Copy source link</or-button>
+          }
+        </div>
+      </or-modal>
+
+      <or-modal
         [open]="!!optionsFor()"
         [heading]="optionsFor()?.track?.title ?? 'Record'"
+        closable
         (dismissed)="optionsFor.set(null)"
       >
         <div orModalActions>
@@ -329,7 +362,9 @@ interface UpNextRow {
           <or-button block variant="danger" (click)="removeFromOptions()">
             Remove from queue
           </or-button>
-          <or-button block (click)="optionsFor.set(null)">Close</or-button>
+          @if (httpUrl(optionsFor()?.track?.source?.url ?? '')) {
+            <or-button block (click)="copyUpNextSource()">Copy source link</or-button>
+          }
         </div>
       </or-modal>
       </div>
@@ -373,6 +408,16 @@ interface UpNextRow {
         .np-body {
           display: block;
         }
+        /* Desktop route: the ⋯ button shows on hover or keyboard focus. */
+        @media (hover: hover) {
+          .title-row.is-route .track-options {
+            opacity: 0;
+          }
+          .title-row.is-route:hover .track-options,
+          .title-row.is-route:focus-within .track-options {
+            opacity: 1;
+          }
+        }
       }
     }
     .stage {
@@ -382,6 +427,19 @@ interface UpNextRow {
       display: grid;
       gap: var(--spacing-xxs);
       margin-bottom: 10px;
+    }
+    .title-row {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--spacing-xs);
+    }
+    .title-block {
+      flex: 1 1 auto;
+      min-inline-size: 0;
+    }
+    .track-options {
+      margin-inline-end: calc(var(--spacing-sm) * -1);
+      transition: opacity var(--duration-fast) var(--ease-standard);
     }
     .eyebrow {
       position: relative;
@@ -587,7 +645,8 @@ interface UpNextRow {
     }
     @media (prefers-reduced-motion: reduce) {
       .row-main,
-      .link-btn {
+      .link-btn,
+      .track-options {
         transition-duration: 1ms;
       }
       .link-btn:active {
@@ -608,11 +667,26 @@ export class NowPlayingPage {
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly injector = inject(Injector);
 
+  constructor() {
+    // A different record (or an empty queue) must not inherit an open options modal.
+    let lastId: string | undefined;
+    effect(() => {
+      const id = this.player.current()?.id;
+      if (id === lastId) return;
+      lastId = id;
+      untracked(() => this.trackOptionsOpen.set(false));
+    });
+  }
+
+  protected readonly httpUrl = isHttpUrl;
+
   /** Hosted as the desktop side panel: the player bar owns seek and transport. */
   readonly panel = input(false, { transform: booleanAttribute });
 
   /** Up next row whose options modal is open. */
   protected readonly optionsFor = signal<UpNextRow | null>(null);
+  /** Options modal for the current record (⋯ beside its title). */
+  protected readonly trackOptionsOpen = signal(false);
   /** A transfer back to this device is in flight (stale-target CTA). */
   protected readonly transferring = signal(false);
 
@@ -782,6 +856,44 @@ export class NowPlayingPage {
 
   protected openSourceFix(track: Track): void {
     this.sourceFix.open(track);
+  }
+
+  /** Options: close the modal, then open the source fix for this record. */
+  protected fixFromTrackOptions(track: Track): void {
+    this.trackOptionsOpen.set(false);
+    this.openSourceFix(track);
+  }
+
+  /** Options: copy the record's source link, then close the modal. */
+  protected async copyTrackSource(track: Track): Promise<void> {
+    await this.copySourceLink(track.source?.url, () =>
+      this.trackOptionsOpen.set(false),
+    );
+  }
+
+  /** Up next options: copy that row's source link, then close the modal. */
+  protected async copyUpNextSource(): Promise<void> {
+    await this.copySourceLink(this.optionsFor()?.track.source?.url, () =>
+      this.optionsFor.set(null),
+    );
+  }
+
+  /**
+   * Copies while the modal is still open so the click gesture and modal state
+   * stay consistent. `copyText` handles the open modal's focus trap itself.
+   */
+  private async copySourceLink(
+    url: string | undefined,
+    close: () => void,
+  ): Promise<void> {
+    if (!url || !isHttpUrl(url)) {
+      close();
+      this.toast.show('No source link for this record');
+      return;
+    }
+    const copied = await copyText(url);
+    close();
+    this.toast.show(copied ? 'Source link copied' : 'Could not copy link');
   }
 
   /** Retry a local playback failure; the engine reloads the record. */

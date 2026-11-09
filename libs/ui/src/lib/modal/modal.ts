@@ -7,6 +7,7 @@ import {
   Injector,
   afterNextRender,
   booleanAttribute,
+  computed,
   effect,
   inject,
   input,
@@ -15,6 +16,7 @@ import {
   untracked,
   viewChild,
 } from '@angular/core';
+import { OrIconButton } from '../icon-button/icon-button';
 import { tabbables } from './focusable';
 
 /** Open modals, topmost last. Only the topmost one handles keys. */
@@ -48,6 +50,7 @@ let nextId = 0;
         <div
           #dialog
           class="modal"
+          [class.closable]="showClose()"
           role="dialog"
           aria-modal="true"
           tabindex="-1"
@@ -55,15 +58,30 @@ let nextId = 0;
           [attr.aria-label]="heading() ? null : ariaLabel() || null"
           (keydown)="onDialogKeydown($event)"
         >
-          @if (heading()) {
-            <h2 class="title" [id]="headingId">{{ heading() }}</h2>
+          <div class="scroll">
+            @if (heading()) {
+              <h2 class="title" [id]="headingId">{{ heading() }}</h2>
+            }
+            <div
+              class="body"
+              [class.inset-end]="showClose() && !heading()"
+            ><ng-content /></div>
+            <div class="actions"><ng-content select="[orModalActions]" /></div>
+          </div>
+          <!-- Last in DOM and tab order on purpose: initial focus lands on the first body/action. -->
+          @if (showClose()) {
+            <or-icon-button
+              class="close"
+              label="Close"
+              icon="close"
+              (click)="dismiss()"
+            />
           }
-          <div class="body"><ng-content /></div>
-          <div class="actions"><ng-content select="[orModalActions]" /></div>
         </div>
       </div>
     }
   `,
+  imports: [OrIconButton],
   styles: `
     :host {
       display: contents;
@@ -80,26 +98,54 @@ let nextId = 0;
       background: color-mix(in srgb, var(--color-vinyl) 68%, transparent);
       animation: or-modal-fade var(--duration-base) var(--ease-standard);
     }
+    /* Fixed frame: only .scroll moves, so the X (absolute here) stays pinned. */
     .modal {
+      position: relative;
       inline-size: 100%;
       max-inline-size: 336px;
       max-block-size: 82%;
-      overflow: auto;
-      overflow-x: hidden;
-      overscroll-behavior: contain;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       background: var(--color-surface);
       color: var(--color-text);
       border: 1px solid var(--color-border);
       border-radius: var(--rounded-md);
-      padding: var(--spacing-lg);
-      display: grid;
-      gap: var(--spacing-md);
       box-shadow: 0 24px 50px
         color-mix(in srgb, var(--color-vinyl) 55%, transparent);
     }
     .modal:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
+    }
+    .scroll {
+      display: grid;
+      gap: var(--spacing-md);
+      flex: 1 1 auto;
+      min-block-size: 0;
+      padding: var(--spacing-lg);
+      overflow: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+    }
+    /* 44px X pinned to the top-right corner; 8px inset keeps its focus ring inside the dialog. */
+    .close {
+      position: absolute;
+      top: var(--spacing-sm);
+      inset-inline-end: var(--spacing-sm);
+      z-index: 1;
+    }
+    /* Start the scroll area below the X row so the scrollbar never sits under the X. */
+    .modal.closable .scroll {
+      margin-block-start: calc(var(--spacing-touch) + var(--spacing-sm));
+      scrollbar-gutter: stable;
+    }
+    /* Keep heading and content clear of the X (44px button + 8px inset). */
+    .modal.closable .title {
+      padding-inline-end: calc(var(--spacing-touch) + var(--spacing-sm));
+    }
+    .body.inset-end {
+      padding-inline-end: calc(var(--spacing-touch) + var(--spacing-sm));
     }
     .title {
       margin: 0;
@@ -144,6 +190,12 @@ export class OrModal {
   readonly ariaLabel = input<string>('');
   /** Escape and backdrop clicks close the modal. */
   readonly dismissible = input(true, { transform: booleanAttribute });
+  /** Shows a close (X) button in the top-right corner that calls `dismiss()`. */
+  readonly closable = input(false, { transform: booleanAttribute });
+  /** The X is shown only when it can actually close the modal. */
+  protected readonly showClose = computed(
+    () => this.closable() && this.dismissible(),
+  );
   /** Emitted when the user dismisses via Escape or the backdrop. */
   readonly dismissed = output<void>();
 

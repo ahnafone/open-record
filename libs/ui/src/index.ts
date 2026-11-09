@@ -24,6 +24,8 @@ export { OrSectionHead } from './lib/section-head/section-head';
 export { OrEmptyState } from './lib/empty-state/empty-state';
 export { OrModal } from './lib/modal/modal';
 export { tabbables } from './lib/modal/focusable';
+export { copyText } from './lib/clipboard/copy-text';
+export { isHttpUrl } from './lib/clipboard/http-url';
 export {
   OrDialog,
   OrConfirmDialog,

@@ -53,6 +53,8 @@ import {
   OrSwitch,
   OrTag,
   OrToast,
+  copyText,
+  isHttpUrl,
   lazyWindow,
 } from '@open-record/ui';
 import { AddRecordsDialog } from './add-records-dialog';
@@ -675,12 +677,16 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
       <or-modal
         [open]="!!optionsFor()"
         [heading]="optionsFor()?.title ?? 'Record'"
+        [closable]="true"
         (dismissed)="optionsFor.set(null)"
       >
         <div orModalActions>
           <or-button block (click)="playNext()">Play next</or-button>
           @if (optionsFor()?.source?.url) {
             <or-button block (click)="fixSource()">Fix source</or-button>
+          }
+          @if (httpUrl(optionsFor()?.source?.url ?? '')) {
+            <or-button block (click)="copySourceLink()">Copy source link</or-button>
           }
           @if (vm.kind === 'playlist') {
             <!-- Reordering only makes sense in the playlist's own, unfiltered order. -->
@@ -700,7 +706,6 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
               Remove from playlist
             </or-button>
           }
-          <or-button block (click)="optionsFor.set(null)">Close</or-button>
         </div>
       </or-modal>
 
@@ -1148,6 +1153,22 @@ export class PlaylistPage {
     this.optionsFor.set(null);
     if (!track) return;
     this.sourceFix.open(track, origin ?? undefined);
+  }
+
+  protected readonly httpUrl = isHttpUrl;
+
+  /** Copy the optioned record's source link, then close the options modal. */
+  protected async copySourceLink(): Promise<void> {
+    const url = this.optionsFor()?.source?.url;
+    if (!url || !isHttpUrl(url)) {
+      this.optionsFor.set(null);
+      return;
+    }
+    // Copy while the modal is still open so the click gesture and modal state stay
+    // consistent; copyText handles the open modal's focus trap itself.
+    const copied = await copyText(url);
+    this.optionsFor.set(null);
+    this.toast.show(copied ? 'Source link copied' : 'Could not copy link');
   }
 
   /** Queue the optioned record right after the current one. */

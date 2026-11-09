@@ -63,3 +63,61 @@ describe('OrModal focus management', () => {
     fixture.nativeElement.remove();
   });
 });
+
+@Component({
+  imports: [OrModal],
+  template: `
+    <or-modal heading="Sort" closable [(open)]="open">
+      <button id="first">First</button>
+    </or-modal>
+  `,
+})
+class ClosableHost {
+  readonly open = signal(true);
+}
+
+@Component({
+  imports: [OrModal],
+  template: `
+    <or-modal heading="Sort" closable [dismissible]="false" [(open)]="open">
+      <button id="first">First</button>
+    </or-modal>
+  `,
+})
+class NoDismissHost {
+  readonly open = signal(true);
+}
+
+describe('OrModal closable', () => {
+  it('renders an X that dismisses the modal', async () => {
+    const fixture = TestBed.createComponent(ClosableHost);
+    document.body.appendChild(fixture.nativeElement);
+    try {
+      await fixture.whenStable();
+      const root = fixture.nativeElement as HTMLElement;
+      const close = root.querySelector<HTMLButtonElement>(
+        'button[aria-label="Close"]',
+      ) as HTMLButtonElement;
+      expect(close).not.toBeNull();
+      close.click();
+      await fixture.whenStable();
+      expect(fixture.componentInstance.open()).toBe(false);
+      expect(root.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      fixture.nativeElement.remove();
+    }
+  });
+
+  it('renders no X when closable but not dismissible', async () => {
+    const fixture = TestBed.createComponent(NoDismissHost);
+    document.body.appendChild(fixture.nativeElement);
+    try {
+      await fixture.whenStable();
+      const root = fixture.nativeElement as HTMLElement;
+      expect(root.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(root.querySelector('button[aria-label="Close"]')).toBeNull();
+    } finally {
+      fixture.nativeElement.remove();
+    }
+  });
+});
