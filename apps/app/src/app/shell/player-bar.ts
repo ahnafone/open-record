@@ -29,6 +29,7 @@ import {
   OrToast,
   type IconName,
 } from '@open-record/ui';
+import { OrCurrentTrackMenu } from './current-track-menu';
 
 /** `m:ss` (or `h:mm:ss`); same as Now Playing's, kept here so the shell does not pull that chunk. */
 function formatTime(totalSec: number): string {
@@ -46,7 +47,7 @@ function formatTime(totalSec: number): string {
  */
 @Component({
   selector: 'or-player-bar',
-  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrIconButton, OrSleeve, OrSlider, OrSpinner],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrCurrentTrackMenu, OrIcon, OrIconButton, OrSleeve, OrSlider, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="track">
@@ -63,6 +64,7 @@ function formatTime(totalSec: number): string {
           <span class="title">{{ track.title }}</span>
           <span class="artist"><or-artist-links [credit]="track.artist | artistCredit" /></span>
         </div>
+        <or-current-track-menu [track]="track" />
       } @else {
         <span class="idle">Nothing on the turntable</span>
       }
@@ -223,6 +225,16 @@ function formatTime(totalSec: number): string {
     .info {
       display: grid;
       min-width: 0;
+    }
+    /* ⋯ beside the title: hidden until the track area is hovered or focused (mouse). */
+    @media (hover: hover) {
+      or-current-track-menu {
+        opacity: 0;
+      }
+      .track:hover or-current-track-menu,
+      .track:has(:focus-visible) or-current-track-menu {
+        opacity: 1;
+      }
     }
     .title,
     .artist {

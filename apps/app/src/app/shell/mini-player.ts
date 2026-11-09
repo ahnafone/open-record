@@ -24,6 +24,7 @@ import {
   OrSpinner,
   type IconName,
 } from '@open-record/ui';
+import { OrCurrentTrackMenu } from './current-track-menu';
 
 /**
  * Mini player strip above the tab bar: 2px progress line, 44px ivory-framed
@@ -33,7 +34,7 @@ import {
  */
 @Component({
   selector: 'or-mini-player',
-  imports: [ArtistCreditPipe, OrArtistLinks, OrIcon, OrIconButton, OrProgressLine, OrSleeve, OrSpinner],
+  imports: [ArtistCreditPipe, OrArtistLinks, OrCurrentTrackMenu, OrIcon, OrIconButton, OrProgressLine, OrSleeve, OrSpinner],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (player.current(); as track) {
@@ -65,6 +66,7 @@ import {
         <span class="title">{{ track.title }}</span>
         <span class="artist"><or-artist-links [credit]="track.artist | artistCredit" /></span>
       </div>
+      <or-current-track-menu [track]="track" />
       @if (session.available()) {
         <button
           class="device"
@@ -99,7 +101,12 @@ import {
     :host {
       position: relative;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      /* Art and title are explicit; the trailing controls flow into implicit
+         auto columns (column flow, one row), so an absent device button or
+         options menu never leaves an empty track or wraps to a new row. */
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-auto-flow: column;
+      grid-auto-columns: auto;
       align-items: center;
       gap: 6px;
       padding: 6px 6px 6px 8px;

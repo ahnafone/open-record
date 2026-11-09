@@ -116,7 +116,7 @@ interface UpNextRow {
           {{ eyebrowText() }}
         </button>
         <span class="sr-only" aria-live="polite">{{ eyebrowText() }}</span>
-        <div class="title-row" [class.is-route]="!panel()">
+        <div class="title-row">
           <div class="title-block">
             <h2 class="title" tabindex="-1" data-now-playing-title>
               {{ track.title }}
@@ -413,16 +413,6 @@ interface UpNextRow {
         .np-body {
           display: block;
         }
-        /* Desktop route: the ⋯ button shows on hover or keyboard focus. */
-        @media (hover: hover) {
-          .title-row.is-route .track-options {
-            opacity: 0;
-          }
-          .title-row.is-route:hover .track-options,
-          .title-row.is-route:focus-within .track-options {
-            opacity: 1;
-          }
-        }
       }
     }
     .stage {
@@ -445,6 +435,16 @@ interface UpNextRow {
     .track-options {
       margin-inline-end: calc(var(--spacing-sm) * -1);
       transition: opacity var(--duration-fast) var(--ease-standard);
+    }
+    /* Hover-capable devices: ⋯ is transparent until hover or keyboard focus (still focusable). Touch: always visible. */
+    @media (hover: hover) {
+      .track-options {
+        opacity: 0;
+      }
+      .title-row:hover .track-options,
+      .title-row:has(:focus-visible) .track-options {
+        opacity: 1;
+      }
     }
     .eyebrow {
       position: relative;
