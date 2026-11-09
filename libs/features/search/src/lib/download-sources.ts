@@ -178,7 +178,7 @@ export const SEARCHABLE_SOURCES: readonly {
       <p class="note">
         Saved records are copied to this device. Other records stream from the
         server. You are responsible for what you use. See the
-        <a routerLink="/settings" fragment="music-disclaimer"
+        <a routerLink="/about" fragment="music-disclaimer"
           >music disclaimer</a
         >.
       </p>

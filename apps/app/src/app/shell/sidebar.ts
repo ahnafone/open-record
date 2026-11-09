@@ -130,6 +130,14 @@ const NAV: readonly NavItem[] = [
       >
         <or-icon name="settings" [size]="20" />Settings
       </a>
+      <a
+        class="link small"
+        routerLink="/about"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <or-icon name="info" [size]="20" />About
+      </a>
     </nav>
   `,
   styles: `

@@ -32,6 +32,7 @@ export interface ScreenData {
     | 'album'
     | 'now-playing'
     | 'settings'
+    | 'about'
     | 'account'
     | 'import'
     | 'desktop';
@@ -132,6 +133,17 @@ export const appRoutes: Route[] = [
     } satisfies ScreenData,
     loadComponent: () =>
       import('@open-record/features/settings').then((m) => m.SettingsPage),
+  },
+  {
+    path: 'about',
+    title: 'About · Open Record',
+    data: {
+      screen: 'about',
+      root: false,
+      title: 'About',
+    } satisfies ScreenData,
+    loadComponent: () =>
+      import('@open-record/features/about').then((m) => m.AboutPage),
   },
   {
     path: 'account',

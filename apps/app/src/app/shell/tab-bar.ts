@@ -33,7 +33,7 @@ interface Tab {
       grid-template-columns: repeat(3, 1fr);
       gap: var(--spacing-xs);
       padding: var(--spacing-xs) var(--spacing-sm)
-        calc(6px + env(safe-area-inset-bottom, 0px));
+        calc(6px + var(--or-dock-safe-bottom, env(safe-area-inset-bottom, 0px)));
       background: var(--color-background);
       border-top: 1px solid
         color-mix(in srgb, var(--color-border) 50%, transparent);

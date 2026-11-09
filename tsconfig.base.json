@@ -5,6 +5,7 @@
     "sourceMap": true,
     "declaration": false,
     "moduleResolution": "bundler",
+    "resolveJsonModule": true,
     "emitDecoratorMetadata": false,
     "experimentalDecorators": true,
     "importHelpers": true,
@@ -44,6 +45,7 @@
       "@open-record/features/settings": [
         "./libs/features/settings/src/index.ts"
       ],
+      "@open-record/features/about": ["./libs/features/about/src/index.ts"],
       "@open-record/features/account": [
         "./libs/features/account/src/index.ts"
       ],

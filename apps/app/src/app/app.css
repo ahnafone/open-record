@@ -1,7 +1,10 @@
-/* 3-row shell: top bar, scrolling screen host, dock. Chrome never scrolls. */
+/*
+ * 4-row shell: top bar, scrolling screen host, dock, link strip (web, signed
+ * out only; an empty row otherwise). Chrome never scrolls.
+ */
 :host {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: 100dvh;
   padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
   background: var(--color-background);
@@ -26,17 +29,26 @@
   background: var(--color-background);
 }
 
+/* While the link strip shows, it owns the bottom safe-area inset: the tab bar drops its own. */
+:host(.link-strip-shown) {
+  --or-dock-safe-bottom: 0px;
+}
+
 /*
  * Desktop (900px+): sidebar | content | optional Now Playing panel, with the
  * player bar across the bottom. The top bar only shows on pushed screens.
  */
 :host(.desktop) {
   grid-template-columns: 248px minmax(0, 1fr) auto;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   grid-template-areas:
     'side top panel'
     'side main panel'
-    'dock dock dock';
+    'dock dock dock'
+    'strip strip strip';
+}
+:host(.desktop) .link-strip-row {
+  grid-area: strip;
 }
 :host(.desktop) .sidebar {
   grid-area: side;

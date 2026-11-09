@@ -69,6 +69,10 @@
   }
 </div>
 
+<div #linkStrip class="link-strip-row">
+  <or-link-strip [shown]="linkStripVisible()" />
+</div>
+
 @if (!isDesktop()) {
 <or-drawer [(open)]="drawerOpen" />
 }
@@ -81,3 +85,4 @@
 
 <or-device-picker />
 <or-source-fix-dialog />
+<or-welcome-modal />

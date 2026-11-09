@@ -1,17 +1,14 @@
 import {
   ChangeDetectionStrategy,
   Component,
-  ElementRef,
-  afterNextRender,
   computed,
   effect,
   inject,
   linkedSignal,
   signal,
   untracked,
-  viewChild,
 } from '@angular/core';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import {
   AUDIO_QUALITIES,
   isAudioQuality,
@@ -30,7 +27,6 @@ import {
   PlaylistsStore,
   SessionStore,
   SettingsStore,
-  WEB_BUILD,
   type StorageUsage,
 } from '@open-record/state';
 import {
@@ -44,11 +40,7 @@ import {
   OrToast,
   OrViewport,
 } from '@open-record/ui';
-import { MUSIC_DISCLAIMER } from './credits';
 import { formatBytes } from './format-bytes';
-
-/** Landing page for the Android and iOS apps (Settings > About, web build). */
-const APPS_URL = 'https://ahnafone.github.io/open-record/';
 
 const LOCATION_LABELS: Record<DownloadLocation, string> = {
   data: 'App storage (default)',
@@ -66,8 +58,8 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
  * Settings screen: a link to Account (phone), a link to Import (phone; desktop
  * has it in the sidebar), the stream server (URL, connection test), audio
  * quality, device storage (native: downloads, free space, download location),
- * auto-download network rule, on-device storage with clear-all, and the music
- * disclaimer. Import itself lives on the Import page.
+ * auto-download network rule, on-device storage with clear-all, and a link to
+ * About (which holds the music disclaimer). Import itself lives on the Import page.
  */
 @Component({
   selector: 'or-settings-page',
@@ -206,9 +198,9 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
         You are responsible for what you stream and save. Only use music you
         have the rights to.
       </p>
-      <button type="button" class="text-link" (click)="showDisclaimer()">
+      <a class="text-link" routerLink="/about" fragment="music-disclaimer">
         Read the music disclaimer
-      </button>
+      </a>
     } @else {
       <p class="note">Streaming from a server is not available in this build.</p>
     }
@@ -419,23 +411,10 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     </p>
 
     <or-section-head heading="About" />
-    <p #disclaimerEl id="music-disclaimer" class="disclaimer" tabindex="-1">
-      <span class="eyebrow">Music disclaimer</span>
-      {{ disclaimer }}
-    </p>
-    @if (webBuild) {
-      <p class="note apps-note">
-        Open Record is also available for Android and iOS.
-        <a
-          class="apps-link"
-          [href]="appsUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          (click)="openAppsSite($event)"
-          >Get the apps</a
-        >
-      </p>
-    }
+    <a class="fix-row" routerLink="/about">
+      <or-icon name="info" [size]="20" />
+      <span class="fix-txt">About Open Record</span>
+    </a>
   `,
   styles: `
     :host {
@@ -488,9 +467,9 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       min-block-size: 18px;
     }
 
-    .failed-link, .apps-link, .fix-row { display: inline-flex; align-items: center; gap: var(--spacing-sm);
+    .failed-link, .fix-row { display: inline-flex; align-items: center; gap: var(--spacing-sm);
       min-block-size: var(--spacing-touch); color: var(--color-text); border-radius: var(--rounded-md); }
-    .failed-link, .apps-link { text-decoration: underline; }
+    .failed-link { text-decoration: underline; }
     .fix-row { display: flex; text-decoration: none; }
     .retry {
       margin-block-start: var(--spacing-sm);
@@ -530,25 +509,6 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       display: grid;
       gap: var(--spacing-sm);
     }
-    .disclaimer {
-      display: grid;
-      gap: var(--spacing-xs);
-      margin: var(--spacing-lg) 0 0;
-      padding: var(--spacing-md);
-      font-size: 13px;
-      line-height: 1.45;
-      color: var(--color-muted);
-      border: 1px dashed
-        color-mix(in srgb, var(--color-border) 75%, transparent);
-      border-radius: var(--rounded-md);
-    }
-    .eyebrow {
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-    .disclaimer:focus-visible,
-    .apps-link:focus-visible,
     .text-link:focus-visible {
       outline: 2px solid var(--color-primary);
       outline-offset: 2px;
@@ -669,7 +629,6 @@ export class SettingsPage {
   protected readonly session = inject(SessionStore);
   protected readonly auth = inject(AuthStore);
   protected readonly viewport = inject(OrViewport);
-  private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(OrDialog);
   private readonly toast = inject(OrToast);
   private readonly scanner = inject(PairingScannerPort, { optional: true });
@@ -704,14 +663,6 @@ export class SettingsPage {
     if (n) parts.push(`${n} playlist${n === 1 ? '' : 's'}`);
     return parts.length ? `On for ${parts.join(' and ')}` : 'Off';
   });
-
-  protected readonly disclaimer = MUSIC_DISCLAIMER;
-
-  /** Web build only (not native, not desktop): shows the Android / iOS note. */
-  protected readonly webBuild = inject(WEB_BUILD);
-
-  /** The single source for the Android / iOS landing page link. */
-  protected readonly appsUrl = APPS_URL;
 
   /** The Electron preload bridge is present (desktop app, not the web build). */
   protected readonly desktopApp =
@@ -797,9 +748,6 @@ export class SettingsPage {
     const c = this.connection();
     return c.status === 'error' ? c.message : null;
   });
-  private readonly disclaimerEl =
-    viewChild.required<ElementRef<HTMLElement>>('disclaimerEl');
-
   private readonly usage = signal<StorageUsage | null>(null);
   private usageRun = 0;
 
@@ -817,11 +765,6 @@ export class SettingsPage {
   });
 
   constructor() {
-    // Search links here with #music-disclaimer.
-    afterNextRender(() => {
-      if (this.route.snapshot.fragment === 'music-disclaimer')
-        this.showDisclaimer();
-    });
     if (this.scanner)
       void this.scanner.available().then((ok) => this.canScan.set(ok));
     // Native: re-read free space when the location or downloads change.
@@ -838,12 +781,6 @@ export class SettingsPage {
     });
     // Cast cache usage is server-side; null on native/offline hides the line.
     void this.refreshCastUsage();
-  }
-
-  /** Opens the Android / iOS landing page in a new browsing context (web build). */
-  protected openAppsSite(event: Event): void {
-    event.preventDefault();
-    window.open(this.appsUrl, '_blank', 'noopener');
   }
 
   protected onServerInput(event: Event): void {
@@ -1009,12 +946,6 @@ export class SettingsPage {
   protected async testServer(): Promise<void> {
     if (!(await this.saveServer())) return;
     await this.settings.testConnection();
-  }
-
-  protected showDisclaimer(): void {
-    const el = this.disclaimerEl().nativeElement;
-    el.scrollIntoView({ block: 'center' });
-    el.focus({ preventScroll: true });
   }
 
   protected async clearAll(): Promise<void> {

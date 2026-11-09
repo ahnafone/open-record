@@ -7,8 +7,9 @@ import {
 import { type IconName, type IconShape, OR_ICONS } from './icons';
 
 /**
- * Stroked line icon. Decorative (`aria-hidden`) unless `label` is set, in which
- * case it is exposed as an image with that accessible name.
+ * Line icon: stroked shapes plus optional filled (`solid`) brand glyphs.
+ * Decorative (`aria-hidden`) unless `label` is set, in which case it is
+ * exposed as an image with that accessible name.
  */
 @Component({
   selector: 'or-icon',
@@ -28,6 +29,9 @@ import { type IconName, type IconShape, OR_ICONS } from './icons';
         @switch (shape.kind) {
           @case ('path') {
             <svg:path [attr.d]="asPath(shape).d" />
+          }
+          @case ('solid') {
+            <svg:path class="solid" [attr.d]="asSolid(shape).d" />
           }
           @case ('circle') {
             <svg:circle
@@ -67,6 +71,10 @@ import { type IconName, type IconShape, OR_ICONS } from './icons';
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .solid {
+      fill: currentColor;
+      stroke: none;
+    }
   `,
 })
 export class OrIcon {
@@ -80,13 +88,31 @@ export class OrIcon {
     () => OR_ICONS[this.name()] ?? [],
   );
 
+  /*
+   * Narrowing helpers for the template: each `@case` already guarantees the
+   * shape's kind, so these only give the matching member type.
+   */
   protected asPath(s: IconShape) {
-    return s as Extract<IconShape, { kind: 'path' }>;
+    return narrow(s, 'path');
+  }
+  protected asSolid(s: IconShape) {
+    return narrow(s, 'solid');
   }
   protected asCircle(s: IconShape) {
-    return s as Extract<IconShape, { kind: 'circle' }>;
+    return narrow(s, 'circle');
   }
   protected asRect(s: IconShape) {
-    return s as Extract<IconShape, { kind: 'rect' }>;
+    return narrow(s, 'rect');
   }
+}
+
+/** Returns the shape as its `kind` member; throws if the kind does not match. */
+function narrow<K extends IconShape['kind']>(
+  shape: IconShape,
+  kind: K,
+): Extract<IconShape, { kind: K }> {
+  if (shape.kind !== kind) {
+    throw new Error(`Expected icon shape "${kind}", got "${shape.kind}"`);
+  }
+  return shape as Extract<IconShape, { kind: K }>;
 }

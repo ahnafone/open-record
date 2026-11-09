@@ -50,3 +50,4 @@ export {
   lazyWindow,
   type LazyWindow,
 } from './lib/lazy-list/lazy-list';
+export { APPS_URL, GITHUB_URL, DOCS_URL } from './lib/external-links';

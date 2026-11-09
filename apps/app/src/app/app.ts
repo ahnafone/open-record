@@ -31,6 +31,7 @@ import {
   PlayerStore,
   PlaylistsStore,
   SourceFixService,
+  WEB_BUILD,
 } from '@open-record/state';
 // The picker is a single shell-level instance (not a routed screen), so it is
 // intentionally eager even though the Now Playing page itself is lazy.
@@ -56,8 +57,10 @@ import {
 import { OrPlayerBar } from './shell/player-bar';
 import { OrSidebar } from './shell/sidebar';
 import { OrSourceFixDialog } from './shell/source-fix-dialog';
+import { OrLinkStrip, linkStripVisibility } from './shell/link-strip';
 import { OrTabBar } from './shell/tab-bar';
 import { OrTopBar } from './shell/top-bar';
+import { OrWelcomeModal } from './shell/welcome-modal';
 
 interface ScreenState {
   readonly data: ScreenData;
@@ -70,7 +73,7 @@ const DEFAULT_SCREEN: ScreenState = {
 };
 
 /** Screens whose content is capped to a readable width on desktop. */
-const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'account', 'import']);
+const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'about', 'account', 'import']);
 
 /**
  * App shell: top bar, scrolling screen host (`router-outlet`) and a dock with
@@ -93,10 +96,13 @@ const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'account', 'imp
     OrDrawer,
     OrDevicePicker,
     OrSourceFixDialog,
+    OrLinkStrip,
+    OrWelcomeModal,
   ],
   selector: 'or-root',
   host: {
     '[class.desktop]': 'viewport.isDesktop()',
+    '[class.link-strip-shown]': 'linkStripVisible()',
     '(document:keydown)': 'onKeydown($event)',
   },
   templateUrl: './app.html',
@@ -117,6 +123,7 @@ export class App {
   private readonly toast = inject(OrToast);
   private readonly sourceFix = inject(SourceFixService);
   private readonly autoDownload = inject(AutoDownloadStore);
+  private readonly webBuild = inject(WEB_BUILD);
 
   /** Last surfaced local playback failure, so one error toasts once. */
   private lastPlaybackError = '';
@@ -127,6 +134,12 @@ export class App {
   private readonly screenHost =
     viewChild<ElementRef<HTMLElement>>('screenHost');
   private readonly dock = viewChild.required<ElementRef<HTMLElement>>('dock');
+  private readonly linkStrip = viewChild.required<ElementRef<HTMLElement>>('linkStrip');
+  /** Web build, signed out: the bottom link strip is shown. */
+  protected readonly linkStripVisible = linkStripVisibility(
+    this.webBuild,
+    this.auth.status,
+  );
 
   /** History page index of the app's first screen (set on the first NavigationEnd). */
   private startPageId: number | null = null;
@@ -299,19 +312,21 @@ export class App {
       );
     });
 
-    // Keep the toast above the dock, whatever its height.
+    // Keep the toast above the dock and the link strip, whatever their heights.
     afterNextRender(() => {
       const dock = this.dock().nativeElement;
+      const strip = this.linkStrip().nativeElement;
       const root = this.document.documentElement;
       const sync = () =>
         root.style.setProperty(
           '--or-toast-bottom',
-          `${dock.getBoundingClientRect().height + 14}px`,
+          `${dock.getBoundingClientRect().height + strip.getBoundingClientRect().height + 14}px`,
         );
       sync();
       if (typeof ResizeObserver === 'undefined') return;
       const observer = new ResizeObserver(sync);
       observer.observe(dock);
+      observer.observe(strip);
       this.destroyRef.onDestroy(() => observer.disconnect());
     });
   }
