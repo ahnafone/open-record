@@ -265,6 +265,7 @@ export class PlayerEngine {
     this.canSetVolume = typeof engine.setVolume === 'function';
     engine.setListener({
       onPlaying: () => {
+        if (this.fromOutgoingMedia()) return;
         this.cancelRetry();
         this.startedToken = this.loadToken;
         this._error.set(null);
@@ -272,9 +273,13 @@ export class PlayerEngine {
         this.preloadNeighbours();
       },
       onPaused: () => {
+        if (this.fromOutgoingMedia()) return;
         if (this._status() === 'playing') this._status.set('paused');
       },
       onTime: (sec) => {
+        // Ticks from the outgoing element arrive until the new media is loaded.
+        // They belong to the previous track, so they must not move the position.
+        if (this.loadedToken !== this.loadToken) return;
         this._position.set(sec);
         // Only a small forward step is real listening; a seek earns nothing.
         const delta = sec - this.lastTick;
@@ -285,12 +290,27 @@ export class PlayerEngine {
         this.countPlay();
       },
       onDuration: (sec) => this._duration.set(sec),
-      onEnded: () => void this.handleEnded(),
-      onError: (err) =>
-        this.fail(engineFailure(err, this.loadedSourceKind), this.loadToken),
+      onEnded: () => {
+        if (this.fromOutgoingMedia()) return;
+        void this.handleEnded();
+      },
+      onError: (err) => {
+        if (this.fromOutgoingMedia()) return;
+        this.fail(engineFailure(err, this.loadedSourceKind), this.loadToken);
+      },
       onSkipped: (dir, trackId?: string) =>
         void this.handleSkipped(dir, trackId),
     });
+  }
+
+  /**
+   * An overlapping engine keeps the outgoing media audible while a new load is
+   * in flight. Its events until the new media is loaded belong to the previous
+   * track, so they must not change status, count a play or advance the queue.
+   * The new media's own events pass once `loadedToken` is set.
+   */
+  private fromOutgoingMedia(): boolean {
+    return this.engine.overlapsLoad === true && this.loadedToken !== this.loadToken;
   }
 
   // ---- Queue -------------------------------------------------------------
@@ -571,6 +591,15 @@ export class PlayerEngine {
   }
 
   /**
+   * True once the current track's media is in the engine, even while it
+   * buffers or resumes. Before that, `position()` still belongs to the previous
+   * track, so it is not the current track's position.
+   */
+  get mediaLoaded(): boolean {
+    return this.current() !== null && this.loadedToken === this.loadToken;
+  }
+
+  /**
    * Seek only when the difference exceeds `tolerance` (the 30 s keepalives must
    * not scrub). No-op unless the track is `settled`, and when `expectedTrackId`
    * is given, unless that is the current track (a stale anchor for the previous
@@ -638,6 +667,10 @@ export class PlayerEngine {
     const status = this._status();
     if (status === 'loading') {
       this.playIntent = false;
+      // An overlapping engine still plays the outgoing track while loading.
+      if (this.engine.overlapsLoad) await this.engine.pause();
+      // Media already loaded (only the play start is pending): show paused.
+      if (this.loadedToken === this.loadToken) this._status.set('paused');
       if (this._retrying()) {
         // Cancel the pending backoff instead of letting it start a new
         // attempt behind the user's back.
@@ -659,7 +692,12 @@ export class PlayerEngine {
     // The control shows "Play" during a load, so pressing it again is a
     // request to start, not to cancel. Ignoring it lets a slow remote link
     // finish instead of cancelling the retry behind the user's back.
-    if (status === 'loading') return;
+    // An overlapping engine is different: it is still playing the old track
+    // while the new one loads, so a press that means "pause" must silence it.
+    if (status === 'loading') {
+      if (this.engine.overlapsLoad && this.playIntent) await this.pause();
+      return;
+    }
     await this.play();
   }
 
@@ -735,6 +773,14 @@ export class PlayerEngine {
       one: 'off',
     };
     this.setRepeat(next[this._repeat()]);
+  }
+
+  /**
+   * Crossfade length between tracks, in seconds (0 = hard cut). Forwarded to
+   * engines that support it; others ignore it.
+   */
+  setCrossfadeSec(sec: number): void {
+    this.engine.setCrossfade?.(sec);
   }
 
   /** Set volume (clamped 0..1). Raising it above 0 also unmutes. */
@@ -984,6 +1030,14 @@ export class PlayerEngine {
     this._position.set(0);
     this._duration.set(track.durationSec ?? 0);
     this.neighbourSignature = '';
+    // The outgoing track must stop now: it keeps sounding (and ticking) until
+    // the new source is swapped in, which can take seconds on a cold load.
+    // Native engines own advancing: a gapless skip has already moved them onto
+    // the next item, so pausing here would leave that item paused on load.
+    // Overlapping engines keep the outgoing track audible until the swap.
+    if (!this.engine.wantsNeighbours && !this.engine.overlapsLoad) {
+      void this.engine.pause().catch(() => undefined);
+    }
 
     let media: EngineMedia;
     try {
@@ -1005,8 +1059,15 @@ export class PlayerEngine {
       this.loadedToken = token;
       this.loadedMedia = { media, key: this.trackMediaKey(track) };
       this.neighbourSignature = this.neighbourKey();
-      if (this.playIntent) await this.startEngine();
-      else this._status.set('paused');
+      if (this.playIntent) {
+        await this.startEngine();
+      } else {
+        this._status.set('paused');
+        // Nothing will start it: stop an overlapped outgoing track too.
+        if (this.engine.overlapsLoad) {
+          await this.engine.pause().catch(() => undefined);
+        }
+      }
     } catch (err) {
       if (err instanceof PlaybackBlockedError) {
         this.playIntent = false;
@@ -1052,6 +1113,9 @@ export class PlayerEngine {
     });
     this._status.set('error');
     this._retrying.set(false);
+    // An overlapped outgoing track may still be sounding: silence it under the
+    // error UI. Best effort, the error stands either way.
+    if (this.engine.overlapsLoad) this.engine.pause().catch(() => undefined);
   }
 
   /** Wait out the backoff, then reload the same track if still wanted. */

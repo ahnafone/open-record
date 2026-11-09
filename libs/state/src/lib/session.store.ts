@@ -1710,7 +1710,10 @@ export class SessionStore {
       type: 'report',
       reason,
       entryId,
-      positionSec: this.engine.position(),
+      // Covers seeks made while loading: until the media is in the engine,
+      // `position()` is the previous track's or a seek made before the media
+      // arrived, not this track's. Report 0 rather than anchor it far in.
+      positionSec: this.engine.mediaLoaded ? this.engine.position() : 0,
       playing,
     };
     if (durationSec !== undefined) report.durationSec = durationSec;

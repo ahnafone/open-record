@@ -96,6 +96,34 @@ export const DEFAULT_SESSION_PREFS: SessionPrefs = {
   cast: true,
 };
 
+export const CROSSFADE_MIN_SEC = 1;
+export const CROSSFADE_MAX_SEC = 12;
+export const DEFAULT_CROSSFADE_SEC = 5;
+
+/**
+ * Crossfade between songs on web playback (native gapless playback is
+ * unchanged). The duration is kept while off, so turning it back on restores it.
+ */
+export interface CrossfadeSettings {
+  enabled: boolean;
+  /** Whole seconds, 1 to 12. */
+  durationSec: number;
+}
+
+export const DEFAULT_CROSSFADE_SETTINGS: CrossfadeSettings = {
+  enabled: false,
+  durationSec: DEFAULT_CROSSFADE_SEC,
+};
+
+/** Rounds to whole seconds and clamps to 1 to 12; null when not a finite number. */
+function clampCrossfadeSec(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(
+    CROSSFADE_MAX_SEC,
+    Math.max(CROSSFADE_MIN_SEC, Math.round(value)),
+  );
+}
+
 /**
  * App settings. Hydrates from storage on construction; setters persist
  * optimistically and roll back if the write fails.
@@ -131,6 +159,7 @@ export class SettingsStore {
   private readonly _deviceId = signal('');
   private readonly _deviceName = signal('');
   private readonly _sessionPrefs = signal<SessionPrefs>(DEFAULT_SESSION_PREFS);
+  private readonly _crossfade = signal<CrossfadeSettings>(DEFAULT_CROSSFADE_SETTINGS);
   private testAbort?: AbortController;
 
   /** True once the stored settings have been read. */
@@ -181,6 +210,15 @@ export class SettingsStore {
   /** Session participation switches (both on by default). */
   readonly sessionEnabled = computed(() => this._sessionPrefs().session);
   readonly castEnabled = computed(() => this._sessionPrefs().cast);
+
+  /** Crossfade switch and chosen duration (kept while off). */
+  readonly crossfadeEnabled = computed(() => this._crossfade().enabled);
+  readonly crossfadeDurationSec = computed(() => this._crossfade().durationSec);
+  /** Seconds the player engine fades over; 0 when crossfade is off. */
+  readonly crossfadeSec = computed(() => {
+    const c = this._crossfade();
+    return c.enabled ? c.durationSec : 0;
+  });
 
   private loaded: Promise<void>;
 
@@ -326,6 +364,23 @@ export class SettingsStore {
     await this.persist(this._sessionPrefs, SETTINGS_KEYS.sessionPrefs, {
       cast: enabled,
     });
+  }
+
+  /** Turn crossfade on or off; persists, rolling back on failure. */
+  async setCrossfadeEnabled(enabled: boolean): Promise<void> {
+    await this.loaded;
+    await this.persist(this._crossfade, SETTINGS_KEYS.crossfade, { enabled });
+  }
+
+  /**
+   * Set the fade length. Rounded to whole seconds and clamped to 1 to 12; a
+   * non-finite value is ignored. Persists, rolling back on failure.
+   */
+  async setCrossfadeDurationSec(sec: number): Promise<void> {
+    await this.loaded;
+    const durationSec = clampCrossfadeSec(sec);
+    if (durationSec === null) return;
+    await this.persist(this._crossfade, SETTINGS_KEYS.crossfade, { durationSec });
   }
 
   private async persist<T extends object>(
@@ -483,6 +538,7 @@ export class SettingsStore {
       deviceName,
       sessionPrefs,
       mode,
+      crossfade,
     ] = await Promise.all([
       this.readServer(),
       this.readQuality(),
@@ -492,6 +548,7 @@ export class SettingsStore {
       this.readDeviceName(),
       this.readSessionPrefs(),
       this.readConnectionMode(),
+      this.readCrossfade(),
     ]);
     this._own.set(server);
     this._mode.set(mode);
@@ -503,6 +560,7 @@ export class SettingsStore {
     this._deviceId.set(deviceId);
     this._deviceName.set(deviceName);
     this._sessionPrefs.set(sessionPrefs);
+    this._crossfade.set(crossfade);
     this._hydrated.set(true);
   }
 
@@ -602,6 +660,22 @@ export class SettingsStore {
     } catch {
       // A failed read keeps what is loaded (both on by default).
       return this._sessionPrefs();
+    }
+  }
+
+  private async readCrossfade(): Promise<CrossfadeSettings> {
+    try {
+      const raw = await this.storage.settings.get<Partial<CrossfadeSettings>>(
+        SETTINGS_KEYS.crossfade,
+      );
+      return {
+        enabled: raw?.enabled === true,
+        durationSec:
+          clampCrossfadeSec(raw?.durationSec) ?? DEFAULT_CROSSFADE_SEC,
+      };
+    } catch {
+      // A failed read keeps what is loaded (off by default).
+      return this._crossfade();
     }
   }
 }

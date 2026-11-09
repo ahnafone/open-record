@@ -20,6 +20,8 @@ import {
 import {
   AuthStore,
   AutoDownloadStore,
+  CROSSFADE_MAX_SEC,
+  CROSSFADE_MIN_SEC,
   FailedDownloadsStore,
   DeviceStoragePort,
   LibraryStore,
@@ -35,6 +37,7 @@ import {
   OrDownloadProgress,
   OrIcon,
   OrSectionHead,
+  OrSlider,
   OrSpinner,
   OrSwitch,
   OrToast,
@@ -68,6 +71,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
     OrButton,
     OrIcon,
     OrSectionHead,
+    OrSlider,
     OrSpinner,
     OrSwitch,
     RouterLink,
@@ -293,6 +297,31 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
             </div>
           </dl>
         }
+      }
+      <or-switch
+        label="Crossfade"
+        description="On web playback, fades out the current song as you pick or skip to another. Songs that end on their own do not crossfade. The native app is unchanged."
+        [checked]="settings.crossfadeEnabled()"
+        (checkedChange)="setCrossfadeEnabled($event)"
+      />
+      @if (settings.crossfadeEnabled()) {
+        <div class="crossfade">
+          <div class="crossfade-head">
+            <span class="crossfade-label">Crossfade duration</span>
+            <span class="crossfade-value" aria-hidden="true">{{ crossfadeDraft() }} s</span>
+          </div>
+          <or-slider
+            label="Crossfade duration"
+            [min]="crossfadeMin"
+            [max]="crossfadeMax"
+            [step]="1"
+            [largeStep]="1"
+            [value]="crossfadeDraft()"
+            [valueText]="crossfadeDraft() + ' seconds'"
+            (valueChange)="crossfadeDraft.set($event)"
+            (committed)="setCrossfadeDuration($event)"
+          />
+        </div>
       }
     </div>
 
@@ -556,6 +585,27 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       justify-self: start;
       margin-top: var(--spacing-xs);
     }
+    .crossfade {
+      display: grid;
+      gap: var(--spacing-xs);
+      margin-top: var(--spacing-xs);
+    }
+    .crossfade-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: var(--spacing-md);
+    }
+    .crossfade-label {
+      font-size: 14px;
+      color: var(--color-text);
+    }
+    .crossfade-value {
+      font-size: 14px;
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
     .select {
       appearance: none;
       padding-inline-end: 36px;
@@ -681,6 +731,12 @@ export class SettingsPage {
   protected readonly deviceNameDraft = linkedSignal(() =>
     this.settings.deviceName(),
   );
+  /** Crossfade slider position while dragging; follows the stored value otherwise. */
+  protected readonly crossfadeDraft = linkedSignal(() =>
+    this.settings.crossfadeDurationSec(),
+  );
+  protected readonly crossfadeMin = CROSSFADE_MIN_SEC;
+  protected readonly crossfadeMax = CROSSFADE_MAX_SEC;
   protected readonly clearingCast = signal(false);
   /** Server-side cast cache usage; null hides the line (no adapter/offline). */
   protected readonly castUsage = signal<{
@@ -876,6 +932,16 @@ export class SettingsPage {
 
   protected setCastEnabled(on: boolean): void {
     void this.saveSetting(() => this.settings.setCastEnabled(on));
+  }
+
+  protected setCrossfadeEnabled(on: boolean): void {
+    void this.saveSetting(() => this.settings.setCrossfadeEnabled(on));
+  }
+
+  /** Saves the chosen length, then re-syncs the slider to the stored value (a failed save rolls back). */
+  protected async setCrossfadeDuration(sec: number): Promise<void> {
+    await this.saveSetting(() => this.settings.setCrossfadeDurationSec(sec));
+    this.crossfadeDraft.set(this.settings.crossfadeDurationSec());
   }
 
   protected onDeviceNameInput(event: Event): void {

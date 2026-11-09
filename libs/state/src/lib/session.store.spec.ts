@@ -48,6 +48,8 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
   const isPlaying = computed(() => status() === 'playing');
   /** Play order as queue indices; null means queue order (no shuffle). */
   const playOrder = signal<readonly number[] | null>(null);
+  /** Whether the current track's media is in the engine (PlayerEngine.mediaLoaded). */
+  const loaded = signal(true);
   const upcomingEntries = computed(() => {
     const indexes = playOrder() ?? queue().map((_, i) => i);
     const position = indexes.indexOf(currentIndex());
@@ -131,6 +133,11 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     error: signal(null),
     volume: signal(1),
     muted: signal(false),
+    loaded,
+    /** Mirrors PlayerEngine.mediaLoaded; tests flip `loaded` to model a load. */
+    get mediaLoaded() {
+      return loaded() && current() !== null;
+    },
     canSetVolume: false,
   };
 }
@@ -1192,6 +1199,37 @@ describe('SessionStore', () => {
     store.report('playing');
     expect(port.reports().at(-1)).toMatchObject({ reason: 'playing' });
     expect(port.reports()).toHaveLength(5);
+  });
+
+  it('reports position 0 while the current media is not loaded yet', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          order: [wire('e0', 'catalog:a')],
+          cursor: 0,
+          playing: true,
+          revision: 1,
+        }),
+      ),
+    );
+    await settle();
+    vi.advanceTimersByTime(2001);
+    port.sent.length = 0;
+
+    // The previous track's position is still in the engine while this one loads.
+    engine.loaded.set(false);
+    engine.position.set(42);
+    store.reportSeek();
+
+    expect(port.reports().at(-1)).toMatchObject({
+      reason: 'tick',
+      entryId: 'e0',
+      positionSec: 0,
+    });
   });
 
   it('stays paused and asks for a gesture when autoplay is refused', async () => {

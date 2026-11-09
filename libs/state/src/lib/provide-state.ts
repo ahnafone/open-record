@@ -1,9 +1,11 @@
 import {
   EnvironmentProviders,
+  effect,
   inject,
   makeEnvironmentProviders,
   provideAppInitializer,
 } from '@angular/core';
+import { PlayerService } from '@open-record/player';
 import { AuthStore } from './auth.store';
 import { AutoDownloadStore } from './auto-download.store';
 import { ImportStore } from './import.store';
@@ -34,6 +36,11 @@ export function provideState(): EnvironmentProviders {
       // afterwards and either step is safe to skip or fail on its own.
       const player = inject(PlayerStore);
       const session = inject(SessionStore);
+      // Crossfade: push the effective fade length (0 = off) to the engine at
+      // start and whenever the setting changes.
+      const crossfadeSettings = inject(SettingsStore);
+      const engine = inject(PlayerService).engine;
+      effect(() => engine.setCrossfadeSec(crossfadeSettings.crossfadeSec()));
       void player.restore().finally(() => session.start());
       // Registers the Spotify placeholder source; resumes a running import
       // (Spotify matching and YouTube song-detail lookup).

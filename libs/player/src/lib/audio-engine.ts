@@ -63,6 +63,14 @@ export interface AudioEngine {
   /** True when the engine wants neighbours passed to `load`. */
   readonly wantsNeighbours: boolean;
   setListener(listener: AudioEngineListener | null): void;
+  /**
+   * True when `load` can overlap the previous item: the outgoing media keeps
+   * sounding until the new one can play, and `load` then resolves once the new
+   * media can play. Two cases resolve at once instead, because there is nothing
+   * to protect: an already buffered neighbour, and a load while nothing is
+   * audible. Engines without this flag are paused by the owner before `load`.
+   */
+  readonly overlapsLoad?: boolean;
   /** Load (but do not start) an item. Resolves once the source is set. */
   load(media: EngineMedia, neighbours?: EngineNeighbours): Promise<void>;
   /**
@@ -80,6 +88,12 @@ export interface AudioEngine {
    * (native: the OS owns volume) leave it out and the player hides the control.
    */
   setVolume?(volume: number): void;
+  /**
+   * Optional crossfade length in seconds for a change of item: the outgoing
+   * item fades out while the new one fades in. 0 (default) is a hard cut.
+   * Only meaningful for engines with `overlapsLoad`.
+   */
+  setCrossfade?(sec: number): void;
   stop(): Promise<void>;
   destroy(): Promise<void>;
 }

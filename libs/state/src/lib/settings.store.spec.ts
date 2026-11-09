@@ -243,3 +243,62 @@ describe('SettingsStore pairing', () => {
     expect(store.downloadServerUrl()).toBe('http://192.168.1.20:47900');
   });
 });
+
+describe('SettingsStore crossfade', () => {
+  it('is off at 5 s by default and keeps the duration while off', async () => {
+    const storage = createInMemoryStorage();
+    const store = boot(storage);
+    await store.ready();
+    expect(store.crossfadeSec()).toBe(0);
+    expect(store.crossfadeDurationSec()).toBe(5);
+
+    await store.setCrossfadeDurationSec(8);
+    await store.setCrossfadeEnabled(true);
+    expect(store.crossfadeSec()).toBe(8);
+
+    await store.setCrossfadeEnabled(false);
+    expect(store.crossfadeSec()).toBe(0);
+    expect(store.crossfadeDurationSec()).toBe(8);
+
+    // Both survive a reload; turning it back on restores the 8 s.
+    const reloaded = boot(storage);
+    await reloaded.ready();
+    expect(reloaded.crossfadeEnabled()).toBe(false);
+    await reloaded.setCrossfadeEnabled(true);
+    expect(reloaded.crossfadeSec()).toBe(8);
+  });
+
+  it('clamps the duration to 1 to 12 whole seconds and ignores non-numbers', async () => {
+    const store = boot(createInMemoryStorage());
+    await store.ready();
+
+    await store.setCrossfadeDurationSec(99);
+    expect(store.crossfadeDurationSec()).toBe(12);
+    await store.setCrossfadeDurationSec(-3);
+    expect(store.crossfadeDurationSec()).toBe(1);
+    await store.setCrossfadeDurationSec(4.6);
+    expect(store.crossfadeDurationSec()).toBe(5);
+    await store.setCrossfadeDurationSec(Number.NaN);
+    expect(store.crossfadeDurationSec()).toBe(5);
+  });
+
+  it('ignores invalid persisted values and clamps out-of-range ones', async () => {
+    const storage = createInMemoryStorage();
+    await storage.settings.set(SETTINGS_KEYS.crossfade, {
+      enabled: 'yes',
+      durationSec: 'fast',
+    });
+    const invalid = boot(storage);
+    await invalid.ready();
+    expect(invalid.crossfadeEnabled()).toBe(false);
+    expect(invalid.crossfadeDurationSec()).toBe(5);
+
+    await storage.settings.set(SETTINGS_KEYS.crossfade, {
+      enabled: true,
+      durationSec: 40,
+    });
+    const clamped = boot(storage);
+    await clamped.ready();
+    expect(clamped.crossfadeSec()).toBe(12);
+  });
+});

@@ -81,6 +81,8 @@ export const SETTINGS_KEYS = {
   deviceName: 'deviceName',
   /** `{ session, cast }` switches (no migration: new key, absent = both on). */
   sessionPrefs: 'sessionPrefs',
+  /** `{ enabled, durationSec }` crossfade on web playback (no migration: new key, absent = off at 5 s). */
+  crossfade: 'crossfade',
   /** Epoch ms of the last "Not now" to the battery-optimization prompt (no migration: absent = never declined). */
   batteryPromptDeclinedAt: 'batteryPromptDeclinedAt',
 } as const;

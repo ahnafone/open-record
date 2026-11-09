@@ -32,9 +32,19 @@ class FakeEngine implements AudioEngine {
   failLoadOn = new Set<string>();
   /** When set, `play` rejects with this engine error (a failed resume). */
   rejectPlayWith: EngineError | null = null;
+  /** Number of `pause` calls, for the outgoing-track stop tests. */
+  pauses = 0;
+  readonly overlapsLoad: boolean;
+  /** Crossfade lengths forwarded by `setCrossfade`. */
+  crossfades: number[] = [];
 
-  constructor(wantsNeighbours = false) {
+  constructor(wantsNeighbours = false, overlapsLoad = false) {
     this.wantsNeighbours = wantsNeighbours;
+    this.overlapsLoad = overlapsLoad;
+  }
+
+  setCrossfade(sec: number): void {
+    this.crossfades.push(sec);
   }
 
   setListener(l: AudioEngineListener | null): void {
@@ -45,7 +55,11 @@ class FakeEngine implements AudioEngine {
     this.neighbours.push(neighbours);
     if (this.failLoadOn.has(media.id)) throw new Error('load failed');
   }
+  /** When set, `play` waits for it before starting (a pending play start). */
+  playGate: Promise<void> | null = null;
+
   async play(): Promise<void> {
+    if (this.playGate) await this.playGate;
     if (this.rejectPlayWith) throw this.rejectPlayWith;
     const id = this.loaded.at(-1) ?? '';
     if (this.failOn.has(id)) {
@@ -55,6 +69,7 @@ class FakeEngine implements AudioEngine {
     }
   }
   async pause(): Promise<void> {
+    this.pauses++;
     this.listener?.onPaused();
   }
   preload(neighbours: EngineNeighbours): void {
@@ -142,13 +157,17 @@ function nativeSkip(
 function setup(
   opts: {
     wantsNeighbours?: boolean;
+    overlapsLoad?: boolean;
     retryDelaysMs?: readonly number[];
     resolve?: (track: Track) => Promise<PlayableSource>;
     resolveNeighbour?: PlayerEngineOptions['resolveNeighbour'];
     transientError?: PlayerEngineOptions['transientError'];
   } = {},
 ) {
-  const fake = new FakeEngine(opts.wantsNeighbours ?? false);
+  const fake = new FakeEngine(
+    opts.wantsNeighbours ?? false,
+    opts.overlapsLoad ?? false,
+  );
   const player = new PlayerEngine(fake, opts.resolve ?? resolve, {
     random: seeded(),
     retryDelaysMs: opts.retryDelaysMs,
@@ -908,6 +927,18 @@ describe('PlayerEngine', () => {
       await flush();
       expect(player.current()?.id).toBe('a');
     });
+
+    it('does not pause a native engine on a skip', async () => {
+      const { player, fake } = setup({ wantsNeighbours: true });
+      await player.setQueue(timedTracks(), { startIndex: 0 });
+      await flush();
+
+      nativeSkip(fake, 'next', 'b');
+      await flush();
+
+      expect(player.current()?.id).toBe('b');
+      expect(fake.pauses).toBe(0);
+    });
   });
 
   describe('applyOrder', () => {
@@ -1346,6 +1377,210 @@ describe('PlayerEngine', () => {
       await player.seekIfDrifted(30, 2, 'a');
       expect(fake.seeks.at(-1)).toBe(30);
     });
+  });
+
+  it('keeps the outgoing track ticks out of a slow non-neighbour jump', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { player, fake } = setup({
+      resolve: async (t) => {
+        if (t.id === 'c') await gate;
+        return { url: `/${t.id}.mp3`, kind: 'bundled' };
+      },
+    });
+    await player.setQueue(tracks.slice(0, 4)); // a, b, c, d
+    fake.listener?.onTime(92); // a is playing at 1:32
+
+    // c resolves slowly, so the jump stays in 'loading' for a while.
+    const jump = player.playAt(2);
+    expect(player.status()).toBe('loading');
+    expect(player.mediaLoaded).toBe(false);
+    // The old element keeps ticking until the new source is swapped in.
+    fake.listener?.onTime(92.5);
+    expect(player.position()).toBe(0);
+
+    release();
+    await jump;
+    expect(player.mediaLoaded).toBe(true);
+    expect(player.current()?.id).toBe('c');
+    expect(player.status()).toBe('playing');
+    expect(player.position()).toBe(0);
+
+    // Once the new media is loaded, its own ticks are accepted again.
+    fake.listener?.onTime(1);
+    expect(player.position()).toBe(1);
+  });
+
+  it('pauses the outgoing track at once on a web engine jump', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { player, fake } = setup({
+      resolve: async (t) => {
+        if (t.id === 'c') await gate;
+        return { url: `/${t.id}.mp3`, kind: 'bundled' };
+      },
+    });
+    await player.setQueue(tracks.slice(0, 4));
+    // setQueue pauses too while loading `a`; count only the jump's pause.
+    fake.pauses = 0;
+
+    const jump = player.playAt(2);
+    expect(fake.pauses).toBe(1);
+
+    release();
+    await jump;
+  });
+
+  it('keeps the outgoing track playing during an overlapping load', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { player, fake } = setup({
+      overlapsLoad: true,
+      resolve: async (t) => {
+        if (t.id === 'c') await gate;
+        return { url: `/${t.id}.mp3`, kind: 'bundled' };
+      },
+    });
+    await player.setQueue(tracks.slice(0, 4));
+    fake.pauses = 0;
+
+    const jump = player.playAt(2);
+    expect(fake.pauses).toBe(0);
+
+    release();
+    await jump;
+    expect(player.status()).toBe('playing');
+  });
+
+  it('stays paused when paused during an overlapping load', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { player, fake } = setup({
+      overlapsLoad: true,
+      resolve: async (t) => {
+        if (t.id === 'c') await gate;
+        return { url: `/${t.id}.mp3`, kind: 'bundled' };
+      },
+    });
+    await player.setQueue(tracks.slice(0, 4));
+
+    const jump = player.playAt(2);
+    await player.pause();
+    // The outgoing track is silenced at once, not left playing to the swap.
+    expect(fake.pauses).toBeGreaterThan(0);
+
+    release();
+    await jump;
+    expect(fake.loaded.at(-1)).toBe('c');
+    expect(player.status()).toBe('paused');
+    expect(player.intendsToPlay).toBe(false);
+  });
+
+  it('shows paused when paused after the load finished but before play started', async () => {
+    const { player, fake } = setup();
+    let release!: () => void;
+    fake.playGate = new Promise<void>((r) => (release = r));
+
+    const started = player.setQueue([track('a')]);
+    await flush();
+    expect(fake.loaded).toEqual(['a']);
+    expect(player.status()).toBe('loading');
+
+    await player.pause();
+    expect(player.status()).toBe('paused');
+
+    release();
+    await started;
+  });
+
+  it('pauses an overlapping load on a play press instead of ignoring it', async () => {
+    let release!: (source: PlayableSource) => void;
+    const { player, fake } = setup({
+      overlapsLoad: true,
+      resolve: () =>
+        new Promise<PlayableSource>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const started = player.setQueue([track('a')]);
+    await flush();
+    expect(player.status()).toBe('loading');
+
+    // The old audio is still playing: a press that means "pause" silences it.
+    await player.togglePlay();
+    expect(fake.pauses).toBe(1);
+
+    release({ url: '/a.mp3', kind: 'bundled' });
+    await started;
+    expect(player.status()).toBe('paused');
+  });
+
+  it('ignores the outgoing track ended event during an overlapping load', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { player, fake, ids } = setup({
+      overlapsLoad: true,
+      resolve: async (t) => {
+        if (t.id === 'c') await gate;
+        return { url: `/${t.id}.mp3`, kind: 'bundled' };
+      },
+    });
+    await player.setQueue([timed('a', 200), timed('b', 200), timed('c', 200), timed('d', 200)]);
+    const before = player.lastPlay();
+
+    const jump = player.playAt(2);
+    // The outgoing track ends while the slow load for `c` is still in flight.
+    fake.listener?.onEnded();
+
+    release();
+    await jump;
+    expect(fake.loaded).not.toContain('d');
+    expect(ids()).toBe('c');
+    expect(player.lastPlay()).toEqual(before);
+    expect(player.status()).toBe('playing');
+  });
+
+  it('forwards the crossfade length to the engine', () => {
+    const { player, fake } = setup({ overlapsLoad: true });
+    player.setCrossfadeSec(3);
+    expect(fake.crossfades).toEqual([3]);
+  });
+
+  it('silences an overlapping engine when a final error stops playback', async () => {
+    const { player, fake } = setup({ overlapsLoad: true });
+    fake.failOn.add('a');
+    fake.failCode = 'unsupported';
+
+    await player.setQueue([track('a')]);
+    expect(player.status()).toBe('error');
+    // The overlap path skips the start pause, so this one pause is the fail's.
+    expect(fake.pauses).toBe(1);
+  });
+
+  it('does not pause a non-overlapping engine on a final error', async () => {
+    const { player, fake } = setup();
+    fake.failOn.add('a');
+    fake.failCode = 'unsupported';
+
+    await player.setQueue([track('a')]);
+    expect(player.status()).toBe('error');
+    // Only the start-of-load pause: the error itself adds none.
+    expect(fake.pauses).toBe(1);
+  });
+
+  it('does not pause on a retryable failure that schedules a retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const { player, fake } = setup({ overlapsLoad: true });
+      fake.failOn.add('a');
+      fake.failCode = 'network';
+
+      await player.setQueue([track('a')]);
+      expect(player.retrying()).toBe(true);
+      expect(fake.pauses).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe('play counting', () => {
