@@ -13,6 +13,7 @@ import { MediaSessionController } from './media-session';
 import { NativeAudioEngine } from './native-audio-engine';
 import { PlayerEngine } from './player-engine';
 import type { PlayerEngineOptions, TrackResolver } from './player-engine';
+import { TabTitleController } from './tab-title';
 
 /**
  * Turns a Track into a PlayableSource. Supplied by the app (typically the
@@ -68,8 +69,18 @@ export class PlayerService {
   );
 
   constructor() {
-    if (!this.audio.ownsSystemControls) this.bindMediaSession();
+    if (!this.audio.ownsSystemControls) {
+      this.bindMediaSession();
+      this.bindTabTitle();
+    }
     inject(DestroyRef).onDestroy(() => void this.engine.destroy());
+  }
+
+  private bindTabTitle(): void {
+    const tab = new TabTitleController();
+    const e = this.engine;
+    effect(() => tab.update(e.current(), e.status()));
+    inject(DestroyRef).onDestroy(() => tab.destroy());
   }
 
   private bindMediaSession(): void {
