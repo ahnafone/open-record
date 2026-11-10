@@ -223,6 +223,17 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
           test -s "$keystore"
 
+          # Fail fast with a clear message if the secret did not decode to a
+          # valid keystore (truncated or re-wrapped paste, wrong password or
+          # alias). Prints only the size and magic bytes, never secret values.
+          echo "Decoded keystore: $(stat -c %s "$keystore") bytes, magic $(head -c 4 "$keystore" | xxd -p)"
+          if ! keytool -list -keystore "$keystore" \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::Keystore secret is invalid: expected a JKS (magic feedfeed), the store password, and the alias to match. Re-create ANDROID_KEYSTORE_BASE64 with: base64 -w0 <keystore> | gh secret set ANDROID_KEYSTORE_BASE64 --env release"
+            exit 1
+          fi
+
           # Java properties: escape backslashes in values.
           escape() {
             local value="$1"
