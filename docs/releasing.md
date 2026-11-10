@@ -1,0 +1,105 @@
+# Releasing Open Record
+
+Tagging `v*` runs `.github/workflows/desktop-build.yml`. It builds the Linux and Windows
+desktop installers and the Android APK, then uploads them with `SHA256SUMS.txt` to the GitHub
+release for that tag.
+
+## 1. Bump the version
+
+Change the version in all five places, so `npm run check:versions` passes:
+
+| File                                | Field                                 |
+| ----------------------------------- | ------------------------------------- |
+| `package.json`                      | `"version": "x.y.z"`                  |
+| `apps/website/src/lib/site.ts`      | `VERSION = 'vx.y.z'`                  |
+| `README.md`                         | `**Version x.y.z (beta).**`           |
+| `apps/app/android/app/build.gradle` | `versionName "x.y.z"`                 |
+| `RELEASE_NOTES.md`                  | `# Open Record vx.y.z (beta)` heading |
+
+Also increment `versionCode` in `apps/app/android/app/build.gradle` on every release. It must be
+a higher integer than the last released APK (Android rejects an update otherwise). It cannot be
+derived from the version, so bump it by hand. The script only checks that it is a positive integer.
+
+Then run:
+
+```bash
+npm run check:versions
+```
+
+Commit as `chore(release): vx.y.z`. The release commits are manual, so nothing rewrites these
+files for you. The script only reads them.
+
+## 2. Release environment and Android secrets
+
+The Android job runs in the GitHub Environment `release`. Create it once under
+**Settings → Environments → New environment**, named `release`:
+
+- **Deployment branches and tags:** restrict to tags matching `v*` and to the `main` branch.
+- Optionally add required reviewers, so a signed build waits for approval.
+- Move the four secrets below into this environment's **Environment secrets**, and remove them
+  from repository-level secrets. The job reads them only when it runs for a `v*` tag or a manual
+  run from `main`.
+
+Secrets:
+
+| Secret                      | Value                                      |
+| --------------------------- | ------------------------------------------ |
+| `ANDROID_KEYSTORE_BASE64`   | Base64 of the release keystore (see below) |
+| `ANDROID_KEYSTORE_PASSWORD` | Keystore store password                    |
+| `ANDROID_KEY_ALIAS`         | Key alias (for example `openrecord`)       |
+| `ANDROID_KEY_PASSWORD`      | Key password                               |
+
+Create the base64 value from the keystore, which must stay outside the repository (see
+`apps/app/android/RELEASE_SIGNING.md`):
+
+```bash
+base64 -w0 ~/keystores/open-record-release.jks
+```
+
+Paste the single-line output into the secret. Each secret must be a single line: the workflow
+rejects values that contain line breaks. Do not commit the keystore or its base64 value.
+
+If a secret is missing, manual runs skip the Android build. A `v*` tag fails before the release
+job runs, so nothing is published without the APK.
+
+## 3. Tag and push
+
+After the version commit is on `main`:
+
+```bash
+git tag vx.y.z
+git push origin vx.y.z
+```
+
+The workflow's `verify` job runs `check-version-sync.mjs --tag vx.y.z` first, before any build
+or Android signing. It fails if `package.json` does not match the tag.
+
+## 4. Verify the release assets
+
+Wait for the workflow to finish, then check the release:
+
+```bash
+gh release view vx.y.z --repo ahnafone/open-record --json assets --jq '.assets[].name'
+```
+
+Expect these assets:
+
+- `OpenRecord-linux-amd64.deb`
+- `OpenRecord-linux-x86_64.AppImage`
+- `OpenRecord-windows-x64.exe`
+- `OpenRecord-android.apk`
+- `SHA256SUMS.txt`
+
+Check that the download links in `README.md` and `docs/desktop.md` resolve. They use
+`releases/latest/download/<file>`, so they update once the new release is marked latest.
+
+```bash
+curl -sIL https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk | head -1
+```
+
+Optionally verify checksums:
+
+```bash
+gh release download vx.y.z --repo ahnafone/open-record --pattern SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt --ignore-missing
+```

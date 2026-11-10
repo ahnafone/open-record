@@ -11,6 +11,7 @@
     "check": "npm run tokens:check && nx run-many -t lint typecheck build",
     "tokens": "node tools/gen-tokens/gen-tokens.mjs",
     "tokens:check": "node tools/gen-tokens/gen-tokens.mjs --check",
+    "check:versions": "node scripts/check-version-sync.mjs",
     "assets:app": "node apps/app/resources/generate-sources.mjs && cd apps/app && capacitor-assets generate --android --ios --iconBackgroundColor '#171b20' --iconBackgroundColorDark '#171b20' --splashBackgroundColor '#171b20' --splashBackgroundColorDark '#171b20'",
     "cap:sync": "nx run app:cap-sync",
     "server:up": "node scripts/server-up.mjs",

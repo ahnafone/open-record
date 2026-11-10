@@ -14,8 +14,32 @@ env:
   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
 jobs:
+  # Tag pushes only: a mismatched version fails here, before any build minutes
+  # or Android signing secrets are used. Other runs skip it and continue.
+  verify:
+    name: Check versions match the tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check versions match the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-version-sync.mjs --tag "$TAG"
+
   build:
     name: Build ${{ matrix.name }}
+    needs: [verify]
+    # Runs when verify passed or was skipped (non-tag runs); not after a failure.
+    if: always() && (needs.verify.result == 'success' || needs.verify.result == 'skipped')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -97,21 +121,192 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  android:
+    name: Build Android APK
+    needs: [verify]
+    # Only release tags and manual runs from the default branch may use the
+    # signing secrets. Other runs never reach the secrets.
+    if: >-
+      always() && (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The `release` environment holds the ANDROID_* secrets and is restricted to
+    # v* tags and main (see docs/releasing.md).
+    environment: release
+    # Signing secrets are read only inside steps. If they are missing, manual
+    # runs skip the build quietly; a v* tag fails here, so the release job
+    # never publishes a release without the APK.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Android signing secrets
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          echo "Missing Android signing secrets: ${missing[*]}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "::error::Release tag build needs the Android signing secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "::notice::Skipping Android build on a non-release run."
+
+      - name: Set up JDK 21
+        if: steps.signing.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: apps/app/android/**/*.gradle*
+
+      - name: Set up Node.js 24
+        if: steps.signing.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install workspace dependencies
+        if: steps.signing.outputs.ready == 'true'
+        run: npm ci
+
+      - name: Build web app and sync Capacitor (same as android:release)
+        if: steps.signing.outputs.ready == 'true'
+        run: npm run cap:sync
+        env:
+          NX_DAEMON: 'false'
+
+      - name: Write release keystore and keystore.properties
+        if: steps.signing.outputs.ready == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          # Each secret must be one line (see docs/releasing.md). A newline would
+          # corrupt keystore.properties, so fail before writing anything.
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            value="${!name}"
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "::error::$name must be a single line (remove any line breaks from the secret)."
+              exit 1
+            fi
+          done
+
+          # The keystore lives in RUNNER_TEMP, outside the repository, as
+          # build.gradle requires.
+          keystore="$RUNNER_TEMP/open-record-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          test -s "$keystore"
+
+          # Java properties: escape backslashes in values.
+          escape() {
+            local value="$1"
+            printf '%s' "${value//\\/\\\\}"
+          }
+
+          {
+            echo "storeFile=$keystore"
+            echo "storePassword=$(escape "$ANDROID_KEYSTORE_PASSWORD")"
+            echo "keyAlias=$(escape "$ANDROID_KEY_ALIAS")"
+            echo "keyPassword=$(escape "$ANDROID_KEY_PASSWORD")"
+          } > apps/app/android/keystore.properties
+
+      - name: Build release APK
+        if: steps.signing.outputs.ready == 'true'
+        working-directory: apps/app/android
+        run: ./gradlew assembleRelease
+
+      - name: Rename release APK
+        if: steps.signing.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          src=apps/app/android/app/build/outputs/apk/release/app-release.apk
+          test -f "$src"
+          mkdir -p dist/android-release
+          mv "$src" dist/android-release/OpenRecord-android.apk
+
+      - name: Upload APK
+        if: steps.signing.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-record-android
+          path: dist/android-release/OpenRecord-android.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/open-record-release.jks" apps/app/android/keystore.properties
+
   release:
     name: Upload installers to the GitHub release
     # Only tags publish. Matrix jobs never touch the release, so there are no
     # concurrent uploads/races between platforms.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check versions match the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-version-sync.mjs --tag "$TAG"
+
       - name: Download all installer artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Verify expected release assets
+        run: |
+          set -euo pipefail
+          expected=(
+            OpenRecord-linux-x86_64.AppImage
+            OpenRecord-linux-amd64.deb
+            OpenRecord-windows-x64.exe
+            OpenRecord-android.apk
+          )
+          for file in "${expected[@]}"; do
+            if [ ! -s "release-assets/$file" ]; then
+              echo "::error::Missing release asset: $file"
+              exit 1
+            fi
+          done
 
       - name: Generate SHA-256 checksums
         run: |
