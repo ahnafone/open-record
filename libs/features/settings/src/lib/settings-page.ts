@@ -104,7 +104,7 @@ const QUALITY_LABELS: Record<AudioQuality, string> = {
       </a>
     }
 
-    @if (publicAvailable && !desktopApp) {
+    @if (publicAvailable) {
       <or-section-head heading="Public server" />
       <or-switch
         label="Use the public Open Record server"

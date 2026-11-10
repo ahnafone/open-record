@@ -124,13 +124,29 @@
     }
   </p>
   @if (s.lanEnabled) {
+    <ol class="steps">
+      <li>
+        Connect this computer and the phone to the same Wi-Fi network.
+      </li>
+      <li>
+        On the phone, scan the QR code below with the camera, or type the LAN
+        address into the phone’s browser.
+      </li>
+      <li>
+        Sign in with the same Supabase account the phone uses, and the phone
+        will search, stream and control playback through this computer.
+      </li>
+    </ol>
+    <p class="note">
+      The phone must use the same Supabase project and account as this app.
+    </p>
     @if (lanUrl(); as url) {
       <div class="lan-card">
         <span class="field-label">LAN address</span>
         <div class="lan-row">
-          <code class="lan-url">{{ url }}</code>
+          <code class="lan-url" role="group" aria-label="LAN address">{{ url }}</code>
           <or-button size="sm" (click)="copyLanUrl()"
-            ><or-icon name="link" [size]="15" />Copy</or-button
+            ><or-icon name="link" [size]="15" />Copy address</or-button
           >
         </div>
         <div class="qr">
@@ -146,8 +162,7 @@
           }
         </div>
         <p class="note">
-          Scan the code with your phone camera. It contains only this address,
-          never your access token.
+          The QR code holds only this address, never your access token.
         </p>
       </div>
     } @else if (pairingLoading()) {
@@ -159,19 +174,28 @@
         LAN access is on, but the network address is not ready yet.
       </p>
     }
-    <ul class="notes">
-      <li>Use the same Wi-Fi network on the phone and this computer.</li>
-      <li>
-        Allow port 47900 through the computer’s firewall for private networks.
-      </li>
-      <li>
-        The phone must use the same Supabase project and account as this app.
-      </li>
-      <li>
-        LAN traffic is plain HTTP: only use trusted home or office networks,
-        never port-forward 47900.
-      </li>
-    </ul>
+    <div class="troubleshoot">
+      <span class="field-label">Phone can’t connect?</span>
+      <ul class="notes">
+        <li>
+          <strong>Windows:</strong> when the firewall asks, allow Open Record on
+          private networks. Otherwise allow TCP port 47900 on private networks.
+        </li>
+        <li>
+          <strong>macOS:</strong> open System Settings, Privacy &amp; Security,
+          Local Network, and turn on Open Record. Then turn phones on again here
+          to restart the server.
+        </li>
+        <li>
+          Guest Wi-Fi, VPNs and client isolation (AP isolation) block phones.
+          Use your main home or office network.
+        </li>
+        <li>
+          LAN traffic is plain HTTP: only use trusted networks, and never
+          port-forward 47900.
+        </li>
+      </ul>
+    </div>
   }
 
   <or-section-head heading="Server" />

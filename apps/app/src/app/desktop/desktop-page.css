@@ -150,8 +150,27 @@
   background: var(--color-ivory);
 }
 
-.notes {
+.steps {
   margin: var(--spacing-sm) 0 0;
+  padding-inline-start: 22px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+.steps li + li {
+  margin-top: var(--spacing-xs);
+}
+.steps li::marker {
+  font-weight: 600;
+  color: var(--color-muted);
+}
+.troubleshoot {
+  display: grid;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-md);
+}
+.notes {
+  margin: var(--spacing-xs) 0 0;
   padding-inline-start: 18px;
   font-size: 12px;
   line-height: 1.5;
@@ -159,6 +178,10 @@
 }
 .notes li + li {
   margin-top: var(--spacing-xs);
+}
+.notes strong {
+  font-weight: 600;
+  color: var(--color-text);
 }
 
 .usage {

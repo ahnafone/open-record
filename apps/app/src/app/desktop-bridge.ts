@@ -105,9 +105,13 @@ export async function connectDesktop(
     );
     const url = connection.url.trim();
     if (!url) return;
-    const saved = settings.downloadServerUrl().trim();
+    // Compare with the own server, not the effective one: in public mode the
+    // effective server is the public URL, and the bundled server must still be
+    // saved as the own server so switching back works.
+    const saved = settings.ownServerUrl().trim();
     if (saved && !isSameServerUrl(saved, url)) return;
     const token = connection.token.trim();
+    // In public mode setDownloadServer only saves the own server (no apply).
     await settings.setDownloadServer(token ? { url, token } : { url });
   } catch {
     // A missing, broken or slow bridge must never block the app from starting.
