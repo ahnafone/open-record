@@ -1,14 +1,15 @@
-# Open Record v0.0.3 (beta)
+# Open Record v0.0.4 (beta)
 
 Open Record is a vinyl record-shop listening room: browse the crates, build playlists, import your
-own music and play it on a virtual turntable. This is the third beta.
+own music and play it on a virtual turntable. This is the fourth beta.
 
-## What's new in v0.0.3
+## What's new in v0.0.4
 
-- **Welcome dialog, link strip and About page:** a first-run welcome dialog, a strip of useful links, and a new About page.
-- **Crossfade:** a Spotify-style crossfade setting with a toggle and a 1-12 second duration. It is off by default, web only, and applies to manual picks and skips.
-- **Smoother track changes on web:** the current track keeps playing while the next one loads, so there is no silence gap. The progress bar no longer shows a stale position from the previous track while loading.
-- **Tab title shows the track:** on web, the browser tab shows the current track (▶/⏸ Title – Artist | Open Record).
+- **Android APK on the release page:** the signed `OpenRecord-android.apk` is now built by CI and attached to every release alongside the desktop installers and `SHA256SUMS.txt`.
+- **Desktop app can use the public server:** the public-server switch in Settings now appears on desktop too, and switching back keeps your own server saved.
+- **Easier phone connect on desktop:** the desktop page now shows step-by-step instructions, a QR code, a copyable LAN address and troubleshooting tips.
+- **Access requests from any connection:** "Manage access requests" now shows for the server owner whenever the project supports it, including when running against your own server.
+- **Check again after approval:** accounts that were not approved can use a "Check again" button instead of signing out.
 
 ## Highlights
 
