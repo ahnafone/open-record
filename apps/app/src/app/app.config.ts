@@ -18,6 +18,7 @@ import {
   createDefaultTransport,
 } from '@open-record/providers/remote';
 import {
+  AUTH_ACCESS_RECHECK,
   AuthPort,
   AuthStore,
   BackgroundWorkPort,
@@ -248,6 +249,27 @@ function sessionOptions(): ServerSessionOptions & {
   };
 }
 
+/**
+ * Denied account's "Check again": `GET /ping` with the session token. `/ping`
+ * is an authenticated route, so the server's approval gate answers it: `true`
+ * on 2xx, `false` on the `403 access-not-approved` refusal (or any other
+ * non-2xx). Throws when there is no server or session, or the request fails.
+ */
+async function recheckServerAccess(): Promise<boolean> {
+  await settingsAssigned;
+  await settings?.ready();
+  const serverUrl = settings?.downloadServerUrl() ?? '';
+  const token = await supabase.accessToken();
+  if (!serverUrl || !token) throw new Error('No server session to check.');
+  const res = await createDefaultTransport().request({
+    method: 'GET',
+    url: `${serverUrl.replace(/\/+$/, '')}/ping`,
+    headers: { accept: 'application/json', authorization: `Bearer ${token}` },
+    timeoutMs: 10_000,
+  });
+  return res.status >= 200 && res.status < 300;
+}
+
 /** Cast uploads and local-file reads are a browser-only feature. */
 const castUploadProviders: Provider[] = Capacitor.isNativePlatform()
   ? []
@@ -322,6 +344,7 @@ export const appConfig: ApplicationConfig = {
     // Android: foreground service so downloads continue with the screen off (null elsewhere).
     { provide: BackgroundWorkPort, useFactory: createBackgroundWork },
     { provide: AuthPort, useValue: supabase },
+    { provide: AUTH_ACCESS_RECHECK, useValue: recheckServerAccess },
     // Library + playlist metadata sync for signed-in users (same client).
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
     // Additive per-track play counts for signed-in users (same client).

@@ -1,6 +1,15 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, InjectionToken, computed, inject, signal } from '@angular/core';
 import { probeAdmin } from './access-api';
 import { AuthPort, type AuthProfile, type AuthProjectConfig, type AuthUser } from './ports';
+
+/**
+ * "Check again" on a denied account: one authenticated call through the
+ * server's approval gate. Resolves `true` only when the server accepts it;
+ * the app provides it (it owns the server URL and transport).
+ */
+export const AUTH_ACCESS_RECHECK = new InjectionToken<() => Promise<boolean>>(
+  'AUTH_ACCESS_RECHECK',
+);
 
 /**
  * - `unavailable`: accounts are not built into this app (no AuthPort).
@@ -24,6 +33,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 @Injectable({ providedIn: 'root' })
 export class AuthStore {
   private readonly port = inject(AuthPort, { optional: true });
+  private readonly accessRecheck = inject(AUTH_ACCESS_RECHECK, { optional: true });
 
   private readonly _status = signal<AuthStatus>(this.port ? 'loading' : 'unavailable');
   private readonly _user = signal<AuthUser | null>(null);
@@ -40,6 +50,8 @@ export class AuthStore {
   private readonly _accessDenied = signal(false);
   /** The user id the admin probe last ran for (one probe per sign-in). */
   private adminProbedFor: string | null = null;
+  /** Bumped when the account or connection changes, so an in-flight probe can't write a stale result. */
+  private adminEpoch = 0;
   private started?: Promise<void>;
   private unsubscribe?: () => void;
   private unsubscribeRecovery?: () => void;
@@ -72,8 +84,9 @@ export class AuthStore {
    */
   readonly publicServer = this._publicServer.asReadonly();
   /**
-   * The signed-in account is the server's admin (probed once per sign-in on
-   * the public server; false elsewhere, and whenever the probe fails).
+   * The signed-in account is the server's admin (probed once per sign-in
+   * against the active project, in every connection mode; false when there is
+   * no project, and whenever the probe fails).
    */
   readonly isAdmin = this._isAdmin.asReadonly();
   /**
@@ -281,18 +294,20 @@ export class AuthStore {
   }
 
   /**
-   * Called by `SettingsStore` when the connection mode changes. On the public
-   * server a signed-in account gets its admin probe (once per sign-in).
+   * Called by `SettingsStore` when the connection mode changes. A signed-in
+   * account is probed for admin status against the active project, whichever
+   * server is selected (a probe with no project or token makes no request).
    */
   setPublicServer(on: boolean): void {
     if (this._publicServer() === on) return;
     this._publicServer.set(on);
     // Admin and denial are per server: a new connection starts clean.
+    this.adminEpoch++;
     this.adminProbedFor = null;
     this._isAdmin.set(false);
     this._accessDenied.set(false);
     const user = this._user();
-    if (on && user) this.checkAdmin(user.id);
+    if (user) this.checkAdmin(user.id);
   }
 
   /**
@@ -301,6 +316,29 @@ export class AuthStore {
    */
   markAccessDenied(): void {
     if (this._user()) this._accessDenied.set(true);
+  }
+
+  /**
+   * The server accepted an authenticated request from the signed-in account,
+   * so it is approved: clears an earlier denial (e.g. after an admin approved it).
+   * Called by `recheckAccess` on success only.
+   */
+  markAccessGranted(): void {
+    if (this._user()) this._accessDenied.set(false);
+  }
+
+  /**
+   * Denied account's "Check again": runs the app's `AUTH_ACCESS_RECHECK` call.
+   * The denial clears only when that call succeeds for the same account; any
+   * refusal, failure or missing hook leaves it in place and resolves `false`.
+   */
+  async recheckAccess(): Promise<boolean> {
+    const check = this.accessRecheck;
+    const userId = this._user()?.id;
+    if (!check || !userId) return false;
+    const granted = await check().catch(() => false);
+    if (granted && this._user()?.id === userId) this.markAccessGranted();
+    return granted;
   }
 
   private async restore(): Promise<void> {
@@ -342,6 +380,7 @@ export class AuthStore {
     if (!user && this._user()) this._recovering.set(false);
     // Denial and admin status belong to one account; a token refresh keeps them.
     if (user?.id !== this._user()?.id) {
+      this.adminEpoch++;
       this._accessDenied.set(false);
       this._isAdmin.set(false);
       this.adminProbedFor = null;
@@ -352,9 +391,9 @@ export class AuthStore {
     if (user) this.checkAdmin(user.id);
   }
 
-  /** Admin probe for the public server: `list-access` answers 200 only for the admin. */
+  /** Admin probe (any server mode): `list-access` answers 200 only for the admin. */
   private checkAdmin(userId: string): void {
-    if (!this._publicServer() || this.adminProbedFor === userId) return;
+    if (this.adminProbedFor === userId) return;
     this.adminProbedFor = userId;
     this.adminProbe = this.probeAdminFor(userId);
   }
@@ -365,6 +404,7 @@ export class AuthStore {
   }
 
   private async probeAdminFor(userId: string): Promise<void> {
+    const epoch = this.adminEpoch;
     let project: AuthProjectConfig | null = null;
     let token: string | null;
     try {
@@ -376,12 +416,12 @@ export class AuthStore {
     }
     if (!project || !token) {
       // Nothing to ask with yet: let a later sign-in or restore probe again.
-      if (this.adminProbedFor === userId) this.adminProbedFor = null;
+      if (epoch === this.adminEpoch && this.adminProbedFor === userId) this.adminProbedFor = null;
       return;
     }
     const admin = await probeAdmin(project, token);
-    // Stale if the account changed or the public mode was switched off meanwhile.
-    if (this._user()?.id === userId && this._publicServer()) this._isAdmin.set(admin);
+    // Stale if the account or connection changed meanwhile.
+    if (epoch === this.adminEpoch && this._user()?.id === userId) this._isAdmin.set(admin);
   }
 
   private validate(email: string, password: string): boolean {

@@ -62,8 +62,14 @@ type Action = 'password' | 'email' | 'signOut' | 'delete';
         Sign out, or ask the server admin to approve it.
       </p>
       <div class="actions">
-        <or-button variant="primary" (click)="signOutDenied()">Sign out</or-button>
+        <or-button variant="primary" [disabled]="checking()" (click)="checkAgain()"
+          >Check again</or-button
+        >
+        <or-button (click)="signOutDenied()">Sign out</or-button>
       </div>
+      @if (stillDenied()) {
+        <p class="status" role="status"><span class="bad"><or-icon name="alert" [size]="14" />Not approved yet. If you were just approved, try again in a minute.</span></p>
+      }
     } @else if (!auth.signedIn() || auth.recovering()) {
       <or-account-section />
     } @else {
@@ -465,6 +471,10 @@ export class AccountPage {
   protected readonly showPassword = signal(false);
   protected readonly newEmail = signal('');
   protected readonly deleteOpen = signal(false);
+  /** A "Check again" is in flight. */
+  protected readonly checking = signal(false);
+  /** The last "Check again" was refused or failed. */
+  protected readonly stillDenied = signal(false);
 
   /** Confirm is filled in but differs from the new password. */
   protected readonly mismatch = computed(
@@ -559,6 +569,17 @@ export class AccountPage {
   protected openDelete(): void {
     this.begin('delete');
     this.deleteOpen.set(true);
+  }
+
+  /** Denied account: ask the server again. The denial clears only if it now answers. */
+  protected async checkAgain(): Promise<void> {
+    this.checking.set(true);
+    this.stillDenied.set(false);
+    try {
+      if (!(await this.auth.recheckAccess())) this.stillDenied.set(true);
+    } finally {
+      this.checking.set(false);
+    }
   }
 
   /** Denied account: signing out is the only action on this server. */
