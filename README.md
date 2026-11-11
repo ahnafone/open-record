@@ -1,7 +1,7 @@
 # Open Record
 
 A vinyl record-shop listening room for your phone and desktop: browse the crates, build playlists,
-import your own music, and play it all on a virtual turntable. **Version 0.0.5 (beta).**
+import your own music, and play it all on a virtual turntable. **Version 0.0.6 (beta).**
 
 ![Open Record overview](docs/screenshots/00-overview.png)
 
@@ -14,7 +14,7 @@ Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md). Checksums for every release
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.5; macOS installers coming later |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.6; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; beta-tested; see [release builds](#release-builds) |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | Not tested yet. Mac, Xcode and a free Apple ID; re-sign every 7 days |
 
@@ -29,14 +29,14 @@ Store, TestFlight, Play Store or enterprise build.
 
 ## Status
 
-Open Record 0.0.5 is a beta: an Angular + Capacitor app (Android, iOS and web) with a bundled
+Open Record 0.0.6 is a beta: an Angular + Capacitor app (Android, iOS and web) with a bundled
 public-domain catalogue, local imports, playlists, a queue, background downloads and optional
 accounts and sync. The Electron desktop app bundles the UI and local server, and
 `.github/workflows/desktop-build.yml` builds the desktop installers.
 
 - **Android:** beta-tested on devices.
 - **iPhone:** not tested yet. It is build-from-source only (see [docs/ios-install.md](docs/ios-install.md)).
-- **Desktop:** installers are unsigned. Windows and AppImage builds update in the app; `.deb` builds only notify you of a new version. macOS installers are not part of v0.0.5; build from source (see [docs/desktop.md](docs/desktop.md#build-from-source)).
+- **Desktop:** installers are unsigned. Windows and AppImage builds update in the app; `.deb` builds only notify you of a new version. macOS installers are not part of v0.0.6; build from source (see [docs/desktop.md](docs/desktop.md#build-from-source)).
 - Collaborators is hidden in this release; its role logic is kept for later.
 
 ## Web app
