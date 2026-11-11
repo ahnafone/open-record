@@ -24,6 +24,7 @@ import {
   SessionStore,
   SourceFixService,
   ArtistCreditPipe,
+  SessionRefusedError,
 } from '@open-record/state';
 import {
   OrArtistLinks,
@@ -36,6 +37,7 @@ import {
   OrSectionHead,
   OrSleeve,
   OrSpinner,
+  OrSwipeRow,
   OrTag,
   OrToast,
   copyText,
@@ -52,8 +54,8 @@ interface UpNextRow {
   readonly track: Track;
   /** Index into `PlayerStore.queue()`, for `playAt` and `removeUpcoming`. */
   readonly queueIndex: number;
-  /** Added with "Play next". */
-  readonly playNext: boolean;
+  /** Your Stack entry id; null for Keep Spinning (autoplay) rows. */
+  readonly stackEntryId: string | null;
   /** Session entry for this row; null while playback is local. */
   readonly entryId: string | null;
   /** The session's current entry (never a duplicate entry with the same song). */
@@ -68,7 +70,7 @@ interface UpNextRow {
 /**
  * Now Playing: large sleeve over a disc that spins while playing, title,
  * artist, album, tags (imported, licence, year, genre), a reserved status
- * line, the seek bar, the transport row, the track credit and the up-next
+ * line, the seek bar, the transport row, the track credit and the queue
  * queue. The shell's top bar already carries the screen's h1. As the desktop
  * side panel (`panel`), the seek and transport rows are left to the player bar.
  */
@@ -87,6 +89,7 @@ interface UpNextRow {
     OrSeekRow,
     OrSleeve,
     OrSpinner,
+    OrSwipeRow,
     OrTag,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -167,6 +170,7 @@ interface UpNextRow {
       <div
         class="status"
         [class.is-empty]="!statusShown()"
+        [class.is-panel]="panel()"
         aria-live="polite"
       >
         @if (player.isLoading() && player.retrying()) {
@@ -273,11 +277,20 @@ interface UpNextRow {
         <p class="note">{{ track.credit }}</p>
       }
 
-      <or-section-head heading="Up next" />
-      @if (upNext().length) {
-        <ol class="queue">
-          @for (row of upNextWindow.items(); track row.queueIndex) {
-            <li class="row" [class.current]="row.current">
+      @if (stackRows().length) {
+        <or-section-head heading="Your Stack">
+          <or-button size="sm" ariaLabel="Clear Your Stack" (click)="clearStack()">Clear</or-button>
+        </or-section-head>
+        <ol class="queue" aria-label="Your Stack">
+          @for (row of stackRows(); track row.queueIndex) {
+            <li
+              class="row"
+              [class.current]="row.current"
+              orSwipeRow
+              [action]="'remove'"
+              [disabled]="row.disabled"
+              (swiped)="removeRow(row)"
+            >
               <div class="row-main" [class.is-disabled]="row.disabled">
                 <!-- Stretched play action; the artist links sit above it. -->
                 <button
@@ -290,7 +303,7 @@ interface UpNextRow {
                     row.track.title +
                     ' by ' +
                     row.track.artist +
-                    (row.playNext ? ', queued to play next' : '') +
+                    ', in Your Stack' +
                     (row.note ? ', ' + row.note : '')
                   "
                   (click)="player.playAt(row.queueIndex)"
@@ -299,13 +312,10 @@ interface UpNextRow {
                 <span class="row-txt">
                   <span class="row-title">{{ row.track.title }}</span>
                   <span class="row-artist"><or-artist-links [credit]="row.track.artist | artistCredit" /></span>
-                  @if (row.playNext || row.note || row.current) {
+                  @if (row.note || row.current) {
                     <span class="row-tags">
                       @if (row.current) {
                         <or-tag ivory>Now playing</or-tag>
-                      }
-                      @if (row.playNext) {
-                        <or-tag>Play next</or-tag>
                       }
                       @if (row.note) {
                         <or-tag>{{ row.note }}</or-tag>
@@ -319,22 +329,84 @@ interface UpNextRow {
               </div>
               <or-icon-button
                 icon="more"
-                data-upnext-options
+                data-queue-options
                 [label]="'Options for ' + row.track.title"
                 (click)="optionsFor.set(row)"
               />
             </li>
           }
         </ol>
-        @if (upNextWindow.hasMore()) {
+      }
+
+      @if (keepRows().length) {
+        <or-section-head heading="Keep Spinning">
+          <or-button size="sm" ariaLabel="Clear Keep Spinning" (click)="clearKeepSpinning()">Clear</or-button>
+        </or-section-head>
+        <ol class="queue" aria-label="Keep Spinning">
+          @for (row of keepWindow.items(); track row.queueIndex) {
+            <li
+              class="row"
+              [class.current]="row.current"
+              orSwipeRow
+              [action]="'remove'"
+              [disabled]="row.disabled"
+              (swiped)="removeRow(row)"
+            >
+              <div class="row-main" [class.is-disabled]="row.disabled">
+                <!-- Stretched play action; the artist links sit above it. -->
+                <button
+                  type="button"
+                  class="row-play"
+                  [disabled]="row.disabled"
+                  [attr.aria-current]="row.current ? 'true' : null"
+                  [attr.aria-label]="
+                    'Play ' +
+                    row.track.title +
+                    ' by ' +
+                    row.track.artist +
+                    (row.note ? ', ' + row.note : '')
+                  "
+                  (click)="player.playAt(row.queueIndex)"
+                ></button>
+                <or-sleeve size="thumb" [src]="art(row.track)" />
+                <span class="row-txt">
+                  <span class="row-title">{{ row.track.title }}</span>
+                  <span class="row-artist"><or-artist-links [credit]="row.track.artist | artistCredit" /></span>
+                  @if (row.note || row.current) {
+                    <span class="row-tags">
+                      @if (row.current) {
+                        <or-tag ivory>Now playing</or-tag>
+                      }
+                      @if (row.note) {
+                        <or-tag>{{ row.note }}</or-tag>
+                      }
+                    </span>
+                  }
+                </span>
+                @if (row.track.durationSec) {
+                  <span class="time">{{ fmt(row.track.durationSec) }}</span>
+                }
+              </div>
+              <or-icon-button
+                icon="more"
+                data-queue-options
+                [label]="'Options for ' + row.track.title"
+                (click)="optionsFor.set(row)"
+              />
+            </li>
+          }
+        </ol>
+        @if (keepWindow.hasMore()) {
           <div
             class="sentinel"
             orLoadMore
-            [loadMoreKey]="upNextWindow.items().length"
-            (loadMore)="upNextWindow.grow()"
+            [loadMoreKey]="keepWindow.items().length"
+            (loadMore)="keepWindow.grow()"
           ></div>
         }
-      } @else {
+      }
+
+      @if (!stackRows().length && !keepRows().length) {
         <or-empty-state>Nothing else is queued after this record.</or-empty-state>
       }
 
@@ -361,12 +433,17 @@ interface UpNextRow {
         (dismissed)="optionsFor.set(null)"
       >
         <div orModalActions>
-          @if (optionsFor()?.playNext === false) {
+          @if (isStackRow(optionsFor())) {
+            <or-button block variant="danger" (click)="removeFromOptions()">
+              Remove from Stack
+            </or-button>
+          } @else {
             <or-button block (click)="playNextFromOptions()">Play next</or-button>
+            <or-button block (click)="addToStackFromOptions()">Add to Stack</or-button>
+            <or-button block variant="danger" (click)="removeFromOptions()">
+              Remove from queue
+            </or-button>
           }
-          <or-button block variant="danger" (click)="removeFromOptions()">
-            Remove from queue
-          </or-button>
           @if (httpUrl(optionsFor()?.track?.source?.url ?? '')) {
             <or-button block (click)="copyUpNextSource()">Copy source link</or-button>
           }
@@ -521,12 +598,16 @@ interface UpNextRow {
       min-block-size: var(--spacing-touch);
       margin: var(--spacing-xxs) 0;
     }
-    /* Phone only: desktop keeps its reserved status line. */
+    /* Phone and the desktop side panel: desktop route keeps its reserved status line. */
     @media (max-width: 899px) {
       .status.is-empty {
         min-block-size: 0;
         margin: 0;
       }
+    }
+    .status.is-panel.is-empty {
+      min-block-size: 0;
+      margin: 0;
     }
     .status-text,
     .status-bad {
@@ -706,7 +787,7 @@ export class NowPlayingPage {
   /** Hosted as the desktop side panel: the player bar owns seek and transport. */
   readonly panel = input(false, { transform: booleanAttribute });
 
-  /** Up next row whose options modal is open. */
+  /** Queue row whose options modal is open. */
   protected readonly optionsFor = signal<UpNextRow | null>(null);
   /** Options modal for the current record (⋯ beside its title). */
   protected readonly trackOptionsOpen = signal(false);
@@ -810,7 +891,7 @@ export class NowPlayingPage {
     }
   });
 
-  /** Upcoming tracks ("Play next" picks first) with their queue indices. */
+  /** Upcoming tracks (Your Stack first, then Keep Spinning) with their queue indices. */
   protected readonly upNext = computed<readonly UpNextRow[]>(() => {
     const remote = this.session.ownsPlayback()
       ? this.session.remoteEntries()
@@ -840,8 +921,22 @@ export class NowPlayingPage {
     });
   });
 
-  /** Rendered slice of `upNext` (long queues grow as the end nears). */
-  protected readonly upNextWindow = lazyWindow(this.upNext);
+  /** Your Stack rows (user-added), in play order. */
+  protected readonly stackRows = computed(() =>
+    this.upNext().filter((row) => row.stackEntryId !== null),
+  );
+
+  /** Keep Spinning rows (autoplay), in play order. */
+  protected readonly keepRows = computed(() =>
+    this.upNext().filter((row) => row.stackEntryId === null),
+  );
+
+  /** Rendered slice of `keepRows` (long windows grow as the end nears). */
+  protected readonly keepWindow = lazyWindow(this.keepRows);
+
+  protected isStackRow(row: UpNextRow | null): boolean {
+    return !!row && row.stackEntryId !== null;
+  }
 
   /** Stale-target CTA: move playback back to this tab/device in one tap. */
   protected async playOnThisDevice(): Promise<void> {
@@ -894,7 +989,7 @@ export class NowPlayingPage {
     );
   }
 
-  /** Up next options: copy that row's source link, then close the modal. */
+  /** Queue options: copy that row's source link, then close the modal. */
   protected async copyUpNextSource(): Promise<void> {
     await this.copySourceLink(this.optionsFor()?.track.source?.url, () =>
       this.optionsFor.set(null),
@@ -928,36 +1023,117 @@ export class NowPlayingPage {
     }
   }
 
-  /** Options: move a normal-order row into the "Play next" list. */
-  protected async playNextFromOptions(): Promise<void> {
-    const row = this.optionsFor();
-    this.optionsFor.set(null);
-    if (!row || row.playNext) return;
+  /** Your Stack: empty it. Keep Spinning is not touched. */
+  protected clearStack(): void {
+    this.player.clearStack();
+    this.toast.show('Your Stack cleared');
+  }
+
+  /** Keep Spinning: empty the window and stop it refilling. */
+  protected async clearKeepSpinning(): Promise<void> {
     try {
-      if (!(await this.player.removeUpcoming(row.queueIndex))) return;
-      await this.player.playNext([row.track]);
-      this.toast.show(`“${row.track.title}” plays next`);
-      // The row moved (and was re-rendered): focus its options button.
-      const at = this.upNext().filter((r) => r.playNext).length - 1;
-      this.focusOptions(at);
-    } catch {
-      this.toast.show('Could not queue that record. Try again.');
+      await this.player.clearKeepSpinning();
+      this.toast.show('Keep Spinning cleared');
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : 'Could not clear Keep Spinning. Try again.',
+      );
     }
   }
 
-  /** Options: drop the row from the queue (by queue index, not id). */
+  /** Options: move a Keep Spinning row to the front of Your Stack. */
+  protected async playNextFromOptions(): Promise<void> {
+    const row = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!row || row.stackEntryId !== null) return;
+    if (!(await this.moveToStack(row, 'next'))) return;
+    this.toast.show(`“${row.track.title}” plays next`);
+    // Playing next is the first Your Stack row.
+    this.focusOptions(0);
+  }
+
+  /** Options: move a Keep Spinning row to the end of Your Stack. */
+  protected async addToStackFromOptions(): Promise<void> {
+    const row = this.optionsFor();
+    this.optionsFor.set(null);
+    if (!row || row.stackEntryId !== null) return;
+    const toQueue = this.player.addGoesToQueue();
+    if (!(await this.moveToStack(row, 'add'))) return;
+    this.toast.show(
+      toQueue
+        ? `“${row.track.title}” added to queue`
+        : `“${row.track.title}” added to Your Stack`,
+    );
+    // Appended: its options button is the last Your Stack row.
+    this.focusOptions(this.stackRows().length - 1);
+  }
+
+  /**
+   * Take a Keep Spinning row out of the window, then put it in Your Stack.
+   * Returns false (after a toast) if the row could not be moved.
+   */
+  private async moveToStack(row: UpNextRow, mode: 'next' | 'add'): Promise<boolean> {
+    let removed = false;
+    try {
+      if (!(await this.player.removeUpcoming(row.queueIndex))) {
+        this.toast.show('Could not move that record. Try again.');
+        return false;
+      }
+      removed = true;
+      if (mode === 'next') await this.player.playNext(row.track);
+      else await this.player.addToStack(row.track);
+      return true;
+    } catch (err) {
+      // The row already left the session queue: put it back at the end so a
+      // refused move does not lose it. Best effort. Not after an ambiguous
+      // failure: the session may already have queued it, and a second copy
+      // would duplicate it.
+      const ambiguous = err instanceof SessionRefusedError && err.ambiguous;
+      if (removed && !ambiguous) await this.player.enqueue([row.track]).catch(() => undefined);
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : 'Could not queue that record. Try again.',
+      );
+      return false;
+    }
+  }
+
+  /** Options: remove the row from the open options modal, then move focus. */
   protected async removeFromOptions(): Promise<void> {
     const row = this.optionsFor();
     this.optionsFor.set(null);
     if (!row) return;
     const at = this.upNext().findIndex((r) => r.queueIndex === row.queueIndex);
-    if (!(await this.player.removeUpcoming(row.queueIndex))) {
-      this.toast.show('Could not remove that record');
-      return;
+    if (await this.removeRow(row)) {
+      // The row (and its options button) is gone; move focus somewhere sane.
+      this.focusOptions(at);
     }
-    this.toast.show(`Removed “${row.track.title}” from the queue`);
-    // The row (and its options button) is gone; move focus somewhere sane.
-    this.focusOptions(at);
+  }
+
+  /**
+   * Remove a row from Your Stack (by entry id) or from the Keep Spinning
+   * window (by queue index). Used by the options modal and the swipe gesture.
+   */
+  protected async removeRow(row: UpNextRow): Promise<boolean> {
+    let removed: boolean;
+    if (row.stackEntryId !== null) {
+      removed = this.player.removeStackEntry(row.stackEntryId);
+    } else {
+      removed = await this.player.removeUpcoming(row.queueIndex);
+    }
+    if (!removed) {
+      this.toast.show('Could not remove that record');
+      return false;
+    }
+    this.toast.show(
+      row.stackEntryId !== null
+        ? `Removed “${row.track.title}” from Your Stack`
+        : `Removed “${row.track.title}” from the queue`,
+    );
+    return true;
   }
 
   /** After render, focus the `index`-th row's options (clamped), else the list. */
@@ -966,7 +1142,7 @@ export class NowPlayingPage {
       () => {
         const root = this.host.nativeElement;
         const buttons = root.querySelectorAll<HTMLElement>(
-          '[data-upnext-options] button',
+          '[data-queue-options] button',
         );
         const button = buttons[Math.min(Math.max(index, 0), buttons.length - 1)];
         if (button) {

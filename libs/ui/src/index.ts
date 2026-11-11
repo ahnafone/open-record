@@ -44,6 +44,10 @@ export {
 } from './lib/viewport/viewport';
 export { OrFilterField } from './lib/filter-field/filter-field';
 export {
+  OrSwipeRow,
+  type SwipeAction,
+} from './lib/swipe-row/swipe-row';
+export {
   OrLoadMore,
   LAZY_PAGE_SIZE,
   RAIL_PAGE_SIZE,

@@ -48,6 +48,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Asked once (BackgroundWorkPlugin): Doze otherwise cuts the network while downloads run with the screen off. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- In-app update (AppUpdatePlugin): hand the downloaded release APK to the system installer. The user grants it per app in Settings. -->

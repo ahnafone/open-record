@@ -7,12 +7,16 @@ import type {
   Track,
 } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
-import type { PlayerStatus, RepeatMode } from '@open-record/player';
+import type { PlayerStatus, RepeatMode, StackEntry } from '@open-record/player';
 import { StoragePort, createInMemoryStorage } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { PlayCountsStore } from './play-counts.store';
 import { PlaylistsStore } from './playlists.store';
-import { PlayerStore, QUEUE_SAVE_INTERVAL_MS } from './player.store';
+import {
+  PlayerStore,
+  QUEUE_SAVE_INTERVAL_MS,
+  SessionRefusedError,
+} from './player.store';
 import { SessionStore } from './session.store';
 import { toSessionTrack } from './session-track';
 
@@ -31,29 +35,91 @@ function manyTracks(count: number): Track[] {
 }
 
 /** Just enough of `PlayerService`'s engine for `PlayerStore`. */
+/** A Your Stack slot in the fake queue: its entry id and queue index. */
+interface FakeSlot {
+  entryId: string;
+  index: number;
+}
+
+/**
+ * Engine stand-in with real Your Stack semantics: stack entries sit physically
+ * in the queue, after the cursor, and are tracked as slots. Spies wrap the
+ * behaviour so tests can also assert the calls.
+ */
 function fakeEngine() {
   const queue = signal<readonly Track[]>([]);
   const currentIndex = signal(-1);
+  const slots = signal<readonly FakeSlot[]>([]);
   const current = computed(() => queue()[currentIndex()] ?? null);
   const status = signal<PlayerStatus>('idle');
-  const playNextIndices = signal<readonly number[]>([]);
+  const stackEntries = computed(() =>
+    slots().map((slot) => ({
+      entryId: slot.entryId,
+      track: queue()[slot.index],
+    })),
+  );
   const upcomingEntries = computed(() =>
     queue()
       .slice(currentIndex() + 1)
-      .map((track, i) => ({
-        track,
-        queueIndex: currentIndex() + 1 + i,
-        playNext: false,
-      })),
+      .map((track, i) => {
+        const queueIndex = currentIndex() + 1 + i;
+        return {
+          track,
+          queueIndex,
+          stackEntryId: slots().find((s) => s.index === queueIndex)?.entryId ?? null,
+        };
+      }),
+  );
+  const keepSpinningEntries = computed(() =>
+    upcomingEntries().filter((entry) => entry.stackEntryId === null),
   );
   const loadSeq = signal(0);
+  let entrySeq = 0;
+  const newEntryId = () => `fake-entry-${++entrySeq}`;
+  const stackIndexes = () => slots().map((slot) => slot.index);
+  /** Where a stack entry added to the end lands. */
+  const stackTail = () =>
+    currentIndex() < 0
+      ? queue().length
+      : Math.max(currentIndex(), ...stackIndexes()) + 1;
+
+  /** Insert entries at `at`, shifting later queue entries and slots. */
+  const insertStack = (at: number, entries: readonly StackEntry[]) => {
+    const n = entries.length;
+    const shift = (i: number) => (i >= at ? i + n : i);
+    queue.update((q) => [
+      ...q.slice(0, at),
+      ...entries.map((e) => e.track),
+      ...q.slice(at),
+    ]);
+    const shifted = slots().map((s) => ({ entryId: s.entryId, index: shift(s.index) }));
+    const added = entries.map((e, k) => ({ entryId: e.entryId, index: at + k }));
+    slots.set([...shifted, ...added].sort((a, b) => a.index - b.index));
+  };
+
+  /** Drop queue entries by index (never the cursor), renumbering the rest. */
+  const removeIndices = (drop: ReadonlySet<number>): boolean => {
+    if (!drop.size) return false;
+    const before = (i: number) => [...drop].filter((d) => d < i).length;
+    const cursor = currentIndex();
+    queue.update((q) => q.filter((_, i) => !drop.has(i)));
+    slots.update((s) =>
+      s
+        .filter((slot) => !drop.has(slot.index))
+        .map((slot) => ({ entryId: slot.entryId, index: slot.index - before(slot.index) })),
+    );
+    if (cursor >= 0) currentIndex.set(cursor - before(cursor));
+    return true;
+  };
+
   return {
     queue,
     currentIndex,
     current,
     upcomingEntries,
+    keepSpinningEntries,
+    stackEntries,
     upcoming: computed(() => upcomingEntries().map((entry) => entry.track)),
-    playNextIndices,
     shuffle: signal(false),
     repeat: signal<RepeatMode>('off'),
     status,
@@ -68,18 +134,64 @@ function fakeEngine() {
     canSetVolume: false,
     lastPlay: signal<{ seq: number; track: Track; at: number } | null>(null),
     loadSeq,
-    setQueue: vi.fn(async (tracks: readonly Track[], opts?: { startIndex?: number }) => {
-      queue.set([...tracks]);
-      currentIndex.set(opts?.startIndex ?? 0);
-      loadSeq.update((value) => value + 1);
-    }),
+    setQueue: vi.fn(
+      async (
+        tracks: readonly Track[],
+        opts?: { startIndex?: number; keepStack?: readonly StackEntry[] },
+      ) => {
+        queue.set([...tracks]);
+        slots.set([]);
+        currentIndex.set(opts?.startIndex ?? 0);
+        if (opts?.keepStack?.length) insertStack(stackTail(), opts.keepStack);
+        loadSeq.update((value) => value + 1);
+      },
+    ),
     setShuffle: vi.fn(),
     setRepeat: vi.fn(),
     toggleShuffle: vi.fn(),
     cycleRepeat: vi.fn(),
-    add: vi.fn(),
+    add: vi.fn((tracks: readonly Track[]) => {
+      queue.update((q) => [...q, ...tracks]);
+    }),
     dropPlayed: vi.fn(),
-    playNext: vi.fn(),
+    playNext: vi.fn((track: Track) => {
+      insertStack(currentIndex() + 1, [{ entryId: newEntryId(), track }]);
+    }),
+    addToStack: vi.fn((track: Track) => {
+      insertStack(stackTail(), [{ entryId: newEntryId(), track }]);
+    }),
+    removeStackEntry: vi.fn((entryId: string) => {
+      const slot = slots().find((s) => s.entryId === entryId);
+      return slot ? removeIndices(new Set([slot.index])) : false;
+    }),
+    clearStack: vi.fn(() => {
+      removeIndices(new Set(stackIndexes()));
+    }),
+    clearKeepSpinning: vi.fn(() => {
+      const stacked = new Set(stackIndexes());
+      const drop = queue()
+        .map((_, i) => i)
+        .filter((i) => i > currentIndex() && !stacked.has(i));
+      removeIndices(new Set(drop));
+    }),
+    setStack: vi.fn((entries: readonly StackEntry[]) => {
+      removeIndices(new Set(stackIndexes()));
+      if (entries.length) insertStack(stackTail(), entries);
+    }),
+    startStack: vi.fn(async () => {
+      const first = slots()[0];
+      if (currentIndex() >= 0 || !first) return false;
+      currentIndex.set(first.index);
+      slots.update((s) => s.slice(1));
+      return true;
+    }),
+    removeTracks: vi.fn((ids: ReadonlySet<string>) => {
+      const drop = new Set<number>();
+      queue().forEach((t, i) => {
+        if (i !== currentIndex() && ids.has(t.id)) drop.add(i);
+      });
+      return removeIndices(drop);
+    }),
     removeUpcoming: vi.fn(() => true),
     replaceUpcoming: vi.fn((oldId: string, next: Track) => {
       const tracks = queue();
@@ -87,7 +199,6 @@ function fakeEngine() {
       queue.set(tracks.map((t) => (t.id === oldId ? next : t)));
       return true;
     }),
-    markPlayNext: vi.fn(),
     playAt: vi.fn(async () => undefined),
     play: vi.fn(async () => undefined),
     pause: vi.fn(async () => undefined),
@@ -302,7 +413,7 @@ describe('PlayerStore', () => {
     });
     expect(player.upcoming()).toEqual([queue[1]]);
     expect(player.upcomingEntries()).toEqual([
-      { track: queue[1], queueIndex: 1, playNext: false },
+      { track: queue[1], queueIndex: 1, stackEntryId: null },
     ]);
     expect(player.hasNext()).toBe(true);
     expect(player.hasPrevious()).toBe(false);
@@ -781,7 +892,7 @@ describe('PlayerStore', () => {
     expect(player.currentIndex()).toBe(0);
     expect(player.currentEntryId()).toBe('e1');
     expect(player.upcomingEntries()).toEqual([
-      { track: queue[0], queueIndex: 1, playNext: false },
+      { track: queue[0], queueIndex: 1, stackEntryId: null },
     ]);
     // Library rows intentionally highlight every copy of the current track.
     expect(player.isCurrent(queue[0].id)).toBe(true);
@@ -888,5 +999,446 @@ describe('PlayerStore', () => {
     expect(session.command.mock.calls.map(([command]) => command)).toEqual([
       { type: 'replace', entryId: 'e1', track: toSessionTrack({ ...queue[0], id: 'fake:new' }, 'e1') },
     ]);
+  });
+
+  describe('Your Stack and Keep Spinning', () => {
+    const stackTrack = (id: string): Track => ({
+      id: `fake:${id}`,
+      providerId: 'fake',
+      title: id,
+      artist: 'X',
+    });
+    const ids = (tracks: readonly Track[]) => tracks.map((t) => t.id);
+    const stackIds = (player: PlayerStore) =>
+      player.stackEntries().map((entry) => entry.track.id);
+
+    it('playNext goes to the front of the stack and addToStack to its end', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(3), 0);
+
+      await player.addToStack(stackTrack('x'));
+      await player.addToStack(stackTrack('y'));
+      await player.playNext(stackTrack('z'));
+
+      expect(stackIds(player)).toEqual(['fake:z', 'fake:x', 'fake:y']);
+      expect(ids(player.upcoming())).toEqual([
+        'fake:z',
+        'fake:x',
+        'fake:y',
+        'fake:1',
+        'fake:2',
+      ]);
+      expect(player.keepSpinningEntries().map((e) => e.track.id)).toEqual([
+        'fake:1',
+        'fake:2',
+      ]);
+    });
+
+    it('starts playback when nothing is loaded instead of adding to an empty stack', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+
+      await player.playNext(stackTrack('x'));
+
+      expect(engine.playNext).not.toHaveBeenCalled();
+      expect(engine.setQueue).toHaveBeenCalledWith(
+        [stackTrack('x')],
+        expect.objectContaining({ startIndex: 0 }),
+      );
+    });
+
+    it('a stack applied while idle is not an empty queue: adds start the stack', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      engine.setStack([{ entryId: 'r1', track: stackTrack('r') }]);
+
+      await player.addToStack(stackTrack('x'));
+
+      expect(engine.setQueue).not.toHaveBeenCalled();
+      expect(engine.startStack).toHaveBeenCalledTimes(1);
+      expect(engine.currentIndex()).toBe(0);
+      expect(stackIds(player)).toEqual(['fake:x']);
+    });
+
+    it('a new play keeps Your Stack; clearStack still empties it', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(3), 0);
+      await player.addToStack(stackTrack('x'));
+
+      const fresh = Array.from({ length: 3 }, (_, i) => ({
+        id: `new:${i}`,
+        providerId: 'fake',
+        title: `New ${i}`,
+        artist: 'X',
+      }));
+      await player.playTracks(fresh, 0);
+
+      expect(stackIds(player)).toEqual(['fake:x']);
+      expect(ids(player.upcoming())).toEqual(['fake:x', 'new:1', 'new:2']);
+
+      player.clearStack();
+      expect(player.stackEntries()).toEqual([]);
+      expect(ids(player.upcoming())).toEqual(['new:1', 'new:2']);
+    });
+
+    it('play next and add to stack enqueue on the session while it owns playback', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      session.ownsPlayback.set(true);
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+
+      expect(player.addGoesToQueue()).toBe(true);
+      await player.playNext(stackTrack('x'));
+      await player.addToStack(stackTrack('y'));
+
+      const sent = session.command.mock.calls.map(([c]) => c);
+      expect(sent).toEqual([
+        {
+          type: 'enqueue',
+          tracks: [expect.objectContaining({ id: 'fake:x' })],
+          next: true,
+        },
+        {
+          type: 'enqueue',
+          tracks: [expect.objectContaining({ id: 'fake:y' })],
+          next: false,
+        },
+      ]);
+      // Each session entry gets its own id, distinct from the other.
+      const [first, second] = sent;
+      if (first?.type !== 'enqueue' || second?.type !== 'enqueue') {
+        throw new Error('expected two enqueue commands');
+      }
+      expect(first.tracks[0].entryId).not.toBe(second.tracks[0].entryId);
+
+      // The session queue is separate: nothing reaches the local engine or stack.
+      expect(engine.playNext).not.toHaveBeenCalled();
+      expect(engine.addToStack).not.toHaveBeenCalled();
+      expect(player.stackEntries()).toEqual([]);
+    });
+
+    it('a session-refused play next throws a short reason and changes nothing locally', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      session.ownsPlayback.set(true);
+      session.command.mockResolvedValueOnce({ ok: false, error: 'queue-too-large' });
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+
+      await expect(player.playNext(stackTrack('x'))).rejects.toThrow(
+        'the session queue is full',
+      );
+      await expect(player.addToStack(stackTrack('y'))).resolves.toBeUndefined();
+
+      expect(engine.playNext).not.toHaveBeenCalled();
+      expect(engine.addToStack).not.toHaveBeenCalled();
+    });
+
+    it('an unreachable session throws SessionRefusedError for the toast', async () => {
+      const session = fakeSession();
+      session.ownsPlayback.set(true);
+      session.command.mockResolvedValueOnce({ ok: false, error: 'unavailable' });
+      configure(fakeEngine(), session);
+      const player = TestBed.inject(PlayerStore);
+
+      await expect(player.addToStack(stackTrack('x'))).rejects.toBeInstanceOf(
+        SessionRefusedError,
+      );
+    });
+
+    it('stack removal and clearing stay no-ops while a session owns playback', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(3), 0);
+      await player.addToStack(stackTrack('x'));
+      const entryId = player.stackEntries()[0].entryId;
+
+      session.ownsPlayback.set(true);
+      player.clearStack();
+      expect(player.removeStackEntry(entryId)).toBe(false);
+      expect(engine.clearStack).not.toHaveBeenCalled();
+      expect(engine.removeStackEntry).not.toHaveBeenCalled();
+    });
+
+    it('keeps duplicates, including the song that is playing, as separate entries', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(2), 0);
+      const playing = engine.current();
+      if (!playing) throw new Error('expected a current track');
+
+      await player.addToStack(playing);
+      await player.addToStack(playing);
+
+      const [first, second] = player.stackEntries();
+      expect(stackIds(player)).toEqual(['fake:0', 'fake:0']);
+      expect(first.entryId).not.toBe(second.entryId);
+      expect(player.current()?.id).toBe('fake:0');
+    });
+
+    it('clearStack empties Your Stack and leaves Keep Spinning alone', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(4), 0);
+      await player.playNext(stackTrack('x'));
+      await player.addToStack(stackTrack('y'));
+
+      player.clearStack();
+
+      expect(player.stackEntries()).toEqual([]);
+      expect(ids(player.upcoming())).toEqual(['fake:1', 'fake:2', 'fake:3']);
+    });
+
+    it('clearKeepSpinning empties the window and stops the refill', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(60), 0);
+      await player.addToStack(stackTrack('x'));
+
+      await player.clearKeepSpinning();
+      expect(player.keepSpinningEntries()).toEqual([]);
+      expect(stackIds(player)).toEqual(['fake:x']);
+
+      // The cursor advances, but no top-up runs: the window is gone for good.
+      engine.add.mockClear();
+      engine.currentIndex.set(1);
+      TestBed.tick();
+      await Promise.resolve();
+      expect(engine.add).not.toHaveBeenCalled();
+    });
+
+    it('a new play action after clearKeepSpinning re-enables autoplay', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(60), 0);
+      await player.clearKeepSpinning();
+
+      // Fresh ids, so nothing is held back by the 12h dedupe.
+      const fresh = Array.from({ length: 60 }, (_, i) => ({
+        id: `new:${i}`,
+        providerId: 'fake',
+        title: `New ${i}`,
+        artist: 'X',
+      }));
+      await player.playTracks(fresh, 0);
+      engine.add.mockClear();
+      engine.currentIndex.set(50);
+      TestBed.tick();
+
+      expect(engine.add).toHaveBeenCalledTimes(1);
+      expect(ids(engine.add.mock.calls[0]?.[0] ?? [])).toEqual(
+        Array.from({ length: 9 }, (_, i) => `new:${51 + i}`),
+      );
+    });
+
+    it('saves Your Stack with entry ids and tracks, outside trackIds', async () => {
+      const engine = fakeEngine();
+      const storage = createInMemoryStorage();
+      configure(engine, fakeSession(), storage);
+      const player = TestBed.inject(PlayerStore);
+      await player.restore();
+      await player.playTracks(manyTracks(3), 0);
+      await player.playNext(stackTrack('x'));
+      const entryId = player.stackEntries()[0].entryId;
+
+      await player.flush();
+
+      const saved = await storage.queueState.get();
+      expect(saved?.trackIds).toEqual(['fake:0', 'fake:1', 'fake:2']);
+      expect(saved?.stack).toEqual([{ entryId, track: stackTrack('x') }]);
+    });
+
+    it('restores Your Stack with its saved entry ids', async () => {
+      const storage = createInMemoryStorage();
+      const byId = new Map(
+        [...manyTracks(3), stackTrack('x')].map((t) => [t.id, t]),
+      );
+      const resolveIds = (list: readonly string[]) =>
+        list.flatMap((id) => (byId.get(id) ? [byId.get(id) as Track] : []));
+      await storage.queueState.save({
+        trackIds: ['fake:0', 'fake:1', 'fake:2'],
+        index: 0,
+        positionSec: 0,
+        shuffle: false,
+        repeat: 'off',
+        stack: [{ entryId: 'saved-entry', track: stackTrack('x') }],
+      });
+      const engine = fakeEngine();
+      configure(engine, fakeSession(), storage, { resolveIds });
+      const player = TestBed.inject(PlayerStore);
+
+      await player.restore();
+
+      expect(player.stackEntries()).toEqual([
+        { entryId: 'saved-entry', track: stackTrack('x') },
+      ]);
+      expect(ids(player.upcoming())).toEqual(['fake:x', 'fake:1', 'fake:2']);
+    });
+
+    it('migrates a legacy playNextIds save into Your Stack under new entry ids', async () => {
+      const storage = createInMemoryStorage();
+      const byId = new Map(
+        [...manyTracks(3), stackTrack('x')].map((t) => [t.id, t]),
+      );
+      await storage.queueState.save({
+        trackIds: ['fake:0', 'fake:x', 'fake:1', 'fake:2'],
+        index: 0,
+        positionSec: 0,
+        shuffle: false,
+        repeat: 'off',
+        playNextIds: ['fake:x'],
+      });
+      const engine = fakeEngine();
+      configure(engine, fakeSession(), storage, {
+        resolveIds: (list: readonly string[]) =>
+          list.flatMap((id) => (byId.get(id) ? [byId.get(id) as Track] : [])),
+      });
+      const player = TestBed.inject(PlayerStore);
+
+      await player.restore();
+
+      const [entry] = player.stackEntries();
+      expect(player.stackEntries()).toHaveLength(1);
+      expect(entry.track.id).toBe('fake:x');
+      expect(entry.entryId).toEqual(expect.any(String));
+      expect(ids(player.upcoming())).toEqual(['fake:x', 'fake:1', 'fake:2']);
+    });
+
+    describe('12h autoplay dedupe', () => {
+      const day = 12 * 60 * 60 * 1000;
+
+      afterEach(() => vi.useRealTimers());
+
+      it('shuffle off: replaying the same list queues the next songs in list order', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        const tracks = manyTracks(60);
+        await player.playTracks(tracks, 0);
+        await player.playTracks(tracks, 0);
+
+        // The replay starts at the top again, in list order.
+        expect(ids(engine.setQueue.mock.calls.at(-1)?.[0] ?? [])).toEqual(
+          ids(tracks.slice(0, 51)),
+        );
+
+        // Draining the queue refills with the next songs, not a random draw.
+        engine.add.mockClear();
+        engine.currentIndex.set(50);
+        TestBed.tick();
+        expect(ids(engine.add.mock.calls.flatMap(([t]) => t))).toEqual(
+          ids(tracks.slice(51)),
+        );
+      });
+
+      it('shuffle on: skips songs queued within 12h on a fresh autoplay fill, then allows them after', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        await player.playTracks(manyTracks(60), 0);
+        // fake:0..fake:50 entered the first window.
+
+        // Shuffled: the tapped track plus the only eligible songs, 51..59.
+        engine.shuffle.set(true);
+        await player.playTracks(manyTracks(60), 0);
+        const second = ids(engine.setQueue.mock.calls.at(-1)?.[0] ?? []);
+        expect(second[0]).toBe('fake:0');
+        expect(second.slice(1).sort()).toEqual(
+          Array.from({ length: 9 }, (_, i) => `fake:${51 + i}`),
+        );
+
+        // After 12h the recently queued songs are eligible again.
+        vi.setSystemTime(new Date(Date.parse('2026-01-01T00:00:00Z') + day + 60_000));
+        await player.playTracks(manyTracks(60), 0);
+        const third = ids(engine.setQueue.mock.calls.at(-1)?.[0] ?? []);
+        // 50 of the 59 others are drawn, so at least 41 come from fake:1..50.
+        expect(
+          third.filter((id) => Number(id.slice(5)) >= 1 && Number(id.slice(5)) <= 50)
+            .length,
+        ).toBeGreaterThan(0);
+      });
+
+      it('shuffle toggled off mid-window restores list order without filtering', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        const tracks = manyTracks(60);
+        await player.playTracks(tracks, 0);
+
+        engine.shuffle.set(true);
+        await player.playTracks(tracks, 0);
+        // The shuffled draw left fake:1..50 in the pool (all recently queued).
+        engine.toggleShuffle.mockImplementationOnce(() => engine.shuffle.set(false));
+        await player.toggleShuffle();
+
+        engine.add.mockClear();
+        engine.currentIndex.set(1);
+        TestBed.tick();
+        // Ahead of cursor 1 there are 8 queued; 42 more come in list order.
+        expect(ids(engine.add.mock.calls.flatMap(([t]) => t))).toEqual(
+          ids(tracks.slice(1, 43)),
+        );
+      });
+
+      it('bypasses the dedupe when repeat is all', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        await player.playTracks(manyTracks(60), 0);
+
+        engine.shuffle.set(true);
+        engine.repeat.set('all');
+        await player.playTracks(manyTracks(60), 0);
+
+        const queued = ids(engine.setQueue.mock.calls.at(-1)?.[0] ?? []);
+        expect(queued).toHaveLength(51);
+        // Recently queued songs are drawn again under repeat-all.
+        expect(
+          queued.filter((id) => Number(id.slice(5)) >= 1 && Number(id.slice(5)) <= 50)
+            .length,
+        ).toBeGreaterThan(0);
+      });
+
+      it('stops strictly when nothing eligible is left, with no fallback draw', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        // fake:0..fake:50 are queued now, so they count as recently queued.
+        await player.playTracks(manyTracks(51), 0);
+
+        // Shuffled: the next play queues fake:0 and fake:51..59. The pool it
+        // leaves is fake:1..50, all recently queued, so the window adds nothing.
+        engine.shuffle.set(true);
+        await player.playTracks(manyTracks(60), 0);
+        engine.add.mockClear();
+        engine.currentIndex.set(9);
+        TestBed.tick();
+
+        expect(engine.add).not.toHaveBeenCalled();
+      });
+    });
   });
 });

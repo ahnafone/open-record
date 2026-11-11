@@ -1,4 +1,5 @@
 import { computed, signal } from '@angular/core';
+import { newEntryId } from '@open-record/models';
 import type { PlayableSource, Track } from '@open-record/models';
 import { PlaybackBlockedError } from './audio-engine';
 import type {
@@ -83,13 +84,31 @@ const MAX_RETRY_AFTER_MS = 3000;
 export const UNSUPPORTED_REMOTE_RETRY_DELAYS_MS: readonly number[] =
   Object.freeze([2000, 3000, 5000]);
 
+/**
+ * A Your Stack entry. The entry id is its own identity: the same song can sit
+ * in the stack many times, so the track id cannot address it.
+ */
+export interface StackEntry {
+  readonly entryId: string;
+  readonly track: Track;
+}
+
 /** A track as it will play, with where it sits in the queue. */
 export interface UpcomingEntry {
   readonly track: Track;
   /** Index into `queue()`, for `playAt` and `removeUpcoming`. */
   readonly queueIndex: number;
-  /** Added with "Play next": plays before the normal order resumes. */
-  readonly playNext: boolean;
+  /** Set for a Your Stack entry; null for a Keep Spinning entry. */
+  readonly stackEntryId: string | null;
+}
+
+/** Most Your Stack entries one device holds (the cloud table enforces the same cap). */
+export const MAX_STACK_ENTRIES = 500;
+
+/** A pending Your Stack slot: its entry id and the queue index it occupies. */
+interface StackSlot {
+  readonly entryId: string;
+  readonly index: number;
 }
 
 export interface SetQueueOptions {
@@ -103,6 +122,12 @@ export interface SetQueueOptions {
    * only the start entry counts as played.
    */
   history?: 'before-start';
+  /**
+   * Your Stack entries to re-add once the queue is replaced. They go in before
+   * the first await, so the stack is never empty while the start track loads,
+   * and they stay when the load fails. Entry ids are kept. Default: none.
+   */
+  keepStack?: readonly StackEntry[];
 }
 
 /** Media resolved for a track, plus the identity it was resolved for. */
@@ -134,11 +159,11 @@ export class PlayerEngine {
   /** Position within `_order`; -1 when nothing is loaded. */
   private readonly _cursor = signal(-1);
   /**
-   * Queue indices added with "Play next" that have not played yet, in the
-   * order added. Invariant: they sit in `_order` right after the cursor, so
-   * `next()` takes them first and then the normal order resumes unchanged.
+   * Your Stack slots that have not played yet, in play order. Invariant: they
+   * sit in `_order` right after the cursor, so `next()` takes them first and
+   * then the Keep Spinning order resumes unchanged.
    */
-  private readonly _playNext = signal<readonly number[]>([]);
+  private readonly _stack = signal<readonly StackSlot[]>([]);
   private readonly _status = signal<PlayerStatus>('idle');
   private readonly _position = signal(0);
   private readonly _duration = signal(0);
@@ -188,24 +213,39 @@ export class PlayerEngine {
   readonly current = computed<Track | null>(
     () => this._queue()[this.currentIndex()] ?? null,
   );
-  /** `upcoming` with queue indices and the play-next flag. */
+  /**
+   * Your Stack entries that have not played yet, in play order. Tracks are read
+   * from the queue, so a replaced track shows its new source here too.
+   */
+  readonly stackEntries = computed<StackEntry[]>(() => {
+    const queue = this._queue();
+    return this._stack().map((slot) => ({
+      entryId: slot.entryId,
+      track: queue[slot.index],
+    }));
+  });
+  /** `upcoming` with queue indices and the Your Stack entry id (or null). */
   readonly upcomingEntries = computed<UpcomingEntry[]>(() => {
     const queue = this._queue();
-    const pending = new Set(this._playNext());
+    const stackByIndex = new Map(
+      this._stack().map((slot) => [slot.index, slot.entryId] as const),
+    );
     return this._order()
       .slice(this._cursor() + 1)
       .map((queueIndex) => ({
         track: queue[queueIndex],
         queueIndex,
-        playNext: pending.has(queueIndex),
+        stackEntryId: stackByIndex.get(queueIndex) ?? null,
       }));
   });
-  /** Tracks in the order they will play (play-next items first). */
+  /** Keep Spinning entries only (the autoplay window, not Your Stack). */
+  readonly keepSpinningEntries = computed<UpcomingEntry[]>(() =>
+    this.upcomingEntries().filter((e) => e.stackEntryId === null),
+  );
+  /** Tracks in the order they will play (Your Stack first). */
   readonly upcoming = computed(() =>
     this.upcomingEntries().map((e) => e.track),
   );
-  /** Queue indices waiting in the play-next list, in play order. */
-  readonly playNextIndices = this._playNext.asReadonly();
   readonly isPlaying = computed(() => this._status() === 'playing');
   readonly hasNext = computed(() => this.peek(1) !== -1);
   readonly hasPrevious = computed(() => this.peek(-1) !== -1);
@@ -315,7 +355,11 @@ export class PlayerEngine {
 
   // ---- Queue -------------------------------------------------------------
 
-  /** Replace the queue and load `startIndex`. */
+  /**
+   * Replace the queue and load `startIndex`. Clears Your Stack unless
+   * `opts.keepStack` gives the entries to keep. Everything up to the first
+   * await runs synchronously, so kept entries are back before the load starts.
+   */
   async setQueue(
     tracks: readonly Track[],
     opts: SetQueueOptions = {},
@@ -324,11 +368,16 @@ export class PlayerEngine {
       Math.max(opts.startIndex ?? 0, 0),
       tracks.length - 1,
     );
+    const kept = opts.keepStack ?? [];
     this._queue.set([...tracks]);
-    this._playNext.set([]);
+    this._stack.set([]);
     this.played = new Set();
     if (!tracks.length) {
-      await this.clear();
+      // clear()'s synchronous part (empties queue and stack) runs at once; the
+      // kept entries go back in before its engine.stop() await.
+      const stopped = this.clear();
+      if (kept.length) this.insertStack(kept, false);
+      await stopped;
       return;
     }
     this.rebuildOrder(start);
@@ -337,6 +386,7 @@ export class PlayerEngine {
     if (opts.history === 'before-start' && cursor > 0) {
       for (const i of this._order().slice(0, cursor)) this.played.add(i);
     }
+    if (kept.length) this.insertStack(kept, false);
     await this.loadCurrent(opts.autoplay ?? true);
   }
 
@@ -352,52 +402,123 @@ export class PlayerEngine {
     this.preloadNeighbours();
   }
 
-  /**
-   * Play `tracks` after the current one, before the normal order resumes.
-   * Repeated calls append, so they play in the order added. With nothing
-   * loaded this is a plain `add`.
-   */
-  playNext(tracks: readonly Track[]): void {
-    if (!tracks.length) return;
-    const current = this.currentIndex();
-    if (current < 0) {
-      this.add(tracks);
-      return;
-    }
-    // Physically after the current track (or the last pending item), so the
-    // unshuffled queue order and a restored queue read naturally.
-    const pending = this._playNext();
-    const at = Math.max(current, ...pending) + 1;
-    const n = tracks.length;
-    const shift = (i: number) => (i >= at ? i + n : i);
-    const added = tracks.map((_, k) => at + k);
-    this._queue.update((q) => [...q.slice(0, at), ...tracks, ...q.slice(at)]);
-    this._order.update((o) => [...o.map(shift), ...added]);
-    this.played = new Set([...this.played].map(shift));
-    this._playNext.set([...pending.map(shift), ...added]);
-    this.placePending();
-    this.refreshNeighbours();
+  /** Put `track` at the front of Your Stack: it plays next. */
+  playNext(track: Track): void {
+    this.insertStack([{ entryId: newEntryId(), track }], true);
+  }
+
+  /** Append `track` to the end of Your Stack (after entries already there). */
+  addToStack(track: Track): void {
+    this.insertStack([{ entryId: newEntryId(), track }], false);
   }
 
   /**
-   * Mark existing queue entries as play-next (e.g. restoring a saved queue).
-   * Ignores the current track, unknown and duplicate indices.
+   * Replace every pending Your Stack entry with `entries`, in order. Used to
+   * restore a saved stack and to apply a remote replacement. Entry ids are kept.
    */
-  markPlayNext(queueIndices: readonly number[]): void {
+  setStack(entries: readonly StackEntry[]): void {
+    this.removeIndices(new Set(this._stack().map((slot) => slot.index)));
+    if (entries.length) this.insertStack(entries, false);
+  }
+
+  /** Remove one Your Stack entry by its entry id. Returns whether it existed. */
+  removeStackEntry(entryId: string): boolean {
+    const slot = this._stack().find((s) => s.entryId === entryId);
+    return slot ? this.removeIndices(new Set([slot.index])) : false;
+  }
+
+  /** Empty Your Stack. The Keep Spinning window is untouched. */
+  clearStack(): void {
+    this.removeIndices(new Set(this._stack().map((slot) => slot.index)));
+  }
+
+  /**
+   * Empty the Keep Spinning window: every upcoming entry that is not in Your
+   * Stack. Stack entries and history stay. The caller stops any refill.
+   */
+  clearKeepSpinning(): void {
+    if (this._cursor() < 0) return;
+    const stack = new Set(this._stack().map((slot) => slot.index));
+    const drop = this._order()
+      .slice(this._cursor() + 1)
+      .filter((i) => !stack.has(i));
+    this.removeIndices(new Set(drop));
+  }
+
+  /**
+   * Remove every entry whose track id is in `ids`, except the current track
+   * (which the caller must move off first). Returns whether anything was removed.
+   */
+  removeTracks(ids: ReadonlySet<string>): boolean {
     const current = this.currentIndex();
+    const drop = new Set<number>();
+    this._queue().forEach((t, i) => {
+      if (i !== current && ids.has(t.id)) drop.add(i);
+    });
+    return this.removeIndices(drop);
+  }
+
+  /**
+   * Insert tracks into the queue physically after the current track, as
+   * pending Your Stack slots. `front` puts them before the existing stack;
+   * otherwise they go after it. With nothing loaded the stack is the whole
+   * queue: `front` goes to the start, otherwise the end. Entries beyond
+   * `MAX_STACK_ENTRIES` are dropped.
+   */
+  private insertStack(entries: readonly StackEntry[], front: boolean): void {
+    const current = this.currentIndex();
+    const pending = this._stack();
+    const room = Math.max(0, MAX_STACK_ENTRIES - pending.length);
+    const fit = entries.slice(0, room);
+    if (!fit.length) return;
     const len = this._queue().length;
-    const next = [...this._playNext()];
-    for (const i of queueIndices) {
-      if (i >= 0 && i < len && i !== current && !next.includes(i)) next.push(i);
-    }
-    if (next.length === this._playNext().length) return;
-    this._playNext.set(next);
+    const idle = current < 0;
+    const at = idle
+      ? front
+        ? 0
+        : len
+      : front
+        ? current + 1
+        : pending.reduce((max, s) => Math.max(max, s.index), current) + 1;
+    const n = fit.length;
+    const shift = (i: number) => (i >= at ? i + n : i);
+    const newIndexes = fit.map((_, k) => at + k);
+    this._queue.update((q) => [
+      ...q.slice(0, at),
+      ...fit.map((e) => e.track),
+      ...q.slice(at),
+    ]);
+    this._order.update((o) =>
+      idle && front
+        ? [...newIndexes, ...o.map(shift)]
+        : [...o.map(shift), ...newIndexes],
+    );
+    this.played = new Set([...this.played].map(shift));
+    const added = fit.map((e, k) => ({ entryId: e.entryId, index: at + k }));
+    const shifted = pending.map((s) => ({ entryId: s.entryId, index: shift(s.index) }));
+    this._stack.set(front ? [...added, ...shifted] : [...shifted, ...added]);
     this.placePending();
     this.refreshNeighbours();
   }
 
   /**
-   * Remove a queue entry (play-next or normal order) by queue index. The
+   * Start playing the first pending Your Stack entry when nothing is loaded
+   * (e.g. a stack pulled from another device). Returns false when nothing is
+   * loaded and the stack is empty, or when a track is already current.
+   */
+  async startStack(): Promise<boolean> {
+    if (this._cursor() >= 0) return false;
+    const first = this._stack()[0];
+    if (!first) return false;
+    const cursor = this._order().indexOf(first.index);
+    if (cursor < 0) return false;
+    this.moveTo(cursor);
+    await this.loadCurrent(true);
+    return true;
+  }
+
+  /**
+   * Remove a queue entry (Your Stack or Keep Spinning) by queue index. The
    * current track cannot be removed this way. Returns whether it was removed.
    */
   removeUpcoming(queueIndex: number): boolean {
@@ -408,17 +529,37 @@ export class PlayerEngine {
     ) {
       return false;
     }
-    const pos = this._order().indexOf(queueIndex);
-    const shift = (i: number) => (i > queueIndex ? i - 1 : i);
-    this._queue.update((q) => q.filter((_, i) => i !== queueIndex));
-    this._order.update((o) => o.filter((i) => i !== queueIndex).map(shift));
-    this._playNext.update((p) =>
-      p.filter((i) => i !== queueIndex).map(shift),
+    return this.removeIndices(new Set([queueIndex]));
+  }
+
+  /**
+   * Drop queue entries by index (none of them the current track), keeping the
+   * order, cursor, history and Your Stack slots consistent. Playback is not
+   * reloaded. Returns whether anything was removed.
+   */
+  private removeIndices(drop: ReadonlySet<number>): boolean {
+    if (!drop.size) return false;
+    const remap = new Map<number, number>();
+    let next = 0;
+    this._queue().forEach((_, i) => {
+      if (!drop.has(i)) remap.set(i, next++);
+    });
+    const renumber = (i: number) => remap.get(i) ?? -1;
+    const cursor = this._cursor();
+    const removedBeforeCursor = this._order()
+      .slice(0, Math.max(cursor, 0))
+      .filter((i) => drop.has(i)).length;
+    this._queue.update((q) => q.filter((_, i) => !drop.has(i)));
+    this._order.update((o) => o.filter((i) => !drop.has(i)).map(renumber));
+    if (cursor >= 0) this._cursor.set(cursor - removedBeforeCursor);
+    this._stack.update((s) =>
+      s
+        .filter((slot) => !drop.has(slot.index))
+        .map((slot) => ({ entryId: slot.entryId, index: renumber(slot.index) })),
     );
     this.played = new Set(
-      [...this.played].filter((i) => i !== queueIndex).map(shift),
+      [...this.played].filter((i) => !drop.has(i)).map(renumber),
     );
-    if (pos >= 0 && pos < this._cursor()) this._cursor.update((c) => c - 1);
     this.refreshNeighbours();
     return true;
   }
@@ -459,24 +600,7 @@ export class PlayerEngine {
       .slice(0, cursor)
       .filter((i) => this.played.has(i));
     if (history.length <= keep) return;
-    const dropped = new Set(history.slice(0, history.length - keep));
-    const n = dropped.size;
-    // Old queue index -> new queue index, for the tracks that survive.
-    const remap = new Map<number, number>();
-    this._queue().forEach((_, i) => {
-      if (!dropped.has(i)) remap.set(i, remap.size);
-    });
-    const renumber = (i: number) => remap.get(i) ?? -1;
-    this._queue.update((q) => q.filter((_, i) => !dropped.has(i)));
-    this._order.set(order.filter((i) => !dropped.has(i)).map(renumber));
-    this._playNext.update((p) =>
-      p.filter((i) => !dropped.has(i)).map(renumber),
-    );
-    this.played = new Set(
-      [...this.played].filter((i) => !dropped.has(i)).map(renumber),
-    );
-    this._cursor.set(cursor - n);
-    this.refreshNeighbours();
+    this.removeIndices(new Set(history.slice(0, history.length - keep)));
   }
 
   /** Jump to a queue index (not order position) and play it. */
@@ -501,7 +625,7 @@ export class PlayerEngine {
     this._queue.set([]);
     this._order.set([]);
     this._cursor.set(-1);
-    this._playNext.set([]);
+    this._stack.set([]);
     this.played = new Set();
     this._status.set('idle');
     this._position.set(0);
@@ -512,7 +636,7 @@ export class PlayerEngine {
 
   /**
    * Replace the play order in place. When the same media is still current, no
-   * media is reloaded. Clears `_playNext`, forces shuffle and repeat off while
+   * media is reloaded. Clears Your Stack, forces shuffle and repeat off while
    * a session owns playback, and calls the private `refreshNeighbours()` itself
    * (no new public engine API).
    */
@@ -557,7 +681,7 @@ export class PlayerEngine {
     this._queue.set([...order]);
     this._order.set(order.map((_, i) => i));
     this._cursor.set(index);
-    this._playNext.set([]);
+    this._stack.set([]);
     // The replaced queue has no history: only the track now current counts.
     this.played = new Set([index]);
 
@@ -631,7 +755,11 @@ export class PlayerEngine {
   }
 
   async play(): Promise<void> {
-    if (this._cursor() < 0) return;
+    // Nothing loaded (a stack applied while idle): play starts the stack.
+    if (this._cursor() < 0) {
+      await this.startStack();
+      return;
+    }
     this.playIntent = true;
     const status = this._status();
     if (status === 'loading') {
@@ -703,6 +831,7 @@ export class PlayerEngine {
 
   /** Go to the next track. Returns false at the end with repeat off. */
   async next(): Promise<boolean> {
+    if (this._cursor() < 0) return this.startStack();
     const target = this.peek(1);
     if (target === -1) return false;
     this.moveTo(target);
@@ -842,15 +971,15 @@ export class PlayerEngine {
     this._cursor.set(cursor);
     const at = this._order()[cursor];
     this.played.add(at);
-    if (this._playNext().includes(at)) {
-      this._playNext.update((p) => p.filter((i) => i !== at));
+    if (this._stack().some((slot) => slot.index === at)) {
+      this._stack.update((s) => s.filter((slot) => slot.index !== at));
     }
     this.placePending();
   }
 
-  /** Re-establish the invariant: pending play-next items follow the cursor. */
+  /** Re-establish the invariant: pending stack slots follow the cursor. */
   private placePending(): void {
-    const pending = this._playNext();
+    const pending = this._stack().map((slot) => slot.index);
     const cursor = this._cursor();
     if (!pending.length || cursor < 0) return;
     const order = this._order();
@@ -877,7 +1006,7 @@ export class PlayerEngine {
 
   /**
    * Shuffle everything not yet played. Played history before the cursor keeps
-   * its order, then the current track; pending "Play next" items follow it, in
+   * its order, then the current track; pending Your Stack items follow it, in
    * the order added. Unplayed entries before the cursor join the shuffle pool.
    */
   private shuffleUpcoming(): void {
@@ -885,7 +1014,7 @@ export class PlayerEngine {
     if (cursor < 0) return;
     const order = this._order();
     const current = order[cursor];
-    const pending = new Set(this._playNext());
+    const pending = new Set(this._stack().map((slot) => slot.index));
     const history = order
       .slice(0, cursor)
       .filter((i) => this.played.has(i));

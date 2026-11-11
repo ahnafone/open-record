@@ -8,12 +8,18 @@ import {
   signal,
   untracked,
 } from '@angular/core';
-import type { Track } from '@open-record/models';
+import type { CommandResult, Track } from '@open-record/models';
 import { newEntryId } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
-import type { PlayerError, RepeatMode, UpcomingEntry } from '@open-record/player';
+import type {
+  PlayerError,
+  RepeatMode,
+  SetQueueOptions,
+  StackEntry,
+  UpcomingEntry,
+} from '@open-record/player';
 import { StoragePort } from '@open-record/storage';
-import type { QueueState } from '@open-record/storage';
+import type { JsonValue, QueueState } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { PlayCountsStore } from './play-counts.store';
 import { PlaylistsStore } from './playlists.store';
@@ -21,9 +27,14 @@ import {
   AUTO_QUEUE_AHEAD,
   QUEUE_HISTORY_KEEP,
   buildQueueWindow,
+  isRecentlyQueued,
+  parseRecentlyQueued,
+  pruneRecentlyQueued,
   restoreQueueWindow,
+  type EligibleFn,
   type QueueKind,
   type QueueWindow,
+  type RecentlyQueued,
 } from './queue-window';
 import { SessionStore, isAmbiguousCommandFailure } from './session.store';
 import { toSessionTrack } from './session-track';
@@ -31,8 +42,83 @@ import { toSessionTrack } from './session-track';
 /** localStorage key for the per-device volume and mute (a convenience, not synced). */
 const VOLUME_KEY = 'or.volume';
 
+/**
+ * A session refused (or could not take) a Play next / Add to Stack change.
+ * `message` is a short sentence the UI shows as its toast. `ambiguous` means
+ * the session may still have applied the change, so it must not be retried
+ * or re-enqueued by the caller.
+ */
+export class SessionRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly ambiguous = false,
+  ) {
+    super(message);
+  }
+}
+
+/** Short toast text for a refused or failed session command, by its error code. */
+function sessionRefusalMessage(error: string | undefined): string {
+  if (error === 'offline' || error === 'unavailable' || error === 'unknown-client') {
+    return 'Could not queue that record: the playback session is unavailable.';
+  }
+  if (
+    error === 'timeout' ||
+    error === 'superseded' ||
+    error === 'invalid-response' ||
+    error?.startsWith('http-')
+  ) {
+    return 'Could not queue that record: the playback session did not answer, so it may not have been queued.';
+  }
+  if (error === 'queue-too-large') {
+    return 'Could not queue that record: the session queue is full.';
+  }
+  return 'Could not queue that record: the session refused the change.';
+}
+
+/**
+ * Per-device settings key for the recently-queued record (song id -> epoch ms).
+ * Lives in local storage only, never synced.
+ */
+export const RECENTLY_QUEUED_KEY = 'queue.recentlyQueued';
+
+/** Wait before writing the recently-queued record (bursts write once). */
+const RECENTLY_QUEUED_SAVE_MS = 1_000;
+
 /** Minimum gap between queue-state writes while playing. */
 export const QUEUE_SAVE_INTERVAL_MS = 2000;
+
+/**
+ * Pick the queue positions of legacy "Play next" song ids (pre-stack saves,
+ * where they were queue entries). Each id claims the first unclaimed match
+ * after `current`, else any unclaimed match; the current track is never taken.
+ */
+export function claimLegacyStack(
+  tracks: readonly Track[],
+  current: number,
+  ids: readonly string[],
+): number[] {
+  // Returned in `ids` order, which is the stack's play order.
+  const claimed: number[] = [];
+  const taken = new Set<number>();
+  const pick = (id: string) => {
+    for (let i = current + 1; i < tracks.length; i++) {
+      if (tracks[i].id === id && !taken.has(i)) return i;
+    }
+    for (let i = 0; i < tracks.length; i++) {
+      if (i !== current && tracks[i].id === id && !taken.has(i)) return i;
+    }
+    return -1;
+  };
+  for (const id of ids) {
+    const at = pick(id);
+    if (at >= 0) {
+      claimed.push(at);
+      taken.add(at);
+    }
+  }
+  return claimed;
+}
 
 export interface PlayOptions {
   /** Start with shuffle on (true) or off (false). Leaves it unchanged if omitted. */
@@ -82,7 +168,7 @@ export class PlayerStore {
       ? this.session.remoteTracks()
       : this.engine.queue(),
   );
-  /** Upcoming tracks with queue indices and the "Play next" flag. */
+  /** Upcoming tracks with queue indices; Your Stack entries carry their entry id. */
   readonly upcomingEntries = computed<readonly UpcomingEntry[]>(() => {
     if (!this.session.mirroring()) return this.engine.upcomingEntries();
     const next = this.session.remoteCursor() + 1;
@@ -92,12 +178,33 @@ export class PlayerStore {
       .map((entry, i) => ({
         track: entry.track,
         queueIndex: next + i,
-        playNext: false,
+        stackEntryId: null,
       }));
   });
   readonly upcoming = computed(() =>
     this.upcomingEntries().map((entry) => entry.track),
   );
+  /** Your Stack: user-added entries, in play order. Empty while a session owns playback. */
+  readonly stackEntries = computed<readonly StackEntry[]>(() =>
+    this.session.ownsPlayback() ? [] : this.engine.stackEntries(),
+  );
+  /**
+   * This device's Your Stack, ignoring any session. Only the stack sync reads
+   * it, and it checks session ownership itself before it writes anything.
+   */
+  readonly deviceStackEntries = computed<readonly StackEntry[]>(() =>
+    this.engine.stackEntries(),
+  );
+  /** The Keep Spinning window (autoplay), excluding Your Stack entries. */
+  readonly keepSpinningEntries = computed<readonly UpcomingEntry[]>(() =>
+    this.upcomingEntries().filter((entry) => entry.stackEntryId === null),
+  );
+  /**
+   * True while a session (Cast or another device) owns playback. Add to Stack
+   * then appends to the session queue, which is a queue, not Your Stack, so
+   * toasts say "added to queue" instead.
+   */
+  readonly addGoesToQueue = computed(() => this.session.ownsPlayback());
   readonly current = computed(() =>
     this.session.mirroring()
       ? this.session.remoteCurrent()
@@ -207,6 +314,11 @@ export class PlayerStore {
   /** `seq` of the last play handed to the counts store. */
   private seenPlaySeq = 0;
   private lastSaved = '';
+  /** Songs that recently entered a Keep Spinning window (per device). */
+  private recentlyQueued: RecentlyQueued = {};
+  /** Set once the stored record is merged in; no write happens before that. */
+  private recentlyQueuedLoaded = false;
+  private recentlyQueuedSaveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set when the queue started locally because the server refused it. */
   private readonly fallbackNotice = signal<string | null>(null);
   /** The bounded queue this client started, or null while none is active. */
@@ -242,7 +354,7 @@ export class PlayerStore {
       if (!this._restored()) return;
       this.engine.queue();
       this.engine.currentIndex();
-      this.engine.playNextIndices();
+      this.engine.stackEntries();
       this.engine.shuffle();
       this.engine.repeat();
       this.engine.status();
@@ -330,6 +442,18 @@ export class PlayerStore {
       : this.playTracks(context, index, opts);
   }
 
+  /**
+   * Replace the Keep Spinning queue with `tracks`. Your Stack carries over, as
+   * on Spotify: its entries are re-added after the new current track.
+   */
+  private async replaceEngineQueue(
+    tracks: readonly Track[],
+    opts: SetQueueOptions,
+  ): Promise<void> {
+    const keep = this.engine.stackEntries();
+    await this.engine.setQueue(tracks, keep.length ? { ...opts, keepStack: keep } : opts);
+  }
+
   /** Replace the queue with `tracks` and start at `startIndex`. */
   async playTracks(
     tracks: readonly Track[],
@@ -341,14 +465,21 @@ export class PlayerStore {
     this.fallbackNotice.set(null);
     const kind: QueueKind = opts.queue ?? 'auto';
     const shuffle = opts.shuffle ?? this.shuffle();
-    const built = buildQueueWindow(tracks, startIndex, kind, { shuffle });
+    const now = Date.now();
+    // Shuffled fills skip songs queued within 12h. The tapped track is never filtered.
+    const built = buildQueueWindow(tracks, startIndex, kind, {
+      shuffle,
+      eligible: this.autoplayEligible(now, shuffle),
+    });
     this.library.remember(tracks);
+    // The new window's tracks (tapped one and what follows it) are queued now.
+    this.markQueued(built.tracks.slice(Math.max(built.cursor, 0)), now);
     const autoplay = opts.autoplay ?? true;
 
     // An empty context clears the queue rather than opening a session with
     // no entries; `setQueue([])` is the engine's clear path.
     if (built.cursor < 0) {
-      await this.engine.setQueue(built.tracks, { startIndex: 0, autoplay });
+      await this.replaceEngineQueue(built.tracks, { startIndex: 0, autoplay });
       return;
     }
 
@@ -380,7 +511,7 @@ export class PlayerStore {
       );
     }
     if (opts.shuffle !== undefined) this.engine.setShuffle(shuffle);
-    await this.engine.setQueue(built.tracks, {
+    await this.replaceEngineQueue(built.tracks, {
       startIndex: built.cursor,
       autoplay,
       history: 'before-start',
@@ -413,7 +544,7 @@ export class PlayerStore {
       await this.enqueueSession(tracks, false);
       return;
     }
-    if (!this.engine.queue().length) {
+    if (this.engine.currentIndex() < 0) {
       await this.playTracks(tracks);
       return;
     }
@@ -421,34 +552,180 @@ export class PlayerStore {
   }
 
   /**
-   * Play `tracks` after the current record, before the rest of the queue
-   * (appending to earlier "Play next" picks). Starts playback if the queue
-   * was empty.
+   * Put `track` at the front of Your Stack: it plays next, before the Keep
+   * Spinning window. Each call adds a new entry, even for a song already there.
+   * While a session owns playback it is enqueued next on the session queue
+   * instead. Starts playback when nothing is loaded. Throws
+   * `SessionRefusedError` when the session does not apply the change.
    */
-  async playNext(tracks: readonly Track[]): Promise<void> {
-    if (!tracks.length) return;
-    this.library.remember(tracks);
+  async playNext(track: Track): Promise<void> {
+    this.library.remember([track]);
     if (this.session.ownsPlayback()) {
-      await this.enqueueSession(tracks, true);
+      await this.enqueueSessionOrThrow([track], true);
       return;
     }
-    if (!this.engine.queue().length) {
-      await this.playTracks(tracks);
+    if (this.nothingToStartFrom()) {
+      await this.playTracks([track]);
       return;
     }
-    this.engine.playNext(tracks);
+    this.engine.playNext(track);
+    await this.startIfIdle();
+  }
+
+  /**
+   * Append `track` to the end of Your Stack. Same rules as `playNext`, but the
+   * entry plays after the stack entries already queued. While a session owns
+   * playback there is no Your Stack: the track is appended to the session's
+   * queue (`addGoesToQueue`), after the entries already queued there.
+   */
+  async addToStack(track: Track): Promise<void> {
+    this.library.remember([track]);
+    if (this.session.ownsPlayback()) {
+      await this.enqueueSessionOrThrow([track], false);
+      return;
+    }
+    if (this.nothingToStartFrom()) {
+      await this.playTracks([track]);
+      return;
+    }
+    this.engine.addToStack(track);
+    await this.startIfIdle();
+  }
+
+  /** Nothing is loaded and Your Stack is empty: a new track must start playback. */
+  private nothingToStartFrom(): boolean {
+    return this.engine.currentIndex() < 0 && !this.engine.stackEntries().length;
+  }
+
+  /** Stack entries added while nothing is loaded start with the first one. */
+  private async startIfIdle(): Promise<void> {
+    if (this.engine.currentIndex() < 0) await this.engine.startStack();
+  }
+
+  /** Remove one Your Stack entry by its entry id. Returns whether it existed. */
+  removeStackEntry(entryId: string): boolean {
+    // The device's stack is hidden while a session owns playback: leave it be.
+    if (this.session.ownsPlayback()) return false;
+    return this.engine.removeStackEntry(entryId);
+  }
+
+  /** Empty Your Stack. The Keep Spinning window is not touched. */
+  clearStack(): void {
+    if (this.session.ownsPlayback()) return;
+    this.engine.clearStack();
+  }
+
+  /**
+   * Empty Your Stack even while a session owns playback. Sign-out only: the
+   * stack must not outlive the account it was synced with.
+   */
+  discardStack(): void {
+    this.engine.clearStack();
+  }
+
+  /**
+   * Empty the Keep Spinning window and stop it refilling. Playback stops when
+   * the queue (including Your Stack) runs out. A new play action starts a new
+   * window, which re-enables autoplay. While a session owns playback, the
+   * server's upcoming entries are removed instead.
+   */
+  async clearKeepSpinning(): Promise<void> {
+    this.queueSource.set(null);
+    if (!this.session.ownsPlayback()) {
+      this.engine.clearKeepSpinning();
+      return;
+    }
+    const cursor = this.session.remoteCursor();
+    const upcoming = this.session.remoteEntries().slice(cursor + 1);
+    for (const entry of upcoming) {
+      const result = await this.session.command({ type: 'remove', entryId: entry.entryId });
+      if (!result.ok) {
+        // Stop at the first refusal so the caller does not toast success.
+        const ambiguous = isAmbiguousCommandFailure(result.error);
+        throw new SessionRefusedError(
+          ambiguous
+            ? 'Could not clear Keep Spinning: the playback session did not answer, so it may be partly cleared.'
+            : 'Could not clear Keep Spinning: the playback session refused the change.',
+          ambiguous,
+        );
+      }
+    }
+  }
+
+  /**
+   * Apply a Your Stack replacement from a sync layer (e.g. another device).
+   * Replaces every pending stack entry with `entries`, keeping their ids.
+   */
+  setStackFromRemote(entries: readonly StackEntry[]): void {
+    this.engine.setStack(entries);
+  }
+
+  /**
+   * The 12h dedupe for shuffled autoplay fills. Undefined (no filter) when
+   * shuffle is off, so in-order fills follow the list, and on repeat-all.
+   */
+  private autoplayEligible(now: number, shuffle: boolean): EligibleFn | undefined {
+    if (!shuffle || this.repeat() === 'all') return undefined;
+    return (track) => !isRecentlyQueued(this.recentlyQueued, track.id, now);
+  }
+
+  /** Note songs that just entered a Keep Spinning window; persisted per device. */
+  private markQueued(tracks: readonly Track[], now = Date.now()): void {
+    if (!tracks.length) return;
+    const next = pruneRecentlyQueued(this.recentlyQueued, now);
+    for (const track of tracks) next[track.id] = now;
+    this.recentlyQueued = next;
+    this.saveRecentlyQueued();
+  }
+
+  /** Drop expired records; saves only when something expired. */
+  private pruneRecent(now: number): void {
+    const pruned = pruneRecentlyQueued(this.recentlyQueued, now);
+    if (Object.keys(pruned).length === Object.keys(this.recentlyQueued).length) {
+      return;
+    }
+    this.recentlyQueued = pruned;
+    this.saveRecentlyQueued();
+  }
+
+  private saveRecentlyQueued(): void {
+    // Never write before the stored record was merged in (it would replace it).
+    if (!this.recentlyQueuedLoaded) return;
+    // Debounced: a burst of Keep Spinning fills writes once, with the latest record.
+    if (this.recentlyQueuedSaveTimer) clearTimeout(this.recentlyQueuedSaveTimer);
+    this.recentlyQueuedSaveTimer = setTimeout(() => {
+      this.recentlyQueuedSaveTimer = null;
+      void this.storage.settings
+        .set(RECENTLY_QUEUED_KEY, { ...this.recentlyQueued })
+        .catch(() => undefined);
+    }, RECENTLY_QUEUED_SAVE_MS);
   }
 
   /** Send an `enqueue` command, remembering the entry ids this client wrote. */
   private async enqueueSession(
     tracks: readonly Track[],
     next: boolean,
-  ): Promise<void> {
+  ): Promise<CommandResult> {
     const entries = tracks.map((track) => toSessionTrack(track, newEntryId()));
-    await this.session.command({ type: 'enqueue', tracks: entries, next });
+    const result = await this.session.command({ type: 'enqueue', tracks: entries, next });
     const source = this.queueSource();
     if (source) {
       for (const entry of entries) source.createdIds.add(entry.entryId);
+    }
+    return result;
+  }
+
+  /** `enqueueSession` for a user action: a refused change throws, for the toast. */
+  private async enqueueSessionOrThrow(
+    tracks: readonly Track[],
+    next: boolean,
+  ): Promise<void> {
+    const result = await this.enqueueSession(tracks, next);
+    if (!result.ok) {
+      throw new SessionRefusedError(
+        sessionRefusalMessage(result.error),
+        isAmbiguousCommandFailure(result.error),
+      );
     }
   }
 
@@ -656,34 +933,24 @@ export class PlayerStore {
     }
     const queue = this.engine.queue();
     if (!queue.some((t) => gone.has(t.id))) return;
-    const remaining = queue.filter((t) => !gone.has(t.id));
-    if (!remaining.length) {
+    const current = this.engine.current();
+    // The engine drops the other copies in place: no reload, position kept.
+    if (!current || !gone.has(current.id)) {
+      this.engine.removeTracks(gone);
+      return;
+    }
+    // The current track is removed: play the first survivor, paused, the way
+    // the queue reads from here (Your Stack first, then Keep Spinning).
+    this.engine.removeTracks(gone);
+    const survivor =
+      this.engine.upcomingEntries()[0]?.queueIndex ??
+      this.engine.queue().findIndex((t, i) => i !== this.engine.currentIndex() && !gone.has(t.id));
+    if (survivor < 0) {
       await this.engine.clear();
       return;
     }
-    const current = this.engine.current();
-    const kept = !!current && !gone.has(current.id);
-    const position = this.engine.position();
-    const wasPlaying = this.engine.isPlaying();
-    const playNextIds = this.engine
-      .playNextIndices()
-      .map((i) => queue[i].id)
-      .filter((id) => !gone.has(id));
-    let startIndex = kept ? remaining.findIndex((t) => t.id === current.id) : 0;
-    if (!kept) {
-      // First survivor after the removed current track, in queue order.
-      const after = queue
-        .slice(this.engine.currentIndex() + 1)
-        .find((t) => !gone.has(t.id));
-      startIndex = after ? remaining.indexOf(after) : 0;
-    }
-    await this.engine.setQueue(remaining, {
-      startIndex,
-      autoplay: kept && wasPlaying,
-      history: 'before-start',
-    });
-    this.restorePlayNext(playNextIds);
-    if (kept && position > 0) await this.engine.seek(position);
+    await this.engine.playAt(survivor, false);
+    this.engine.removeTracks(gone);
   }
 
   /**
@@ -758,40 +1025,38 @@ export class PlayerStore {
       this.engine.replaceUpcoming(oldId, next);
       return false;
     }
-    const playNextIds = this.engine
-      .playNextIndices()
-      .map((i) => (queue[i].id === oldId ? next.id : queue[i].id));
-    await this.engine.setQueue(
-      queue.map((t) => (t.id === oldId ? next : t)),
-      {
-        startIndex: Math.max(0, this.engine.currentIndex()),
-        autoplay: playCurrent,
-        history: 'before-start',
-      },
-    );
-    this.restorePlayNext(playNextIds);
+    // Rebuild without Your Stack entries, then re-add them under their ids.
+    const replace = (t: Track) => (t.id === oldId ? next : t);
+    const { tracks, index } = this.queueSansStack();
+    const stack = this.engine
+      .stackEntries()
+      .map((entry) => ({ entryId: entry.entryId, track: replace(entry.track) }));
+    await this.engine.setQueue(tracks.map(replace), {
+      startIndex: Math.max(0, index),
+      autoplay: playCurrent,
+      history: 'before-start',
+      ...(stack.length ? { keepStack: stack } : {}),
+    });
     return replacedCurrent;
   }
 
   /**
-   * Re-mark "Play next" entries by id after the queue was rebuilt. Each id
-   * claims the first unclaimed match after the current track (then any).
+   * The engine's queue without its Your Stack entries, and the current index
+   * within that list. Stack entries are kept apart so a rebuild can re-add
+   * them under their own entry ids.
    */
-  private restorePlayNext(ids: readonly string[] | undefined): void {
-    if (!Array.isArray(ids) || !ids.length) return;
+  private queueSansStack(): { tracks: Track[]; index: number } {
     const queue = this.engine.queue();
-    const current = this.engine.currentIndex();
-    const claimed = new Set<number>([current]);
-    const indices: number[] = [];
-    for (const id of ids) {
-      const free = (i: number) => queue[i]?.id === id && !claimed.has(i);
-      let i = queue.findIndex((_, k) => k > current && free(k));
-      if (i < 0) i = queue.findIndex((_, k) => free(k));
-      if (i < 0) continue;
-      claimed.add(i);
-      indices.push(i);
-    }
-    this.engine.markPlayNext(indices);
+    const cursor = this.engine.currentIndex();
+    const stacked = this.engine
+      .upcomingEntries()
+      .filter((entry) => entry.stackEntryId !== null)
+      .map((entry) => entry.queueIndex);
+    const drop = new Set(stacked);
+    return {
+      tracks: queue.filter((_, i) => !drop.has(i)),
+      index: cursor - stacked.filter((i) => i < cursor).length,
+    };
   }
 
   // ---- Queue window ----------------------------------------------------
@@ -804,12 +1069,17 @@ export class PlayerStore {
     const source = this.queueSource();
     if (!source || this.toppingUp) return;
     const generation = this.queueGeneration;
+    const now = Date.now();
+    this.pruneRecent(now);
+    // The window's shuffle state is the one its draws use; toggling shuffle
+    // keeps it in step, so the dedupe follows the mode at top-up time.
+    const eligible = this.autoplayEligible(now, source.window.shuffle);
     this.toppingUp = true;
     try {
       if (this.session.ownsPlayback()) {
-        await this.topUpSession(source, generation);
+        await this.topUpSession(source, generation, eligible);
       } else {
-        this.topUpLocal(source);
+        this.topUpLocal(source, eligible);
       }
     } finally {
       this.toppingUp = false;
@@ -819,6 +1089,7 @@ export class PlayerStore {
   private async topUpSession(
     source: QueueSource,
     generation: number,
+    eligible: EligibleFn | undefined,
   ): Promise<void> {
     // A newer play or restore replaced the queue (or its source) while this
     // top-up awaited. Its window no longer describes the queue.
@@ -844,7 +1115,10 @@ export class PlayerStore {
     const upcoming = entries.length - 1 - cursor;
     if (upcoming >= source.window.limit || superseded()) return;
     // Reserve, don't consume: a refused enqueue must not lose these tracks.
-    const reserved = source.window.reserve(source.window.limit - upcoming);
+    const reserved = source.window.reserve(
+      source.window.limit - upcoming,
+      eligible,
+    );
     const add = reserved.tracks;
     if (!add.length) {
       reserved.commit();
@@ -877,20 +1151,22 @@ export class PlayerStore {
     }
     if (applied) {
       reserved.commit();
+      this.markQueued(add);
       for (const track of tracks) source.createdIds.add(track.entryId);
     } else {
       reserved.release();
     }
   }
 
-  private topUpLocal(source: QueueSource): void {
+  private topUpLocal(source: QueueSource, eligible: EligibleFn | undefined): void {
     if (this.engine.currentIndex() < 0) return;
-    // Order-based: a shuffled queue's upcoming count is not `length - 1 - cursor`.
-    const upcoming = this.engine.upcoming().length;
+    // Keep Spinning only: Your Stack entries do not count against the window.
+    const upcoming = this.engine.keepSpinningEntries().length;
     if (upcoming < source.window.limit) {
-      const add = source.window.take(source.window.limit - upcoming);
+      const add = source.window.take(source.window.limit - upcoming, eligible);
       if (add.length) {
         this.library.remember(add);
+        this.markQueued(add);
         this.engine.add(add);
       }
     }
@@ -947,7 +1223,8 @@ export class PlayerStore {
     const key = JSON.stringify(state);
     if (key === this.lastSaved) return;
     try {
-      if (state.trackIds.length) await this.storage.queueState.save(state);
+      if (state.trackIds.length || state.stack?.length)
+        await this.storage.queueState.save(state);
       else await this.storage.queueState.clear();
       this.lastSaved = key;
     } catch {
@@ -961,6 +1238,7 @@ export class PlayerStore {
       const [saved] = await Promise.all([
         this.storage.queueState.get(),
         this.library.ready(),
+        this.loadRecentlyQueued(),
       ]);
       // Ignore a saved queue if the user started or cleared something while it
       // loaded, the engine already has a queue, or a session owns playback
@@ -981,15 +1259,54 @@ export class PlayerStore {
     }
   }
 
+  /** Merge the stored per-device record (max timestamp wins), then prune it. */
+  private async loadRecentlyQueued(): Promise<void> {
+    try {
+      const stored = parseRecentlyQueued(
+        await this.storage.settings.get<JsonValue>(RECENTLY_QUEUED_KEY),
+      );
+      const merged: RecentlyQueued = { ...stored };
+      for (const [id, at] of Object.entries(this.recentlyQueued)) {
+        merged[id] = Math.max(at, merged[id] ?? 0);
+      }
+      this.recentlyQueued = pruneRecentlyQueued(merged, Date.now());
+    } catch {
+      // Unreadable record: keep what this session queued so far.
+    } finally {
+      this.recentlyQueuedLoaded = true;
+      this.saveRecentlyQueued();
+    }
+  }
+
   private async apply(saved: QueueState): Promise<void> {
     this.queueSource.set(null);
     const queueGen = this.queueGeneration;
     const currentId = saved.trackIds[saved.index];
-    const tracks = this.library.resolveIds(saved.trackIds);
-    if (!tracks.length) return;
-    let index = tracks.findIndex((t) => t.id === currentId);
-    const position = index < 0 ? 0 : saved.positionSec;
-    if (index < 0) index = 0;
+    const resolved = this.library.resolveIds(saved.trackIds);
+    if (!resolved.length) {
+      // Only Your Stack was saved (nothing loaded): restore it, idle.
+      if (saved.stack?.length) {
+        this.engine.setStack(
+          saved.stack.map((entry) => ({ entryId: entry.entryId, track: entry.track })),
+        );
+      }
+      return;
+    }
+    let current = resolved.findIndex((t) => t.id === currentId);
+    const position = current < 0 ? 0 : saved.positionSec;
+    if (current < 0) current = 0;
+    // Pre-stack saves kept "Play next" as queue entries: move them out of the
+    // queue and into the stack under new entry ids.
+    const claimed =
+      saved.stack === undefined
+        ? claimLegacyStack(resolved, current, saved.playNextIds ?? [])
+        : [];
+    const drop = new Set(claimed);
+    const tracks = resolved.filter((_, i) => !drop.has(i));
+    const index = current - claimed.filter((i) => i < current).length;
+    const stack: StackEntry[] =
+      saved.stack?.map((entry) => ({ entryId: entry.entryId, track: entry.track })) ??
+      claimed.map((i) => ({ entryId: newEntryId(), track: resolved[i] }));
 
     this.engine.setRepeat(saved.repeat);
     this.engine.setShuffle(saved.shuffle);
@@ -1001,8 +1318,8 @@ export class PlayerStore {
       startIndex: index,
       autoplay: false,
       history: 'before-start',
+      ...(stack.length ? { keepStack: stack } : {}),
     });
-    this.restorePlayNext(saved.playNextIds);
     const sameLoad = this.engine.loadSeq() === generation + 1;
     if (
       position > 0 &&
@@ -1035,18 +1352,23 @@ export class PlayerStore {
   /** The state to persist, with the exact (floored) position. */
   private snapshot(): QueueState {
     const status = this.engine.status();
-    const queue = this.engine.queue();
-    const playNext = this.engine.playNextIndices();
+    const { tracks, index } = this.queueSansStack();
+    const stack = this.engine.stackEntries();
     const source = this.queueSource();
     return {
-      trackIds: queue.map((t) => t.id),
-      index: this.engine.currentIndex(),
+      trackIds: tracks.map((t) => t.id),
+      index,
       positionSec: status === 'ended' ? 0 : Math.floor(this.engine.position()),
       shuffle: this.engine.shuffle(),
       repeat: this.engine.repeat(),
       // Only when non-empty, so older snapshots compare (and load) unchanged.
-      ...(playNext.length
-        ? { playNextIds: playNext.map((i) => queue[i].id) }
+      ...(stack.length
+        ? {
+            stack: stack.map((entry) => ({
+              entryId: entry.entryId,
+              track: entry.track,
+            })),
+          }
         : {}),
       ...(source && source.window.remaining
         ? {

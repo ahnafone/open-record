@@ -75,6 +75,8 @@ export const SETTINGS_KEYS = {
   youtubeImport: 'youtubeImport',
   /** Account sync clocks and tombstones (no migration: new key, absent = never synced). Metadata ids and hashes only. */
   syncState: 'syncState',
+  /** Your Stack entries last known in the account: `{ userId, entries: { [entryId]: position } }` (no migration: new key, absent = nothing synced yet). Ids and positions only. */
+  stackSync: 'stackSync',
   /** Stable per-install id used for grouping session devices (no migration: new key, absent = generated on first read). */
   deviceId: 'deviceId',
   /** User-visible device name for the session picker (no migration: new key, absent = platform default). */

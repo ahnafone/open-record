@@ -36,6 +36,7 @@ import {
   type TrackSort,
   type TrackSortKey,
   ArtistCreditPipe,
+  SessionRefusedError,
 } from '@open-record/state';
 import {
   OrArtistLinks,
@@ -52,6 +53,7 @@ import {
   OrSectionHead,
   OrSleeve,
   OrSpinner,
+  OrSwipeRow,
   OrSwitch,
   OrTag,
   OrToast,
@@ -407,6 +409,7 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
     OrLoadMore,
     OrModal,
     OrSectionHead,
+    OrSwipeRow,
     OrSleeve,
     OrSpinner,
     OrSwitch,
@@ -568,6 +571,8 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
                 role="row"
                 [class.is-current]="current"
                 [attr.aria-rowindex]="i + 2"
+                orSwipeRow
+                (swiped)="addToStack(t)"
               >
                 <div class="c-num" role="cell">
                   <!-- Pointer shortcut; the title button is the accessible play control. -->
@@ -702,6 +707,7 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
       >
         <div orModalActions>
           <or-button block (click)="playNext()">Play next</or-button>
+          <or-button block (click)="addToStackFromOptions()">Add to Stack</or-button>
           @if (optionsFor()?.source?.url) {
             <or-button block (click)="fixSource()">Fix source</or-button>
           }
@@ -1191,16 +1197,44 @@ export class PlaylistPage {
     this.toast.show(copied ? 'Source link copied' : 'Could not copy link');
   }
 
-  /** Queue the optioned record right after the current one. */
+  /** Options: queue the optioned record to play next (front of Your Stack). */
   protected async playNext(): Promise<void> {
     const track = this.optionsFor();
     this.optionsFor.set(null);
-    if (!track) return;
+    if (track) await this.playNextTrack(track);
+  }
+
+  /** Options: append the optioned record to Your Stack. */
+  protected async addToStackFromOptions(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (track) await this.addToStack(track);
+  }
+
+  /** Front of Your Stack, with a confirmation toast. */
+  protected async playNextTrack(track: Track): Promise<void> {
     try {
-      await this.player.playNext([track]);
+      await this.player.playNext(track);
       this.toast.show(`“${track.title}” plays next`);
-    } catch {
-      this.toast.show('Could not queue that record. Try again.');
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError ? err.message : 'Could not queue that record. Try again.',
+      );
+    }
+  }
+
+  /** End of Your Stack, with a confirmation toast (also the row swipe). */
+  protected async addToStack(track: Track): Promise<void> {
+    try {
+      const toQueue = this.player.addGoesToQueue();
+      await this.player.addToStack(track);
+      this.toast.show(
+        toQueue ? `“${track.title}” added to queue` : `“${track.title}” added to Your Stack`,
+      );
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError ? err.message : 'Could not add that record. Try again.',
+      );
     }
   }
 

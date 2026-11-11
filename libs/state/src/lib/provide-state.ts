@@ -14,6 +14,7 @@ import { PlayCountsStore } from './play-counts.store';
 import { PlayerStore } from './player.store';
 import { SessionStore } from './session.store';
 import { SettingsStore } from './settings.store';
+import { StackSyncStore } from './stack-sync.store';
 import { SyncStore } from './sync.store';
 
 /**
@@ -41,7 +42,13 @@ export function provideState(): EnvironmentProviders {
       const crossfadeSettings = inject(SettingsStore);
       const engine = inject(PlayerService).engine;
       effect(() => engine.setCrossfadeSec(crossfadeSettings.crossfadeSec()));
-      void player.restore().finally(() => session.start());
+      // Your Stack sync starts after the saved queue is restored, so a pull
+      // cannot be overwritten by the restore.
+      const stackSync = inject(StackSyncStore);
+      void player.restore().finally(() => {
+        session.start();
+        stackSync.start();
+      });
       // Registers the Spotify placeholder source; resumes a running import
       // (Spotify matching and YouTube song-detail lookup).
       void inject(ImportStore).restore();

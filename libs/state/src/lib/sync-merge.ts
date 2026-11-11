@@ -187,6 +187,45 @@ export function toSyncTrack(t: Track): SyncTrack {
 }
 
 /**
+ * Budget for one synced track as JSON, well under the cloud row limit
+ * (`stack_entries.track` is capped at 8192 bytes by `pg_column_size`).
+ */
+export const SYNC_TRACK_BYTES = 4096;
+
+/** Optional fields dropped, in order, when a track is over the budget. */
+const TRIM_ORDER = [
+  'sourceId',
+  'sourceUrl',
+  'sourceSite',
+  'spotifyId',
+  'isrc',
+  'artUrl',
+  'genre',
+  'album',
+  'year',
+  'durationSec',
+] as const;
+
+const encoder = new TextEncoder();
+const jsonBytes = (value: unknown): number =>
+  encoder.encode(JSON.stringify(value)).length;
+
+/**
+ * The synced track for one stack row: trimmed to `SYNC_TRACK_BYTES` by dropping
+ * optional fields (id, provider, title and artist are kept). Null when it still
+ * does not fit; that entry stays on this device only.
+ */
+export function fitSyncTrack(t: Track): SyncTrack | null {
+  const out = toSyncTrack(t);
+  if (jsonBytes(out) <= SYNC_TRACK_BYTES) return out;
+  for (const key of TRIM_ORDER) {
+    delete out[key];
+    if (jsonBytes(out) <= SYNC_TRACK_BYTES) return out;
+  }
+  return null;
+}
+
+/**
  * Cloud data is untrusted: art and page links are kept only in the schemes the
  * app produces (see `remote-url.ts`); anything else is dropped.
  */

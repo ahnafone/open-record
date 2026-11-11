@@ -10,7 +10,16 @@ export interface QueueState {
   positionSec: number;
   shuffle: boolean;
   repeat: RepeatMode;
-  /** Ids waiting in the "Play next" list, in play order. Absent when empty. */
+  /**
+   * Your Stack entries in play order, each with its own entry id and the full
+   * track (streamed tracks may not be in the library). Their queue positions
+   * are not in `trackIds`; they are re-inserted on restore. Absent when empty.
+   */
+  stack?: { entryId: string; track: Track }[];
+  /**
+   * Legacy (pre-stack): song ids of the old "Play next" list, which were still
+   * queue entries. Read once on restore and converted to `stack`; never written.
+   */
   playNextIds?: string[];
   /** Unplayed queue-window pool ids, in play order. Absent when there is none. */
   sourceIds?: string[];

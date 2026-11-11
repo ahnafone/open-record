@@ -5,6 +5,9 @@ import {
   QUEUE_HISTORY_KEEP,
   QueueWindow,
   buildQueueWindow,
+  isRecentlyQueued,
+  parseRecentlyQueued,
+  pruneRecentlyQueued,
   queueAheadFor,
   restoreQueueWindow,
 } from './queue-window';
@@ -219,5 +222,135 @@ describe('queue window', () => {
     expect(window?.ids()).toEqual(
       ['p4', 'p1', 'p7'].filter((id) => !taken.has(id)),
     );
+  });
+
+  describe('eligibility (12h autoplay dedupe)', () => {
+    const notBanned = (banned: string[]) => (t: Track) => !banned.includes(t.id);
+
+    it('take skips ineligible tracks and leaves them in the pool', () => {
+      const window = new QueueWindow(pool.slice(0, 5), {
+        limit: 50,
+        shuffle: true,
+        random: seeded(1),
+      });
+      const drawn = window.take(3, notBanned(['p0', 'p2']));
+      expect(ids(drawn).sort()).toEqual(['p1', 'p3', 'p4']);
+      expect(window.ids().sort()).toEqual(['p0', 'p2']);
+    });
+
+    it('a strict stop: nothing eligible means a short draw, no fallback', () => {
+      const window = new QueueWindow(pool.slice(0, 3), {
+        limit: 50,
+        shuffle: true,
+        random: seeded(1),
+      });
+      expect(window.take(2, () => false)).toEqual([]);
+      expect(window.remaining).toBe(3);
+    });
+
+    it('in-order draws ignore eligibility and take the list order', () => {
+      const window = new QueueWindow(pool.slice(0, 4), {
+        limit: 50,
+        shuffle: false,
+      });
+      expect(ids(window.take(2, () => false))).toEqual(['p0', 'p1']);
+      expect(ids(window.take(5, notBanned(['p3'])))).toEqual(['p2', 'p3']);
+      expect(window.remaining).toBe(0);
+    });
+
+    it('shuffled draws only pick eligible tracks', () => {
+      const window = new QueueWindow(pool, {
+        limit: 50,
+        shuffle: true,
+        random: seeded(9),
+      });
+      const banned = ['p1', 'p4', 'p8'];
+      const drawn = window.take(10, notBanned(banned));
+      expect(drawn.length).toBe(7);
+      expect(ids(drawn).some((id) => banned.includes(id))).toBe(false);
+      expect(window.ids().sort()).toEqual(banned.sort());
+    });
+
+    it('reserve with eligibility releases ineligible tracks untouched', () => {
+      const window = new QueueWindow(pool.slice(0, 4), {
+        limit: 50,
+        shuffle: true,
+        random: seeded(2),
+      });
+      const draw = window.reserve(4, notBanned(['p1']));
+      expect(ids(draw.tracks).sort()).toEqual(['p0', 'p2', 'p3']);
+      draw.release();
+      expect(window.ids().sort()).toEqual(['p0', 'p1', 'p2', 'p3']);
+    });
+
+    it('buildQueueWindow fills the shuffled ahead only with eligible tracks', () => {
+      const banned = new Set(['t1', 't2']);
+      const built = buildQueueWindow(context.slice(0, 10), 0, 'auto', {
+        shuffle: true,
+        random: seeded(4),
+        eligible: (t) => !banned.has(t.id),
+      });
+      expect(built.tracks[0].id).toBe('t0');
+      expect(ids(built.tracks.slice(1)).sort()).toEqual(['t3', 't4', 't5', 't6', 't7', 't8', 't9']);
+      // The skipped tracks stay in the pool for later fills.
+      expect(built.window.ids()).toEqual(['t1', 't2']);
+    });
+
+    it('buildQueueWindow ignores eligibility when shuffle is off', () => {
+      const built = buildQueueWindow(context.slice(0, 10), 0, 'auto', {
+        shuffle: false,
+        eligible: () => false,
+      });
+      expect(ids(built.tracks)).toEqual(ids(context.slice(0, 10)));
+      expect(built.window.remaining).toBe(0);
+    });
+
+    it('buildQueueWindow never filters the tapped track or history', () => {
+      const built = buildQueueWindow(context.slice(0, 10), 3, 'auto', {
+        shuffle: true,
+        random: seeded(6),
+        eligible: () => false,
+      });
+      expect(ids(built.tracks)).toEqual(['t3']);
+      expect(built.cursor).toBe(0);
+    });
+
+    it('shuffled builds keep the tapped track even when ineligible', () => {
+      const built = buildQueueWindow(context.slice(0, 10), 4, 'auto', {
+        shuffle: true,
+        random: seeded(5),
+        eligible: (t) => t.id !== 't4' && t.id !== 't0',
+      });
+      expect(built.tracks[0].id).toBe('t4');
+      expect(ids(built.tracks)).not.toContain('t0');
+    });
+  });
+
+  describe('recently queued record', () => {
+    const record = { a: 1_000, b: 0, c: 2_000 };
+    const twelveH = 12 * 60 * 60 * 1000;
+
+    it('prunes entries older than 12 hours', () => {
+      // `b` is past 12h; `a` and `c` are still inside.
+      const now = twelveH + 999;
+      expect(pruneRecentlyQueued(record, now)).toEqual({ a: 1_000, c: 2_000 });
+      // One more ms and `a` (exactly 12h old) falls out.
+      expect(pruneRecentlyQueued(record, now + 1_000)).toEqual({ c: 2_000 });
+    });
+
+    it('treats a song as recent only inside the 12h window', () => {
+      const now = 10_000;
+      expect(isRecentlyQueued(record, 'a', now)).toBe(true);
+      expect(isRecentlyQueued(record, 'a', 1_000 + twelveH)).toBe(false);
+      expect(isRecentlyQueued(record, 'missing', now)).toBe(false);
+    });
+
+    it('parses only numeric timestamps from stored data', () => {
+      expect(parseRecentlyQueued({ a: 5, b: 'x', c: Number.NaN, d: null })).toEqual({
+        a: 5,
+      });
+      expect(parseRecentlyQueued(null)).toEqual({});
+      expect(parseRecentlyQueued([1, 2])).toEqual({});
+    });
   });
 });

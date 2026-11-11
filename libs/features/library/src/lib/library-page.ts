@@ -28,6 +28,7 @@ import {
   sourceLabel,
   type TrackSort,
   type TrackSortKey,
+  SessionRefusedError,
 } from '@open-record/state';
 import {
   OrDownloadProgress,
@@ -39,6 +40,7 @@ import {
   OrDialog,
   OrModal,
   OrSectionHead,
+  OrSwipeRow,
   OrSwitch,
   OrTag,
   OrToast,
@@ -184,6 +186,7 @@ const ROW_STYLES = `
     OrIcon,
     OrLibraryRow,
     OrLoadMore,
+    OrSwipeRow,
     OrModal,
     OrSectionHead,
     OrSwitch,
@@ -265,7 +268,13 @@ const ROW_STYLES = `
           <ng-container *ngTemplateOutlet="sortHead; context: { $implicit: 'saved' }" />
           <ul class="crate" aria-label="Saved records">
             @for (t of savedWindow.items(); track t.id; let i = $index) {
-              <li class="record" [attr.aria-setsize]="saved.length" [attr.aria-posinset]="i + 1">
+              <li
+                class="record"
+                [attr.aria-setsize]="saved.length"
+                [attr.aria-posinset]="i + 1"
+                orSwipeRow
+                (swiped)="addToStack(t)"
+              >
                 <or-library-row
                   [track]="t"
                   [art]="art(t)"
@@ -302,7 +311,13 @@ const ROW_STYLES = `
         <ng-container *ngTemplateOutlet="sortHead; context: { $implicit: 'imported' }" />
         <ul class="crate" aria-label="Imported records">
           @for (t of importedWindow.items(); track t.id; let i = $index) {
-            <li class="record" [attr.aria-setsize]="imported.length" [attr.aria-posinset]="i + 1">
+            <li
+              class="record"
+              [attr.aria-setsize]="imported.length"
+              [attr.aria-posinset]="i + 1"
+              orSwipeRow
+              (swiped)="addToStack(t)"
+            >
               <or-library-row
                 [track]="t"
                 [art]="art(t)"
@@ -415,6 +430,7 @@ const ROW_STYLES = `
     >
       <div orModalActions>
         <or-button block (click)="playNext()">Play next</or-button>
+        <or-button block (click)="addToStackFromOptions()">Add to Stack</or-button>
         @if (optionsFor()?.source?.url) {
           <or-button block (click)="fixSource()">Fix source</or-button>
         }
@@ -733,16 +749,44 @@ export class LibraryPage {
     this.toast.show(copied ? 'Source link copied' : 'Could not copy link');
   }
 
-  /** Queue the optioned record right after the current one. */
+  /** Options: queue the optioned record to play next (front of Your Stack). */
   protected async playNext(): Promise<void> {
     const track = this.optionsFor();
     this.optionsFor.set(null);
-    if (!track) return;
+    if (track) await this.playNextTrack(track);
+  }
+
+  /** Options: append the optioned record to Your Stack. */
+  protected async addToStackFromOptions(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (track) await this.addToStack(track);
+  }
+
+  /** Front of Your Stack, with a confirmation toast. */
+  protected async playNextTrack(track: Track): Promise<void> {
     try {
-      await this.player.playNext([track]);
+      await this.player.playNext(track);
       this.toast.show(`“${track.title}” plays next`);
-    } catch {
-      this.toast.show('Could not queue that record. Try again.');
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError ? err.message : 'Could not queue that record. Try again.',
+      );
+    }
+  }
+
+  /** End of Your Stack, with a confirmation toast (also the row swipe). */
+  protected async addToStack(track: Track): Promise<void> {
+    try {
+      const toQueue = this.player.addGoesToQueue();
+      await this.player.addToStack(track);
+      this.toast.show(
+        toQueue ? `“${track.title}” added to queue` : `“${track.title}” added to Your Stack`,
+      );
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError ? err.message : 'Could not add that record. Try again.',
+      );
     }
   }
 

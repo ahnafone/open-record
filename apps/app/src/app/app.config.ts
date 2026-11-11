@@ -35,6 +35,7 @@ import {
   RemoteServerPort,
   SessionPort,
   SettingsStore,
+  StackSyncPort,
   StreamResolverPort,
   SyncPort,
   UPDATE_APP_VERSION,
@@ -63,6 +64,7 @@ import {
 } from './server-session';
 import { SupabaseAuth } from './supabase-auth';
 import { SupabasePlayCounts } from './supabase-play-counts';
+import { SupabaseStackSync } from './supabase-stack';
 import { SupabaseSync } from './supabase-sync';
 import { SUPABASE_BUILD_CONFIG } from './supabase.config';
 import { createUpdatePlatform } from './update-platform';
@@ -364,6 +366,8 @@ export const appConfig: ApplicationConfig = {
     { provide: SyncPort, useValue: new SupabaseSync(supabase) },
     // Additive per-track play counts for signed-in users (same client).
     { provide: PlayCountsPort, useValue: new SupabasePlayCounts(supabase) },
+    // Your Stack (queue entries) for signed-in users (same client).
+    { provide: StackSyncPort, useValue: new SupabaseStackSync(supabase) },
     // Player sync: WebSocket on the web, HTTP polling on native. Optional: the
     // stores only use it when provided, so anonymous/local mode is unchanged.
     { provide: SessionPort, useFactory: () => createSessionPort(sessionOptions()) },

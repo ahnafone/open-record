@@ -439,6 +439,65 @@ export abstract class PlayCountsPort {
   abstract record(plays: readonly SyncPlayIncrement[]): Promise<SyncPlayCount[]>;
 }
 
+/** One Your Stack entry as it syncs: its own row, positioned in the stack. */
+export interface SyncStackEntry {
+  /** Unique per entry; the same song can appear several times. */
+  entryId: string;
+  /**
+   * Sort key in play order. Gap-based (spaced, with midpoints for new entries),
+   * so an insert or removal rewrites no other row.
+   */
+  position: number;
+  track: SyncTrack;
+}
+
+/** A new position for an entry that already exists in the cloud. */
+export interface SyncStackMove {
+  entryId: string;
+  position: number;
+}
+
+/**
+ * The account's Your Stack is at its cap, so a new entry cannot be stored.
+ * `entryIds` are the entries of the failing write (not the ones already stored).
+ */
+export class StackFullError extends Error {
+  readonly entryIds: readonly string[];
+  constructor(entryIds: readonly string[] = []) {
+    super('Your Stack is full.');
+    this.name = 'StackFullError';
+    this.entryIds = entryIds;
+  }
+}
+
+/** What the cloud refused in a push: entries it will not store (not retried as-is). */
+export interface SyncStackPushResult {
+  rejected: string[];
+}
+
+/**
+ * Your Stack sync with the signed-in account. Each entry is its own row, so an
+ * add on one device and a remove on another never conflict; the remote side
+ * never merges rows. Provided by the app; without it the stack stays local.
+ */
+export abstract class StackSyncPort {
+  /** The account the stack belongs to, or null when signed out / unconfigured. */
+  abstract userId(): Promise<string | null>;
+  /** Every entry of the account, in play order. */
+  abstract pull(): Promise<SyncStackEntry[]>;
+  /**
+   * Insert `upsert` (new entries), move `move` (position only; an entry the
+   * cloud no longer has is not re-created) and delete `remove` (entry ids).
+   * Rejects when the write fails; nothing is retried here. Resolves `rejected`
+   * for entries the cloud refuses for a reason other than the cap.
+   */
+  abstract push(changes: {
+    upsert: SyncStackEntry[];
+    move: SyncStackMove[];
+    remove: string[];
+  }): Promise<SyncStackPushResult>;
+}
+
 /**
  * Keeps downloads running while the app is in the background or the screen
  * is off (Android: a foreground service with an ongoing notification plus

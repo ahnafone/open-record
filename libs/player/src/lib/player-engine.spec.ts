@@ -10,6 +10,7 @@ import type {
 } from './audio-engine';
 import {
   LOAD_RETRY_DELAYS_MS,
+  MAX_STACK_ENTRIES,
   PlayerEngine,
   UNSUPPORTED_REMOTE_RETRY_DELAYS_MS,
 } from './player-engine';
@@ -50,9 +51,13 @@ class FakeEngine implements AudioEngine {
   setListener(l: AudioEngineListener | null): void {
     this.listener = l;
   }
+  /** When set, `load` waits for it (a load still in flight). */
+  loadGate: Promise<void> | null = null;
+
   async load(media: EngineMedia, neighbours?: EngineNeighbours): Promise<void> {
     this.loaded.push(media.id);
     this.neighbours.push(neighbours);
+    if (this.loadGate) await this.loadGate;
     if (this.failLoadOn.has(media.id)) throw new Error('load failed');
   }
   /** When set, `play` waits for it before starting (a pending play start). */
@@ -263,34 +268,178 @@ describe('PlayerEngine', () => {
     expect(ids()).toBe('a');
   });
 
-  it('plays "play next" items first, in the order added, then resumes', async () => {
+  it('plays Your Stack first, playNext at the front, then resumes Keep Spinning', async () => {
     const { player, ids } = setup();
     await player.setQueue(tracks.slice(0, 4), { startIndex: 1 }); // b
-    player.playNext([track('x')]);
-    player.playNext([track('y')]);
+    player.playNext(track('x'));
+    player.playNext(track('y'));
     const upcoming = () =>
-      player.upcomingEntries().map((e) => e.track.id + (e.playNext ? '*' : ''));
-    expect(upcoming()).toEqual(['x*', 'y*', 'c', 'd']);
+      player.upcomingEntries().map((e) => e.track.id + (e.stackEntryId ? '*' : ''));
+    // playNext goes to the front: the newest sits first.
+    expect(upcoming()).toEqual(['y*', 'x*', 'c', 'd']);
 
-    // Remove a normal item and a play-next item by queue index.
+    // Remove a normal item and a stack item by queue index.
     const at = (id: string) =>
       player.upcomingEntries().find((e) => e.track.id === id)?.queueIndex ?? -1;
     expect(player.removeUpcoming(at('d'))).toBe(true);
-    player.playNext([track('z')]);
+    player.playNext(track('z'));
     expect(player.removeUpcoming(at('y'))).toBe(true);
-    expect(upcoming()).toEqual(['x*', 'z*', 'c']);
+    expect(upcoming()).toEqual(['z*', 'x*', 'c']);
 
     const played: string[] = [];
     while (await player.next()) played.push(ids() ?? '');
-    expect(played).toEqual(['x', 'z', 'c']);
-    expect(player.upcomingEntries().some((e) => e.playNext)).toBe(false);
+    expect(played).toEqual(['z', 'x', 'c']);
+    expect(player.upcomingEntries().some((e) => e.stackEntryId)).toBe(false);
+  });
+
+  describe('Your Stack', () => {
+    const stackIds = (player: PlayerEngine) =>
+      player.stackEntries().map((e) => e.track.id);
+
+    it('addToStack appends after existing stack entries, before Keep Spinning', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 0 }); // a
+      player.addToStack(track('x'));
+      player.addToStack(track('y'));
+      player.playNext(track('z'));
+      expect(stackIds(player)).toEqual(['z', 'x', 'y']);
+      expect(player.keepSpinningEntries().map((e) => e.track.id)).toEqual([
+        'b',
+        'c',
+        'd',
+      ]);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['z', 'x', 'y', 'b', 'c', 'd']);
+    });
+
+    it('allows the same song many times, each with its own entry id', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 2), { startIndex: 0 }); // a, b
+      player.addToStack(track('x'));
+      player.addToStack(track('x'));
+      const [first, second] = player.stackEntries();
+      expect(stackIds(player)).toEqual(['x', 'x']);
+      expect(first.entryId).not.toBe(second.entryId);
+      expect(player.removeStackEntry(second.entryId)).toBe(true);
+      expect(player.stackEntries().map((e) => e.entryId)).toEqual([first.entryId]);
+    });
+
+    it('allows the currently playing song in the stack', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 2), { startIndex: 0 }); // a playing
+      player.addToStack(track('a'));
+      expect(stackIds(player)).toEqual(['a']);
+      expect(player.currentIndex()).toBe(0);
+      expect(player.current()?.id).toBe('a');
+    });
+
+    it('removeStackEntry returns false for an unknown or Keep Spinning entry', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      player.addToStack(track('x'));
+      expect(player.removeStackEntry('missing')).toBe(false);
+      expect(stackIds(player)).toEqual(['x']);
+    });
+
+    it('clearStack empties the stack and keeps Keep Spinning', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 0 });
+      player.addToStack(track('x'));
+      player.playNext(track('y'));
+      player.clearStack();
+      expect(player.stackEntries()).toEqual([]);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['b', 'c', 'd']);
+    });
+
+    it('clearKeepSpinning keeps Your Stack and history', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks, { startIndex: 0 });
+      await player.next(); // a played; now b
+      player.addToStack(track('x'));
+      player.clearKeepSpinning();
+      expect(stackIds(player)).toEqual(['x']);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['x']);
+      expect(player.current()?.id).toBe('b');
+      expect(player.queue().map((t) => t.id)).toEqual(['a', 'b', 'x']);
+    });
+
+    it('setStack replaces pending stack entries and keeps their ids', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      player.addToStack(track('x'));
+      const kept = { entryId: 'kept-id', track: track('y') };
+      player.setStack([kept, { entryId: 'other-id', track: track('z') }]);
+      expect(player.stackEntries()).toEqual([
+        kept,
+        { entryId: 'other-id', track: track('z') },
+      ]);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['y', 'z', 'b', 'c']);
+    });
+
+    it('a stack applied while nothing is loaded starts on play', async () => {
+      const { player } = setup();
+      player.setStack([
+        { entryId: 'e1', track: track('x') },
+        { entryId: 'e2', track: track('y') },
+      ]);
+      expect(player.currentIndex()).toBe(-1);
+      expect(stackIds(player)).toEqual(['x', 'y']);
+
+      await player.play();
+
+      expect(player.current()?.id).toBe('x');
+      expect(stackIds(player)).toEqual(['y']);
+    });
+
+    it('playNext on an idle engine puts the new entry before the stack', async () => {
+      const { player } = setup();
+      player.setStack([{ entryId: 'e1', track: track('x') }]);
+
+      player.playNext(track('z'));
+
+      expect(stackIds(player)).toEqual(['z', 'x']);
+      expect(await player.startStack()).toBe(true);
+      expect(player.current()?.id).toBe('z');
+    });
+
+    it('keeps Your Stack through a queue replace while the new track loads', async () => {
+      const { player, fake } = setup();
+      await player.setQueue(tracks.slice(0, 2), { startIndex: 0 });
+      player.addToStack(track('x'));
+      const kept = player.stackEntries();
+
+      let release!: () => void;
+      fake.loadGate = new Promise<void>((resolve) => (release = resolve));
+      const replacing = player.setQueue(tracks.slice(2, 4), {
+        startIndex: 0,
+        keepStack: kept,
+      });
+      // Synchronously, before the load finishes: the stack is already back.
+      expect(player.stackEntries()).toEqual(kept);
+
+      release();
+      await replacing;
+      expect(player.stackEntries()).toEqual(kept);
+      expect(player.current()?.id).toBe('c');
+    });
+
+    it('refuses stack entries beyond the 500 cap', () => {
+      const { player } = setup();
+      player.setStack(
+        Array.from({ length: MAX_STACK_ENTRIES }, (_, i) => ({
+          entryId: `e${i}`,
+          track: track('x'),
+        })),
+      );
+      player.addToStack(track('over'));
+      expect(player.stackEntries()).toHaveLength(MAX_STACK_ENTRIES);
+    });
   });
 
   describe('replaceUpcoming', () => {
     it('swaps a non-current entry in place without loading media', async () => {
       const { player, fake } = setup();
       await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
-      player.playNext([track('x')]);
+      player.playNext(track('x'));
       fake.listener?.onTime(30);
       const loads = fake.loaded.length;
       const seq = player.loadSeq();
@@ -310,7 +459,7 @@ describe('PlayerEngine', () => {
       expect(fake.loaded.length).toBe(loads);
       expect(player.status()).toBe(status);
       expect(player.position()).toBe(position);
-      expect(player.playNextIndices()).toEqual([1]);
+      expect(player.stackEntries().length).toBe(1);
 
       // The current record and an absent id are refused.
       expect(player.replaceUpcoming('a', track('z'))).toBe(false);
@@ -1042,15 +1191,15 @@ describe('PlayerEngine', () => {
       expect(fake.loaded.length).toBe(loads + 1);
     });
 
-    it('clears pending play-next entries when a session order is applied', async () => {
+    it('clears pending Your Stack entries when a session order is applied', async () => {
       const { player } = setup();
       await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
-      player.playNext([track('x')]);
-      expect(player.playNextIndices().length).toBe(1);
+      player.playNext(track('x'));
+      expect(player.stackEntries().length).toBe(1);
 
       await player.applyOrder(tracks.slice(0, 2), 0);
 
-      expect(player.playNextIndices()).toEqual([]);
+      expect(player.stackEntries()).toEqual([]);
       expect(player.queue().map((t) => t.id)).toEqual(['a', 'b']);
       expect(player.upcoming().map((t) => t.id)).toEqual(['b']);
     });
@@ -1152,7 +1301,7 @@ describe('PlayerEngine', () => {
       expect(fake.preloads.at(-1)?.next?.id).toBe('c');
 
       // "Play next" puts a new track straight after the current one.
-      player.playNext([track('z')]);
+      player.playNext(track('z'));
       await flush();
       expect(fake.preloads.at(-1)?.next?.id).toBe('z');
 
@@ -1742,7 +1891,7 @@ describe('PlayerEngine', () => {
       const { player, fake } = setup();
       await player.setQueue(tracks, { startIndex: 0 });
       for (let i = 0; i < 4; i++) await player.next(); // a..d played; now e
-      player.playNext([track('x')]);
+      player.playNext(track('x'));
       fake.listener?.onTime(30);
       const loads = fake.loaded.length;
       const seeks = fake.seeks.length;
@@ -1755,7 +1904,7 @@ describe('PlayerEngine', () => {
       expect(player.queue().map((t) => t.id)).toEqual(['c', 'd', 'e', 'x']);
       expect(player.currentIndex()).toBe(2);
       expect(player.current()?.id).toBe('e');
-      expect(player.playNextIndices()).toEqual([3]);
+      expect(player.stackEntries().map((e) => e.track.id)).toEqual(['x']);
       expect(player.upcoming().map((t) => t.id)).toEqual(['x']);
       // Playback continues untouched.
       expect(player.status()).toBe(status);
@@ -1769,7 +1918,7 @@ describe('PlayerEngine', () => {
       player.dropPlayed(10);
       expect(player.queue().map((t) => t.id)).toEqual(['c', 'd', 'e', 'x']);
       expect(player.currentIndex()).toBe(2);
-      expect(player.playNextIndices()).toEqual([3]);
+      expect(player.stackEntries().map((e) => e.track.id)).toEqual(['x']);
     });
 
     it('never drops tracks that were jumped over, only played history', async () => {

@@ -12,6 +12,47 @@ export const QUEUE_HISTORY_KEEP = 20;
 /** Where a bounded queue window's ahead size comes from. */
 export type QueueKind = 'auto' | 'playlist';
 
+/** Whether a track may be drawn as an autoplay fill. */
+export type EligibleFn = (track: Track) => boolean;
+
+/** How long a song counts as recently queued for autoplay fills. */
+export const RECENTLY_QUEUED_TTL_MS = 12 * 60 * 60 * 1000;
+
+/** Song id -> epoch ms when it last entered a Keep Spinning window. */
+export type RecentlyQueued = Record<string, number>;
+
+/** Drop records that are older than the TTL (or otherwise not usable). */
+export function pruneRecentlyQueued(
+  record: RecentlyQueued,
+  now: number,
+): RecentlyQueued {
+  const out: RecentlyQueued = {};
+  for (const [id, at] of Object.entries(record)) {
+    if (now - at < RECENTLY_QUEUED_TTL_MS) out[id] = at;
+  }
+  return out;
+}
+
+/** Whether `songId` was queued within the TTL. */
+export function isRecentlyQueued(
+  record: RecentlyQueued,
+  songId: string,
+  now: number,
+): boolean {
+  const at = record[songId];
+  return at !== undefined && now - at < RECENTLY_QUEUED_TTL_MS;
+}
+
+/** Accept a stored record of song id -> epoch ms; anything else is empty. */
+export function parseRecentlyQueued(raw: unknown): RecentlyQueued {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: RecentlyQueued = {};
+  for (const [id, at] of Object.entries(raw)) {
+    if (typeof at === 'number' && Number.isFinite(at)) out[id] = at;
+  }
+  return out;
+}
+
 /** Ahead size for a queue kind (`AUTO_QUEUE_AHEAD` or `PLAYLIST_QUEUE_AHEAD`). */
 export function queueAheadFor(kind: QueueKind): number {
   return kind === 'playlist' ? PLAYLIST_QUEUE_AHEAD : AUTO_QUEUE_AHEAD;
@@ -20,7 +61,7 @@ export function queueAheadFor(kind: QueueKind): number {
 export interface QueueWindowOptions {
   /** Tracks the window keeps ahead of the queue (50 or 100). */
   limit: number;
-  /** Whether `take` draws in random order. */
+  /** Whether draws are random (and so subject to eligibility) or in source order. */
   shuffle: boolean;
   /** Random source for shuffling, injectable for tests. Default `Math.random`. */
   random?: () => number;
@@ -103,8 +144,8 @@ export class QueueWindow {
    * order, or random picks while shuffled. Never more than `remaining`, and
    * `[]` once exhausted.
    */
-  take(count: number): Track[] {
-    const draw = this.reserve(count);
+  take(count: number, eligible?: EligibleFn): Track[] {
+    const draw = this.reserve(count, eligible);
     draw.commit();
     return draw.tracks;
   }
@@ -114,19 +155,30 @@ export class QueueWindow {
    * the tracks back in the pool, in their source order when shuffle is off.
    * Use it only when the queue command that was meant to consume them was
    * explicitly refused.
+   *
+   * `eligible` filters shuffled draws only: ineligible tracks stay in the pool,
+   * untouched, and when none is eligible the draw is short (a strict stop, no
+   * fallback). In-order draws take the next entries whatever `eligible` says.
    */
-  reserve(count: number): QueueReservation {
+  reserve(count: number, eligible?: EligibleFn): QueueReservation {
     const n = Math.min(Math.max(0, Math.floor(count)), this.entries.length);
     const taken: WindowEntry[] = [];
-    for (let i = 0; i < n; i++) {
-      const at = this.shuffledOn
+    // Eligibility is evaluated once per draw; each pick then comes out of this list.
+    const filter = this.shuffledOn ? eligible : undefined;
+    const candidates = this.entries.filter(
+      (entry) => !filter || filter(entry.track),
+    );
+    for (let i = 0; i < n && candidates.length; i++) {
+      const pick = this.shuffledOn
         ? Math.min(
-            Math.max(0, Math.floor(this.random() * this.entries.length)),
-            this.entries.length - 1,
+            Math.max(0, Math.floor(this.random() * candidates.length)),
+            candidates.length - 1,
           )
         : 0;
-      const [entry] = this.entries.splice(at, 1);
-      if (entry) taken.push(entry);
+      const entry = candidates.splice(pick, 1)[0];
+      if (!entry) break;
+      this.entries.splice(this.entries.indexOf(entry), 1);
+      taken.push(entry);
     }
     const hold: OpenReservation = { entries: taken };
     this.open.add(hold);
@@ -181,16 +233,19 @@ export class QueueWindow {
 /**
  * Build the first queue chunk around `startIndex` and a window over the rest.
  * Unshuffled builds keep up to `QUEUE_HISTORY_KEEP` played entries before the
- * current track; shuffled builds start at the tapped track with no history.
- * An empty context or an out-of-range index builds an empty queue instead of
- * throwing.
+ * current track, then the list in order. Shuffled builds start at the tapped
+ * track with no history, and their fill is drawn from `eligible` (the 12h
+ * autoplay rule). An empty context or an out-of-range index builds an empty
+ * queue instead of throwing.
  */
 export function buildQueueWindow(
   context: readonly Track[],
   startIndex: number,
   kind: QueueKind,
-  options: { shuffle: boolean; random?: () => number },
+  options: { shuffle: boolean; random?: () => number; eligible?: EligibleFn },
 ): BuiltQueue {
+  // Shuffled fills only: the tapped track and history are never filtered.
+  const eligible: EligibleFn = options.eligible ?? (() => true);
   const ahead = queueAheadFor(kind);
   const random = options.random ?? Math.random;
   if (
@@ -214,11 +269,11 @@ export function buildQueueWindow(
     const tapped = context[startIndex];
     const others = context.map((_, i) => i).filter((i) => i !== startIndex);
     const deck = shuffled(others, random);
-    const drawn = deck.slice(0, Math.min(ahead, deck.length));
+    const drawn = deck.filter((i) => eligible(context[i])).slice(0, ahead);
+    const drawnSet = new Set(drawn);
     // The undrawn tracks keep the source order; origins restore it on toggle.
-    const pool = deck
-      .slice(drawn.length)
-      .sort((a, b) => a - b)
+    const pool = others
+      .filter((i) => !drawnSet.has(i))
       .map((i) => context[i]);
     return {
       tracks: [tapped, ...drawn.map((i) => context[i])],
@@ -228,14 +283,20 @@ export function buildQueueWindow(
   }
 
   const history = Math.min(QUEUE_HISTORY_KEEP, startIndex);
+  const tracks = context.slice(startIndex - history, startIndex + 1);
+  const pool: Track[] = [];
+  // In list order: no eligibility filter, so replays queue the same songs.
+  for (const track of context.slice(startIndex + 1)) {
+    if (tracks.length - history - 1 < ahead) {
+      tracks.push(track);
+    } else {
+      pool.push(track);
+    }
+  }
   return {
-    tracks: context.slice(startIndex - history, startIndex + 1 + ahead),
+    tracks,
     cursor: history,
-    window: new QueueWindow(context.slice(startIndex + 1 + ahead), {
-      limit: ahead,
-      shuffle: false,
-      random,
-    }),
+    window: new QueueWindow(pool, { limit: ahead, shuffle: false, random }),
   };
 }
 

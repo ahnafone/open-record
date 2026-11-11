@@ -18,10 +18,12 @@ import {
   OfflineStore,
   PlayerStore,
   REMOTE_PROVIDER_ID,
+  SourceFixService,
   downloadState,
   formatDuration,
   sourceLabel,
   ArtistCreditPipe,
+  SessionRefusedError,
 } from '@open-record/state';
 import {
   OrArtistLinks,
@@ -31,9 +33,11 @@ import {
   OrIcon,
   OrIconButton,
   OrLoadMore,
+  OrModal,
   OrSectionHead,
   OrSleeve,
   OrSpinner,
+  OrSwipeRow,
   OrTag,
   OrToast,
   lazyWindow,
@@ -66,7 +70,7 @@ const ROW_STYLES = `
     }
     .record {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto 44px;
+      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
       align-items: center;
       gap: var(--spacing-xs);
       padding: var(--spacing-xxs) 0;
@@ -230,9 +234,11 @@ const ROW_STYLES = `
     OrIcon,
     OrIconButton,
     OrLoadMore,
+    OrModal,
     OrSectionHead,
     OrSleeve,
     OrSpinner,
+    OrSwipeRow,
     OrTag,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -310,7 +316,12 @@ const ROW_STYLES = `
           @let state = downloadState(status, offline.error(t.id));
           @let source = sourceLabel(t.source?.site);
           @let streamOnly = !status && t.providerId === remoteId;
-          <li class="record" [class.is-current]="current">
+          <li
+            class="record"
+            [class.is-current]="current"
+            orSwipeRow
+            (swiped)="addToStack(t)"
+          >
             <div class="record-main">
               <!-- Stretched play action; the artist links sit above it. -->
               <button
@@ -379,6 +390,12 @@ const ROW_STYLES = `
               "
               (click)="toggleSave(t)"
             />
+            <or-icon-button
+              icon="more"
+              [attr.data-options]="t.id"
+              [label]="'Options for ' + t.title"
+              (click)="openOptions(t, $event)"
+            />
           </li>
         }
       </ul>
@@ -391,6 +408,21 @@ const ROW_STYLES = `
         ></div>
       }
     }
+
+    <or-modal
+      [open]="!!optionsFor()"
+      [heading]="optionsFor()?.title ?? 'Record'"
+      [closable]="true"
+      (dismissed)="optionsFor.set(null)"
+    >
+      <div orModalActions>
+        <or-button block (click)="playNextFromOptions()">Play next</or-button>
+        <or-button block (click)="addToStackFromOptions()">Add to Stack</or-button>
+        @if (optionsFor()?.source?.url) {
+          <or-button block (click)="fixSource()">Fix source</or-button>
+        }
+      </div>
+    </or-modal>
 
     <or-download-sources
       class="downloads"
@@ -517,7 +549,12 @@ export class SearchPage {
   protected readonly sourceLabel = sourceLabel;
   protected readonly formatDuration = formatDuration;
   private readonly toast = inject(OrToast);
+  private readonly sourceFix = inject(SourceFixService);
   protected readonly art = injectTrackArt();
+  /** Record whose ⋯ menu is open. */
+  protected readonly optionsFor = signal<Track | null>(null);
+  /** The ⋯ button that opened the menu (focus returns there). */
+  private optionsOrigin: HTMLElement | null = null;
   private readonly searchInput =
     viewChild.required<ElementRef<HTMLInputElement>>('searchInput');
 
@@ -616,6 +653,65 @@ export class SearchPage {
       ? this.player.togglePlay()
       : this.player.playTrack(track, this.hits());
     run.catch(() => this.toast.show(`Couldn’t play “${track.title}”`));
+  }
+
+  /** Open the row's ⋯ menu, remembering its button for focus return. */
+  protected openOptions(track: Track, event: Event): void {
+    const host = event.currentTarget as HTMLElement;
+    this.optionsOrigin = host.querySelector<HTMLElement>('button') ?? host;
+    this.optionsFor.set(track);
+  }
+
+  /** Options: close the menu, then open the shell's Fix source dialog. */
+  protected fixSource(): void {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (track) this.sourceFix.open(track, this.optionsOrigin ?? undefined);
+  }
+
+  /** Options: queue the record to play next (front of Your Stack). */
+  protected async playNextFromOptions(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (track) await this.playNextTrack(track);
+  }
+
+  /** Options: append the record to Your Stack. */
+  protected async addToStackFromOptions(): Promise<void> {
+    const track = this.optionsFor();
+    this.optionsFor.set(null);
+    if (track) await this.addToStack(track);
+  }
+
+  /** Front of Your Stack, with a confirmation toast. */
+  protected async playNextTrack(track: Track): Promise<void> {
+    try {
+      await this.player.playNext(track);
+      this.toast.show(`“${track.title}” plays next`);
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : `Couldn’t queue “${track.title}”. Try again.`,
+      );
+    }
+  }
+
+  /** End of Your Stack, with a confirmation toast (also the row swipe). */
+  protected async addToStack(track: Track): Promise<void> {
+    try {
+      const toQueue = this.player.addGoesToQueue();
+      await this.player.addToStack(track);
+      this.toast.show(
+        toQueue ? `“${track.title}” added to queue` : `“${track.title}” added to Your Stack`,
+      );
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : `Couldn’t add “${track.title}”. Try again.`,
+      );
+    }
   }
 
   protected async toggleSave(track: Track): Promise<void> {

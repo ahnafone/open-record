@@ -14,7 +14,7 @@ import { formatTime } from './time';
 /**
  * Now Playing seek row: elapsed time, the seek slider and the length. Its own
  * component so position ticks re-render only this row, not the page (and its
- * up-next list).
+ * queue list).
  */
 @Component({
   selector: 'or-seek-row',
