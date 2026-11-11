@@ -101,3 +101,6 @@ supabase/functions/.env*
 
 # Owner-only public deployment runbook: kept locally, never tracked.
 docs/public-hosting.md
+
+# Kotlin compiler session data
+.kotlin/
