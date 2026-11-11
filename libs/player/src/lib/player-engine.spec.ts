@@ -2001,4 +2001,144 @@ describe('PlayerEngine', () => {
       expect(player.loadSeq()).toBeGreaterThan(emptied);
     });
   });
+
+  describe('Keep Spinning exclusion events', () => {
+    /** Attach a listener that records `kind:trackId` in order; `drain` reads and clears it. */
+    function recorder(player: PlayerEngine) {
+      const events: string[] = [];
+      player.setExclusionListener((e) => events.push(`${e.kind}:${e.trackId}`));
+      return { drain: () => events.splice(0) };
+    }
+
+    it('reports a track as played once it starts, not again on resume', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks.slice(0, 2), { startIndex: 0 });
+      expect(drain()).toEqual(['played:a']);
+
+      await player.pause();
+      await player.play();
+      expect(drain()).toEqual([]);
+    });
+
+    it('reports the track left by next, previous or a row tap as skipped', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 0 });
+      drain();
+
+      await player.next();
+      expect(drain()).toEqual(['skipped:a', 'played:b']);
+
+      await player.previous();
+      expect(drain()).toEqual(['skipped:b', 'played:a']);
+
+      await player.playAt(2);
+      expect(drain()).toEqual(['skipped:a', 'played:c']);
+    });
+
+    it('does not report a track as skipped when it finishes', async () => {
+      const { fake, player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks.slice(0, 3), { startIndex: 0 });
+      drain();
+
+      fake.listener?.onEnded();
+      await flush();
+      expect(drain()).toEqual(['played:b']);
+    });
+
+    it('reports Keep Spinning entries jumped over without playing, not the ones already played', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks, { startIndex: 0 });
+      drain();
+
+      await player.playAt(3);
+      expect(drain()).toEqual(['skipped:a', 'jumped:b', 'jumped:c', 'played:d']);
+    });
+
+    it('does not report Your Stack entries passed over', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks, { startIndex: 0 });
+      player.playNext(track('x'));
+      drain();
+
+      // Queue is now a, x (stack), b, c, d, e: x is passed over, b and c are not.
+      await player.playAt(4);
+      expect(drain()).toEqual(['skipped:a', 'jumped:b', 'jumped:c', 'played:d']);
+    });
+
+    it('reports a single Keep Spinning removal only; enqueue, Your Stack and clears report nothing', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks, { startIndex: 0 });
+      drain();
+
+      expect(player.removeUpcoming(2)).toBe(true); // c, Keep Spinning
+      expect(drain()).toEqual(['removed:c']);
+
+      player.playNext(track('x'));
+      expect(player.removeUpcoming(1)).toBe(true); // x, Your Stack
+      expect(drain()).toEqual([]);
+
+      player.add([track('f')]);
+      expect(drain()).toEqual([]);
+
+      player.clearKeepSpinning();
+      expect(drain()).toEqual([]);
+
+      await player.clear();
+      expect(drain()).toEqual([]);
+    });
+
+    it('does not report the queue as jumped when repeat-all wraps', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      player.setRepeat('all');
+      await player.setQueue(tracks.slice(0, 4), { startIndex: 0 });
+      drain();
+
+      await player.previous(); // a -> d (wrap back to the end)
+      expect(drain()).toEqual(['skipped:a', 'played:d']);
+
+      await player.next(); // d -> a (wrap to the start)
+      expect(drain()).toEqual(['skipped:d', 'played:a']);
+    });
+
+    it('reports nothing jumped on a backward move over unplayed entries', async () => {
+      const { player } = setup();
+      const { drain } = recorder(player);
+      await player.setQueue(tracks, { startIndex: 3 });
+      drain();
+
+      await player.playAt(0);
+      expect(drain()).toEqual(['skipped:d', 'played:a']);
+    });
+
+    it('does not report played again when a resumed play is retried', async () => {
+      vi.useFakeTimers();
+      try {
+        const { player, fake } = setup({
+          resolve: async (t) => ({ url: `/remote/${t.id}.mp3`, kind: 'remote' }),
+        });
+        const { drain } = recorder(player);
+        await player.setQueue(tracks.slice(0, 2), { startIndex: 0 });
+        expect(drain()).toEqual(['played:a']);
+
+        await player.pause();
+        fake.rejectPlayWith = { code: 'unsupported', message: 'not ready' };
+        await player.play();
+        expect(player.retrying()).toBe(true);
+
+        fake.rejectPlayWith = null;
+        await wait(UNSUPPORTED_REMOTE_RETRY_DELAYS_MS[0]);
+        expect(player.status()).toBe('playing');
+        expect(drain()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

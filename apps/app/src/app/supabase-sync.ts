@@ -190,10 +190,13 @@ export async function pageAll<T>(
   table: string,
   columns: string,
   order: readonly string[],
+  /** Optional lower bound: only rows where `column >= value`. */
+  atLeast?: { column: string; value: string },
 ): Promise<T[]> {
   const out: T[] = [];
   for (let from = 0; ; from += PAGE) {
     let query = client.from(table).select(columns);
+    if (atLeast) query = query.gte(atLeast.column, atLeast.value);
     for (const column of order) query = query.order(column, { ascending: true });
     const { data, error } = await query.range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);

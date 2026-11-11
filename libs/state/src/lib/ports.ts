@@ -498,6 +498,25 @@ export abstract class StackSyncPort {
   }): Promise<SyncStackPushResult>;
 }
 
+/** One recent exclusion as it syncs: a song and when it was excluded. */
+export interface SyncExclusion {
+  trackId: string;
+  /** Epoch milliseconds of the latest exclusion of this song. */
+  at: number;
+}
+
+/**
+ * Recent exclusions (songs played, skipped or removed in the last 12 hours)
+ * with the signed-in account. Provided by the app; without it exclusions stay
+ * on this device.
+ */
+export abstract class ExclusionSyncPort {
+  /** The account's exclusions still inside the window: track id -> epoch ms. */
+  abstract pull(): Promise<Record<string, number>>;
+  /** Upload these exclusions; the cloud keeps the later time per song. */
+  abstract push(items: Array<SyncExclusion>): Promise<void>;
+}
+
 /**
  * Keeps downloads running while the app is in the background or the screen
  * is off (Android: a foreground service with an ongoing notification plus

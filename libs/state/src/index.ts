@@ -22,6 +22,7 @@ export * from './lib/metadata-enrich.store';
 export * from './lib/artist-image.store';
 export * from './lib/sync.store';
 export * from './lib/stack-sync.store';
+export * from './lib/exclusion-sync.store';
 export * from './lib/play-counts.store';
 export * from './lib/curated.store';
 export * from './lib/preview-player.service';

@@ -117,6 +117,8 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     isPlaying,
     intendsToPlay: false,
     applyOrder,
+    /** PlayerStore wires the Keep Spinning dedupe into the engine; no events here. */
+    setExclusionListener: vi.fn(),
     play,
     pause,
     seekIfDrifted,

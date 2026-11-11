@@ -8,6 +8,7 @@ import {
 import { PlayerService } from '@open-record/player';
 import { AuthStore } from './auth.store';
 import { AutoDownloadStore } from './auto-download.store';
+import { ExclusionSyncStore } from './exclusion-sync.store';
 import { ImportStore } from './import.store';
 import { OfflineStore } from './offline.store';
 import { PlayCountsStore } from './play-counts.store';
@@ -45,9 +46,11 @@ export function provideState(): EnvironmentProviders {
       // Your Stack sync starts after the saved queue is restored, so a pull
       // cannot be overwritten by the restore.
       const stackSync = inject(StackSyncStore);
+      const exclusionSync = inject(ExclusionSyncStore);
       void player.restore().finally(() => {
         session.start();
         stackSync.start();
+        exclusionSync.start();
       });
       // Registers the Spotify placeholder source; resumes a running import
       // (Spotify matching and YouTube song-detail lookup).

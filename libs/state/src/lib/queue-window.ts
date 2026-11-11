@@ -15,20 +15,31 @@ export type QueueKind = 'auto' | 'playlist';
 /** Whether a track may be drawn as an autoplay fill. */
 export type EligibleFn = (track: Track) => boolean;
 
-/** How long a song counts as recently queued for autoplay fills. */
+/** How long a song stays excluded from shuffled autoplay fills after it was stamped. */
 export const RECENTLY_QUEUED_TTL_MS = 12 * 60 * 60 * 1000;
 
-/** Song id -> epoch ms when it last entered a Keep Spinning window. */
+/** Song id -> epoch ms of its last stamp (played, skipped, jumped over or removed). */
 export type RecentlyQueued = Record<string, number>;
 
-/** Drop records that are older than the TTL (or otherwise not usable). */
+/**
+ * Clock skew allowed for a stamp. A stamp later than `now` plus this is bad
+ * data (a wrong clock or a corrupt record), not a real play, and must not pin a song.
+ */
+export const RECENTLY_QUEUED_FUTURE_SKEW_MS = 60 * 1000;
+
+/** Whether a stamp is usable at `now`: not in the future beyond the skew, and within the TTL. */
+function isLive(at: number, now: number): boolean {
+  return at <= now + RECENTLY_QUEUED_FUTURE_SKEW_MS && now - at < RECENTLY_QUEUED_TTL_MS;
+}
+
+/** Drop records that are expired, future-dated beyond the skew, or otherwise not usable. */
 export function pruneRecentlyQueued(
   record: RecentlyQueued,
   now: number,
 ): RecentlyQueued {
   const out: RecentlyQueued = {};
   for (const [id, at] of Object.entries(record)) {
-    if (now - at < RECENTLY_QUEUED_TTL_MS) out[id] = at;
+    if (isLive(at, now)) out[id] = at;
   }
   return out;
 }
@@ -40,15 +51,24 @@ export function isRecentlyQueued(
   now: number,
 ): boolean {
   const at = record[songId];
-  return at !== undefined && now - at < RECENTLY_QUEUED_TTL_MS;
+  return at !== undefined && isLive(at, now);
 }
 
-/** Accept a stored record of song id -> epoch ms; anything else is empty. */
-export function parseRecentlyQueued(raw: unknown): RecentlyQueued {
+/**
+ * Accept a stored record of song id -> epoch ms; anything else is empty.
+ * Future-dated stamps are dropped here, before any merge with a real stamp.
+ */
+export function parseRecentlyQueued(raw: unknown, now: number): RecentlyQueued {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const out: RecentlyQueued = {};
   for (const [id, at] of Object.entries(raw)) {
-    if (typeof at === 'number' && Number.isFinite(at)) out[id] = at;
+    if (
+      typeof at === 'number' &&
+      Number.isFinite(at) &&
+      at <= now + RECENTLY_QUEUED_FUTURE_SKEW_MS
+    ) {
+      out[id] = at;
+    }
   }
   return out;
 }

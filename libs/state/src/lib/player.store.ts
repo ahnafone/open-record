@@ -8,10 +8,12 @@ import {
   signal,
   untracked,
 } from '@angular/core';
+import type { Signal } from '@angular/core';
 import type { CommandResult, Track } from '@open-record/models';
 import { newEntryId } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
 import type {
+  ExclusionEvent,
   PlayerError,
   RepeatMode,
   SetQueueOptions,
@@ -314,10 +316,18 @@ export class PlayerStore {
   /** `seq` of the last play handed to the counts store. */
   private seenPlaySeq = 0;
   private lastSaved = '';
-  /** Songs that recently entered a Keep Spinning window (per device). */
+  /**
+   * Songs recently played, skipped, jumped over or removed from Keep Spinning
+   * (per device). Stamped only from engine events; never on enqueue.
+   */
   private recentlyQueued: RecentlyQueued = {};
+  private readonly _exclusionVersion = signal(0);
+  /** Bumped on every local stamp. Remote merges do not bump it. */
+  readonly exclusionVersion: Signal<number> = this._exclusionVersion.asReadonly();
   /** Set once the stored record is merged in; no write happens before that. */
   private recentlyQueuedLoaded = false;
+  /** Set by sign-out; the stored record belongs to the signed-out account. */
+  private recentlyQueuedCleared = false;
   private recentlyQueuedSaveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set when the queue started locally because the server refused it. */
   private readonly fallbackNotice = signal<string | null>(null);
@@ -344,6 +354,13 @@ export class PlayerStore {
   );
 
   constructor() {
+    // Keep Spinning dedupe: the engine reports what happened to each song.
+    // A session that owns playback (Cast or another device) writes no stamps.
+    this.engine.setExclusionListener((event: ExclusionEvent) => {
+      if (this.session.ownsPlayback()) return;
+      this.stampExclusion(event.trackId, Date.now());
+    });
+
     // Persist whenever queue, current track, modes, status or (coarsely)
     // position change. Reads the signals directly instead of `snapshot()` so
     // a tick neither allocates the id list nor re-runs this effect; `flush()`
@@ -466,14 +483,12 @@ export class PlayerStore {
     const kind: QueueKind = opts.queue ?? 'auto';
     const shuffle = opts.shuffle ?? this.shuffle();
     const now = Date.now();
-    // Shuffled fills skip songs queued within 12h. The tapped track is never filtered.
+    // Shuffled fills skip songs stamped within 12h. The tapped track is never filtered.
     const built = buildQueueWindow(tracks, startIndex, kind, {
       shuffle,
       eligible: this.autoplayEligible(now, shuffle),
     });
     this.library.remember(tracks);
-    // The new window's tracks (tapped one and what follows it) are queued now.
-    this.markQueued(built.tracks.slice(Math.max(built.cursor, 0)), now);
     const autoplay = opts.autoplay ?? true;
 
     // An empty context clears the queue rather than opening a session with
@@ -669,12 +684,43 @@ export class PlayerStore {
     return (track) => !isRecentlyQueued(this.recentlyQueued, track.id, now);
   }
 
-  /** Note songs that just entered a Keep Spinning window; persisted per device. */
-  private markQueued(tracks: readonly Track[], now = Date.now()): void {
-    if (!tracks.length) return;
+  /** Stamp `trackId` as played, skipped, jumped over or removed at `now`; persisted per device. */
+  private stampExclusion(trackId: string, now: number): void {
     const next = pruneRecentlyQueued(this.recentlyQueued, now);
-    for (const track of tracks) next[track.id] = now;
+    next[trackId] = now;
     this.recentlyQueued = next;
+    this._exclusionVersion.update((version) => version + 1);
+    this.saveRecentlyQueued();
+  }
+
+  /** The unexpired exclusion record (song id -> epoch ms), as the sync layer reads it. */
+  recentExclusions(): Readonly<Record<string, number>> {
+    return pruneRecentlyQueued(this.recentlyQueued, Date.now());
+  }
+
+  /**
+   * Merge a remote exclusion record: per song the newest time wins, and expired
+   * or invalid entries are dropped. Persisted like a local stamp, but does not
+   * bump `exclusionVersion`.
+   */
+  mergeRemoteExclusions(remote: Record<string, number>): void {
+    const now = Date.now();
+    const merged: RecentlyQueued = { ...this.recentlyQueued };
+    for (const [id, at] of Object.entries(parseRecentlyQueued(remote, now))) {
+      merged[id] = Math.max(at, merged[id] ?? 0);
+    }
+    this.recentlyQueued = pruneRecentlyQueued(merged, now);
+    this.saveRecentlyQueued();
+  }
+
+  /**
+   * Forget every exclusion (sign-out), so one account's recent songs are never
+   * pushed into the next account on this device. Does not bump `exclusionVersion`.
+   */
+  clearRecentExclusions(): void {
+    this.recentlyQueued = {};
+    // A restore still reading the stored record must not merge it back in.
+    this.recentlyQueuedCleared = true;
     this.saveRecentlyQueued();
   }
 
@@ -1151,7 +1197,6 @@ export class PlayerStore {
     }
     if (applied) {
       reserved.commit();
-      this.markQueued(add);
       for (const track of tracks) source.createdIds.add(track.entryId);
     } else {
       reserved.release();
@@ -1166,7 +1211,6 @@ export class PlayerStore {
       const add = source.window.take(source.window.limit - upcoming, eligible);
       if (add.length) {
         this.library.remember(add);
-        this.markQueued(add);
         this.engine.add(add);
       }
     }
@@ -1262,14 +1306,17 @@ export class PlayerStore {
   /** Merge the stored per-device record (max timestamp wins), then prune it. */
   private async loadRecentlyQueued(): Promise<void> {
     try {
-      const stored = parseRecentlyQueued(
-        await this.storage.settings.get<JsonValue>(RECENTLY_QUEUED_KEY),
-      );
+      const raw = await this.storage.settings.get<JsonValue>(RECENTLY_QUEUED_KEY);
+      const now = Date.now();
+      // Checked after the read: a sign-out during restore wins over the stored record.
+      const stored = this.recentlyQueuedCleared
+        ? {}
+        : parseRecentlyQueued(raw, now);
       const merged: RecentlyQueued = { ...stored };
       for (const [id, at] of Object.entries(this.recentlyQueued)) {
         merged[id] = Math.max(at, merged[id] ?? 0);
       }
-      this.recentlyQueued = pruneRecentlyQueued(merged, Date.now());
+      this.recentlyQueued = pruneRecentlyQueued(merged, now);
     } catch {
       // Unreadable record: keep what this session queued so far.
     } finally {

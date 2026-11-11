@@ -149,6 +149,18 @@ export const PLAY_COMPLETE_RATIO = 0.9;
 export const SEEK_RESTART_SEC = 1;
 
 /**
+ * What happened to a song, for the Keep Spinning autoplay dedupe:
+ * - `played`: it started playing as the current track.
+ * - `skipped`: it was current and the cursor left it before it finished.
+ * - `jumped`: the cursor moved past a Keep Spinning entry that never played.
+ * - `removed`: a single Keep Spinning entry was removed (not Your Stack, not a clear).
+ */
+export interface ExclusionEvent {
+  readonly kind: 'played' | 'skipped' | 'jumped' | 'removed';
+  readonly trackId: string;
+}
+
+/**
  * Queue and transport logic on top of an AudioEngine. Framework-light: only
  * Angular signals, no DI, so it runs in plain unit tests with a fake engine.
  */
@@ -291,6 +303,14 @@ export class PlayerEngine {
   private readonly transientError?: (err: unknown) => string | undefined;
   /** Neighbour window the engine was last given; skips identical refreshes. */
   private neighbourSignature = '';
+  private exclusionListener: ((event: ExclusionEvent) => void) | null = null;
+  /**
+   * Bumped by each user-started load (not by a retry of the same play). Retries
+   * mint a new load token, so the `played` dedupe keys on this instead.
+   */
+  private playInstance = 0;
+  /** The track and play instance already reported as `played`. */
+  private announced: { trackId: string; instance: number } | null = null;
 
   constructor(
     private readonly engine: AudioEngine,
@@ -311,6 +331,17 @@ export class PlayerEngine {
         this._error.set(null);
         this._status.set('playing');
         this.preloadNeighbours();
+        // Once per play: a resume after pause, or a retry of the same play, is
+        // not a new play.
+        const started = this.current();
+        if (
+          started &&
+          (this.announced?.trackId !== started.id ||
+            this.announced.instance !== this.playInstance)
+        ) {
+          this.announced = { trackId: started.id, instance: this.playInstance };
+          this.report('played', started.id);
+        }
       },
       onPaused: () => {
         if (this.fromOutgoingMedia()) return;
@@ -341,6 +372,19 @@ export class PlayerEngine {
       onSkipped: (dir, trackId?: string) =>
         void this.handleSkipped(dir, trackId),
     });
+  }
+
+  /**
+   * Receive the `ExclusionEvent`s the Keep Spinning dedupe needs. One listener;
+   * `null` detaches. Events are sent synchronously from the engine's own
+   * transitions, so a listener must not call back into the engine.
+   */
+  setExclusionListener(listener: ((event: ExclusionEvent) => void) | null): void {
+    this.exclusionListener = listener;
+  }
+
+  private report(kind: ExclusionEvent['kind'], trackId: string): void {
+    this.exclusionListener?.({ kind, trackId });
   }
 
   /**
@@ -529,7 +573,11 @@ export class PlayerEngine {
     ) {
       return false;
     }
-    return this.removeIndices(new Set([queueIndex]));
+    const trackId = this._queue()[queueIndex]?.id;
+    const isStack = this._stack().some((slot) => slot.index === queueIndex);
+    const removed = this.removeIndices(new Set([queueIndex]));
+    if (removed && !isStack && trackId !== undefined) this.report('removed', trackId);
+    return removed;
   }
 
   /**
@@ -834,7 +882,7 @@ export class PlayerEngine {
     if (this._cursor() < 0) return this.startStack();
     const target = this.peek(1);
     if (target === -1) return false;
-    this.moveTo(target);
+    this.moveTo(target, 1);
     await this.loadCurrent(true);
     return true;
   }
@@ -847,7 +895,7 @@ export class PlayerEngine {
       this.resetListen();
       return;
     }
-    this.moveTo(target);
+    this.moveTo(target, -1);
     await this.loadCurrent(true);
   }
 
@@ -967,7 +1015,10 @@ export class PlayerEngine {
    * Move the cursor. Landing on a play-next item consumes it; the rest of the
    * play-next list is then kept right after the new cursor.
    */
-  private moveTo(cursor: number): void {
+  private moveTo(cursor: number, step?: 1 | -1): void {
+    // A move that is not one step in the caller's direction is a repeat-all wrap.
+    const wrapped = step !== undefined && cursor !== this._cursor() + step;
+    this.reportPassed(cursor, wrapped);
     this._cursor.set(cursor);
     const at = this._order()[cursor];
     this.played.add(at);
@@ -975,6 +1026,34 @@ export class PlayerEngine {
       this._stack.update((s) => s.filter((slot) => slot.index !== at));
     }
     this.placePending();
+  }
+
+  /**
+   * Report what a cursor move to `to` passes over, before it happens: the
+   * current track is `skipped` unless it finished. Only a forward move jumps:
+   * each Keep Spinning entry strictly between the old and new positions that
+   * never played is `jumped`. A backward move, or a repeat-all wrap, passes
+   * over nothing. Your Stack slots are not reported. Re-tapping the current row
+   * reports nothing.
+   */
+  private reportPassed(to: number, wrapped: boolean): void {
+    const from = this._cursor();
+    if (!this.exclusionListener || from < 0 || from === to) return;
+    const order = this._order();
+    const queue = this._queue();
+    const leaving = queue[order[from]];
+    if (leaving && this.countedToken !== this.loadToken) {
+      this.report('skipped', leaving.id);
+    }
+    if (wrapped || to < from) return;
+    const stacked = new Set(this._stack().map((slot) => slot.index));
+    for (let p = from + 1; p < to; p++) {
+      const i = order[p];
+      const passed = queue[i];
+      if (passed && !this.played.has(i) && !stacked.has(i)) {
+        this.report('jumped', passed.id);
+      }
+    }
   }
 
   /** Re-establish the invariant: pending stack slots follow the cursor. */
@@ -1115,7 +1194,7 @@ export class PlayerEngine {
         this.countPlay(true);
       }
     }
-    this.moveTo(target);
+    this.moveTo(target, direction === 'next' ? 1 : -1);
     await this.loadCurrent(true);
   }
 
@@ -1137,6 +1216,7 @@ export class PlayerEngine {
 
   /** User-initiated load: a new track (or a manual replay) starts over. */
   private async loadCurrent(autoplay: boolean): Promise<void> {
+    this.playInstance++;
     this.attempts = 0;
     await this.attemptLoad(autoplay);
   }

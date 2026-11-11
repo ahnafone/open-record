@@ -77,6 +77,8 @@ export const SETTINGS_KEYS = {
   syncState: 'syncState',
   /** Your Stack entries last known in the account: `{ userId, entries: { [entryId]: position } }` (no migration: new key, absent = nothing synced yet). Ids and positions only. */
   stackSync: 'stackSync',
+  /** Recent exclusions last pushed or pulled for the account: `{ userId, times: { [trackId]: epochMs } }` (no migration: new key, absent = nothing synced yet). Track ids and times only. */
+  exclusionSync: 'exclusionSync',
   /** Stable per-install id used for grouping session devices (no migration: new key, absent = generated on first read). */
   deviceId: 'deviceId',
   /** User-visible device name for the session picker (no migration: new key, absent = platform default). */

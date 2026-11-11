@@ -25,6 +25,7 @@ import {
   CastFilePort,
   CastUploadPort,
   DeviceStoragePort,
+  ExclusionSyncPort,
   ImportFilePort,
   LocalMediaPort,
   METADATA_FETCH,
@@ -64,6 +65,7 @@ import {
 } from './server-session';
 import { SupabaseAuth } from './supabase-auth';
 import { SupabasePlayCounts } from './supabase-play-counts';
+import { SupabaseExclusionSync } from './supabase-exclusions';
 import { SupabaseStackSync } from './supabase-stack';
 import { SupabaseSync } from './supabase-sync';
 import { SUPABASE_BUILD_CONFIG } from './supabase.config';
@@ -368,6 +370,8 @@ export const appConfig: ApplicationConfig = {
     { provide: PlayCountsPort, useValue: new SupabasePlayCounts(supabase) },
     // Your Stack (queue entries) for signed-in users (same client).
     { provide: StackSyncPort, useValue: new SupabaseStackSync(supabase) },
+    // Recent exclusions (12 h) for signed-in users, so shuffled fills skip what another device excluded (same client).
+    { provide: ExclusionSyncPort, useValue: new SupabaseExclusionSync(supabase) },
     // Player sync: WebSocket on the web, HTTP polling on native. Optional: the
     // stores only use it when provided, so anonymous/local mode is unchanged.
     { provide: SessionPort, useFactory: () => createSessionPort(sessionOptions()) },

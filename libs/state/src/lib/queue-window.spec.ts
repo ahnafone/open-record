@@ -4,6 +4,7 @@ import {
   PLAYLIST_QUEUE_AHEAD,
   QUEUE_HISTORY_KEEP,
   QueueWindow,
+  RECENTLY_QUEUED_FUTURE_SKEW_MS,
   buildQueueWindow,
   isRecentlyQueued,
   parseRecentlyQueued,
@@ -346,11 +347,28 @@ describe('queue window', () => {
     });
 
     it('parses only numeric timestamps from stored data', () => {
-      expect(parseRecentlyQueued({ a: 5, b: 'x', c: Number.NaN, d: null })).toEqual({
+      expect(parseRecentlyQueued({ a: 5, b: 'x', c: Number.NaN, d: null }, 10)).toEqual({
         a: 5,
       });
-      expect(parseRecentlyQueued(null)).toEqual({});
-      expect(parseRecentlyQueued([1, 2])).toEqual({});
+      expect(parseRecentlyQueued(null, 10)).toEqual({});
+      expect(parseRecentlyQueued([1, 2], 10)).toEqual({});
+    });
+
+    it('drops future-dated stamps so they cannot pin a song', () => {
+      const now = 10_000;
+      const skew = RECENTLY_QUEUED_FUTURE_SKEW_MS;
+      const future = { far: now + twelveH, near: now + skew, ok: now - 1 };
+
+      // Within the skew allowance a stamp is kept; beyond it, it is dropped.
+      expect(pruneRecentlyQueued({ ...future, late: now + skew + 1 }, now)).toEqual({
+        near: now + skew,
+        ok: now - 1,
+      });
+      expect(parseRecentlyQueued(future, now)).toEqual({
+        near: now + skew,
+        ok: now - 1,
+      });
+      expect(isRecentlyQueued({ far: now + twelveH }, 'far', now)).toBe(false);
     });
   });
 });

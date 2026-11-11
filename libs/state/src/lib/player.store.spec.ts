@@ -7,7 +7,12 @@ import type {
   Track,
 } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
-import type { PlayerStatus, RepeatMode, StackEntry } from '@open-record/player';
+import type {
+  ExclusionEvent,
+  PlayerStatus,
+  RepeatMode,
+  StackEntry,
+} from '@open-record/player';
 import { StoragePort, createInMemoryStorage } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { PlayCountsStore } from './play-counts.store';
@@ -15,6 +20,7 @@ import { PlaylistsStore } from './playlists.store';
 import {
   PlayerStore,
   QUEUE_SAVE_INTERVAL_MS,
+  RECENTLY_QUEUED_KEY,
   SessionRefusedError,
 } from './player.store';
 import { SessionStore } from './session.store';
@@ -76,6 +82,7 @@ function fakeEngine() {
   const loadSeq = signal(0);
   let entrySeq = 0;
   const newEntryId = () => `fake-entry-${++entrySeq}`;
+  let exclusionListener: ((event: ExclusionEvent) => void) | null = null;
   const stackIndexes = () => slots().map((slot) => slot.index);
   /** Where a stack entry added to the end lands. */
   const stackTail = () =>
@@ -212,6 +219,11 @@ function fakeEngine() {
     toggleMute: vi.fn(),
     seekIfDrifted: vi.fn(async () => undefined),
     applyOrder: vi.fn(async () => ({ reloaded: false, moved: false })),
+    setExclusionListener: vi.fn((listener: ((event: ExclusionEvent) => void) | null) => {
+      exclusionListener = listener;
+    }),
+    /** Test hook: deliver an exclusion event the way the engine does. */
+    emitExclusion: (event: ExclusionEvent) => exclusionListener?.(event),
   };
 }
 
@@ -1322,6 +1334,13 @@ describe('PlayerStore', () => {
 
       afterEach(() => vi.useRealTimers());
 
+      /** Stamp `fake:from`..`fake:to` as played, the way the engine reports a play. */
+      const playedIds = (engine: FakeEngine, from: number, to: number) => {
+        for (let i = from; i <= to; i++) {
+          engine.emitExclusion({ kind: 'played', trackId: `fake:${i}` });
+        }
+      };
+
       it('shuffle off: replaying the same list queues the next songs in list order', async () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
@@ -1352,8 +1371,8 @@ describe('PlayerStore', () => {
         const engine = fakeEngine();
         configure(engine, fakeSession());
         const player = TestBed.inject(PlayerStore);
-        await player.playTracks(manyTracks(60), 0);
-        // fake:0..fake:50 entered the first window.
+        // fake:0..fake:50 were played: stamped now, and only now.
+        playedIds(engine, 0, 50);
 
         // Shuffled: the tapped track plus the only eligible songs, 51..59.
         engine.shuffle.set(true);
@@ -1366,6 +1385,7 @@ describe('PlayerStore', () => {
 
         // After 12h the recently queued songs are eligible again.
         vi.setSystemTime(new Date(Date.parse('2026-01-01T00:00:00Z') + day + 60_000));
+        expect(player.recentExclusions()).toEqual({});
         await player.playTracks(manyTracks(60), 0);
         const third = ids(engine.setQueue.mock.calls.at(-1)?.[0] ?? []);
         // 50 of the 59 others are drawn, so at least 41 come from fake:1..50.
@@ -1384,9 +1404,10 @@ describe('PlayerStore', () => {
         const tracks = manyTracks(60);
         await player.playTracks(tracks, 0);
 
+        playedIds(engine, 0, 50);
         engine.shuffle.set(true);
         await player.playTracks(tracks, 0);
-        // The shuffled draw left fake:1..50 in the pool (all recently queued).
+        // The shuffled draw left fake:1..50 in the pool (all recently played).
         engine.toggleShuffle.mockImplementationOnce(() => engine.shuffle.set(false));
         await player.toggleShuffle();
 
@@ -1405,7 +1426,7 @@ describe('PlayerStore', () => {
         const engine = fakeEngine();
         configure(engine, fakeSession());
         const player = TestBed.inject(PlayerStore);
-        await player.playTracks(manyTracks(60), 0);
+        playedIds(engine, 0, 50);
 
         engine.shuffle.set(true);
         engine.repeat.set('all');
@@ -1426,11 +1447,11 @@ describe('PlayerStore', () => {
         const engine = fakeEngine();
         configure(engine, fakeSession());
         const player = TestBed.inject(PlayerStore);
-        // fake:0..fake:50 are queued now, so they count as recently queued.
-        await player.playTracks(manyTracks(51), 0);
+        // fake:0..fake:50 were played, so they count as recently played.
+        playedIds(engine, 0, 50);
 
         // Shuffled: the next play queues fake:0 and fake:51..59. The pool it
-        // leaves is fake:1..50, all recently queued, so the window adds nothing.
+        // leaves is fake:1..50, all recently played, so the window adds nothing.
         engine.shuffle.set(true);
         await player.playTracks(manyTracks(60), 0);
         engine.add.mockClear();
@@ -1438,6 +1459,118 @@ describe('PlayerStore', () => {
         TestBed.tick();
 
         expect(engine.add).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('exclusion stamps', () => {
+      const day = 12 * 60 * 60 * 1000;
+      afterEach(() => vi.useRealTimers());
+
+      it('enqueueing and top-ups never stamp', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        engine.shuffle.set(true);
+        await player.playTracks(manyTracks(60), 0);
+        engine.add.mockClear();
+        engine.currentIndex.set(50);
+        TestBed.tick();
+
+        expect(engine.add).toHaveBeenCalled();
+        expect(player.recentExclusions()).toEqual({});
+        expect(player.exclusionVersion()).toBe(0);
+      });
+
+      it('stamps each engine event and bumps exclusionVersion once per local stamp', () => {
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        const kinds: ExclusionEvent['kind'][] = ['played', 'skipped', 'jumped', 'removed'];
+        kinds.forEach((kind, i) => engine.emitExclusion({ kind, trackId: `fake:${i}` }));
+
+        expect(Object.keys(player.recentExclusions()).sort()).toEqual([
+          'fake:0',
+          'fake:1',
+          'fake:2',
+          'fake:3',
+        ]);
+        expect(player.exclusionVersion()).toBe(4);
+      });
+
+      it('stamps nothing while a session owns playback', () => {
+        const engine = fakeEngine();
+        const session = fakeSession();
+        configure(engine, session);
+        const player = TestBed.inject(PlayerStore);
+        session.ownsPlayback.set(true);
+        engine.emitExclusion({ kind: 'played', trackId: 'fake:1' });
+
+        expect(player.recentExclusions()).toEqual({});
+        expect(player.exclusionVersion()).toBe(0);
+      });
+
+      it('merges remote stamps newest-wins, drops expired and invalid ones, and does not bump the version', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const start = Date.parse('2026-01-01T00:00:00Z');
+        vi.setSystemTime(start);
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        engine.emitExclusion({ kind: 'played', trackId: 'fake:1' });
+        vi.setSystemTime(start + 5000);
+        engine.emitExclusion({ kind: 'played', trackId: 'fake:2' });
+        expect(player.exclusionVersion()).toBe(2);
+
+        player.mergeRemoteExclusions({
+          'fake:1': start + 1000,
+          'fake:2': start + 100,
+          'fake:3': start - day - 1,
+          'fake:4': 'bad' as unknown as number,
+        });
+
+        expect(player.recentExclusions()).toEqual({
+          'fake:1': start + 1000,
+          'fake:2': start + 5000,
+        });
+        expect(player.exclusionVersion()).toBe(2);
+      });
+
+      it('does not let a future-dated remote stamp displace a real local one', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const start = Date.parse('2026-01-01T00:00:00Z');
+        vi.setSystemTime(start);
+        const engine = fakeEngine();
+        configure(engine, fakeSession());
+        const player = TestBed.inject(PlayerStore);
+        engine.emitExclusion({ kind: 'played', trackId: 'fake:1' });
+
+        player.mergeRemoteExclusions({ 'fake:1': start + day });
+
+        expect(player.recentExclusions()).toEqual({ 'fake:1': start });
+      });
+
+      it('does not merge a stored record back in after sign-out during restore', async () => {
+        const storage = createInMemoryStorage();
+        let releaseRead!: (value: unknown) => void;
+        const storedRead = new Promise((resolve) => (releaseRead = resolve));
+        vi.spyOn(storage.settings, 'get').mockImplementation(((key: string) =>
+          key === RECENTLY_QUEUED_KEY ? storedRead : Promise.resolve(null)) as never);
+        const engine = fakeEngine();
+        configure(engine, fakeSession(), storage);
+        const player = TestBed.inject(PlayerStore);
+
+        const restoring = player.restore();
+        player.clearRecentExclusions();
+        // Sign-out happened while the stored record was still being read.
+        releaseRead({ 'fake:old': Date.now() });
+        await restoring;
+
+        expect(player.recentExclusions()).toEqual({});
+        // A stamp made after sign-out still counts.
+        engine.emitExclusion({ kind: 'played', trackId: 'fake:new' });
+        expect(Object.keys(player.recentExclusions())).toEqual(['fake:new']);
       });
     });
   });
