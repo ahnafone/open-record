@@ -150,7 +150,7 @@ and the runbooks.
 - **Playlists:** play or shuffle, add records, rename, delete, and reorder. Each row shows its source,
   download state and duration.
 - **Now playing and queue:** full-screen player with sleeve art, seek bar and track details, a
-  persistent mini player, Play next and an editable Up next list. Desktop has a resizable side panel,
+  persistent mini player, Play next, Add to Stack and an editable queue (Your Stack and Keep Spinning). Desktop has a resizable side panel,
   keyboard shortcuts and media-key support.
 - **Imports:** audio files from the device with editable tags and art; Spotify Exportify CSV or JSON
   from a data download; YouTube / YT Music playlist or song links. Matching runs through your server,
