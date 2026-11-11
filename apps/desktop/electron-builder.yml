@@ -58,7 +58,7 @@ extraMetadata:
   # Must equal the root package.json version: this is what app.getVersion()
   # reports and what the updater compares against. Checked by
   # scripts/check-version-sync.mjs.
-  version: 0.0.4
+  version: 0.0.5
   description: Open Record desktop app
   author: Open Record contributors
   # Electron's Linux app_id / WM_CLASS; linux.syncDesktopName uses it for the

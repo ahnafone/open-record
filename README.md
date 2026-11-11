@@ -1,24 +1,24 @@
 # Open Record
 
 A vinyl record-shop listening room for your phone and desktop: browse the crates, build playlists,
-import your own music, and play it all on a virtual turntable. **Version 0.0.4 (beta).**
+import your own music, and play it all on a virtual turntable. **Version 0.0.5 (beta).**
 
 ![Open Record overview](docs/screenshots/00-overview.png)
 
 ## Download
 
-Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md). Checksums for the desktop installers are in `SHA256SUMS.txt` on the release page.
+Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md). Checksums for every release file are in `SHA256SUMS.txt` on the release page.
 
 | Platform | File | Notes |
 |---|---|---|
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.4; macOS installers coming later |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.5; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+; beta-tested; see [release builds](#release-builds) |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | Not tested yet. Mac, Xcode and a free Apple ID; re-sign every 7 days |
 
-Desktop installers are unsigned and there is no auto-update: reinstall to update. There is no App
+Desktop installers are unsigned. Windows and AppImage builds update in the app; `.deb` and macOS builds need a reinstall over the old version. There is no App
 Store, TestFlight, Play Store or enterprise build.
 
 > **Notices**
@@ -29,14 +29,14 @@ Store, TestFlight, Play Store or enterprise build.
 
 ## Status
 
-Open Record 0.0.4 is a beta: an Angular + Capacitor app (Android, iOS and web) with a bundled
+Open Record 0.0.5 is a beta: an Angular + Capacitor app (Android, iOS and web) with a bundled
 public-domain catalogue, local imports, playlists, a queue, background downloads and optional
 accounts and sync. The Electron desktop app bundles the UI and local server, and
 `.github/workflows/desktop-build.yml` builds the desktop installers.
 
 - **Android:** beta-tested on devices.
 - **iPhone:** not tested yet. It is build-from-source only (see [docs/ios-install.md](docs/ios-install.md)).
-- **Desktop:** Windows and Linux installers are unsigned and do not auto-update. macOS installers are not part of v0.0.4; build from source (see [docs/desktop.md](docs/desktop.md#build-from-source)).
+- **Desktop:** installers are unsigned. Windows and AppImage builds update in the app; `.deb` builds only notify you of a new version. macOS installers are not part of v0.0.5; build from source (see [docs/desktop.md](docs/desktop.md#build-from-source)).
 - Collaborators is hidden in this release; its role logic is kept for later.
 
 ## Web app
@@ -119,7 +119,7 @@ Electron application.
   Supabase project URL and anon key. It refuses `service_role` and `sb_secret_...` keys.
 - **Phones on this network:** the toggle restarts the local server on all interfaces and shows the
   LAN address and QR code. Use a trusted Wi-Fi only (plain HTTP), and never port-forward 47900.
-- **Unsigned, no auto-update:** expect SmartScreen warnings on Windows; reinstall to update. The
+- **Unsigned:** expect SmartScreen warnings on Windows. Windows and AppImage builds update in the app; `.deb` builds need a reinstall. The
   data folder and fixed origin preserve your library.
 
 See [docs/desktop.md](docs/desktop.md) for install, data folders, Supabase and troubleshooting.
@@ -192,9 +192,10 @@ and the runbooks.
 Build and measure with release builds, not debug.
 
 - **Desktop:** `.github/workflows/desktop-build.yml` builds the Linux `.deb`/AppImage and Windows NSIS
-  installer on a `v*` tag, writes `SHA256SUMS.txt`, and uploads them to the GitHub release. macOS jobs
-  are removed for v0.0.1 (no macOS runner available). All desktop installers are unsigned; there is no
-  auto-update.
+  installer on a `v*` tag, writes `SHA256SUMS.txt` and the update feeds `latest.yml` and
+  `latest-linux.yml`, and uploads them to the GitHub release. macOS jobs are removed (no macOS runner
+  available). All desktop installers are unsigned. Windows and AppImage builds self-update; `.deb` and
+  macOS builds only notify.
 - **Android:** `npm run android:release` builds the signed APK when `keystore.properties` is
   configured (keystore outside the repo); `android:release:install` installs it. Debug signing is
   opt-in with `-PallowDebugSigning` for local performance builds. The signed `OpenRecord-android.apk`

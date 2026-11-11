@@ -1,6 +1,6 @@
 {
   "name": "@open-record/website",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": true,
   "description": "Open Record GitHub Pages site (static Astro, served under /open-record/).",
   "type": "module",

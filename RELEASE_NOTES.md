@@ -1,15 +1,14 @@
-# Open Record v0.0.4 (beta)
+# Open Record v0.0.5 (beta)
 
 Open Record is a vinyl record-shop listening room: browse the crates, build playlists, import your
-own music and play it on a virtual turntable. This is the fourth beta.
+own music and play it on a virtual turntable. This is the fifth beta.
 
-## What's new in v0.0.4
+## What's new in v0.0.5
 
-- **Android APK on the release page:** the signed `OpenRecord-android.apk` is now built by CI and attached to every release alongside the desktop installers and `SHA256SUMS.txt`.
-- **Desktop app can use the public server:** the public-server switch in Settings now appears on desktop too, and switching back keeps your own server saved.
-- **Easier phone connect on desktop:** the desktop page now shows step-by-step instructions, a QR code, a copyable LAN address and troubleshooting tips.
-- **Access requests from any connection:** "Manage access requests" now shows for the server owner whenever the project supports it, including when running against your own server.
-- **Check again after approval:** accounts that were not approved can use a "Check again" button instead of signing out.
+- **In-app updates:** Open Record checks GitHub releases for a newer version and shows "Update is Available" or "Restart to Update" on the About item in the sidebar. The About page has Check for updates, auto update and Skip this version controls, and shows the release notes.
+- **Windows and Linux AppImage:** the update downloads when you choose it (or automatically if auto update is on) and installs on restart. The `.deb` and macOS builds only notify you.
+- **Android:** the app downloads the APK, verifies its SHA-256, then asks Android to install it. You confirm the install. The same signing key is required.
+- **Release assets:** each release now also carries `SHA256SUMS` (the APK checksum the app uses), `latest.yml` and `latest-linux.yml` (the desktop update feeds).
 
 ## Highlights
 
@@ -42,7 +41,7 @@ Download links always point at the latest release. File names are the same as be
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.3; macOS installers coming later |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.5; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+. Signed release APK; beta-tested |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | **Not tested yet.** Needs a Mac, Xcode and a free Apple ID |
 
@@ -51,13 +50,11 @@ There is no App Store, TestFlight, Play Store or enterprise build.
 ## Known limits
 
 - **Beta.** Expect rough edges. Report problems on the issue tracker.
-- **Android:** beta-tested on devices. Updates install over the old app only when signed with the same
-  key; uninstalling deletes downloads.
+- **Android:** beta-tested on devices. The app installs its own updates after you confirm. Updates install over the old app only when signed with the same key; uninstalling deletes downloads.
 - **iPhone:** not tested on a device yet. It is build-from-source only, and a free Apple ID build
   expires after **7 days** and must be re-signed from Xcode.
-- **Desktop:** installers are **unsigned**, so Windows (SmartScreen) shows warnings. There is **no
-  auto-update**: install the new version over the old one. Your library is kept in the app's data folder.
-- **macOS installers are not part of v0.0.3.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
+- **Desktop:** installers are **unsigned**, so Windows (SmartScreen) shows warnings. Windows and AppImage builds update in the app. `.deb` and macOS builds need a manual reinstall over the old version. Your library is kept in the app's data folder.
+- **macOS installers are not part of v0.0.5.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
 - **Streaming and saving** depend on a stream-link server and `yt-dlp`. Links expire. With your own
   server, streaming works on the same network as the server, not on mobile data. Guest streaming on the
   public web app is rate-limited and only on servers that enable it.
@@ -67,7 +64,7 @@ There is no App Store, TestFlight, Play Store or enterprise build.
 
 ## Checksums
 
-Each desktop installer built by CI is listed in `SHA256SUMS.txt` on the release page. To check a
+Every file on the release page is listed in `SHA256SUMS.txt`. To check a
 download, put it in the same folder as the file and run:
 
 ```bash

@@ -6,9 +6,10 @@ an optional Supabase project adds sync and lets phones on your Wi-Fi use the sam
 The window loads a fixed local address, `http://127.0.0.1:47900`, not a public server (see
 [Public access](../README.md#public-access)).
 
-> **Unsigned builds.** SmartScreen will warn you on Windows, and there is no
-> auto-update. Windows installers are CI-built and untested here. macOS installers are
-> not published in v0.0.4; [build from source](#build-from-source) instead.
+> **Unsigned builds.** SmartScreen will warn you on Windows. Windows and AppImage
+> builds update in the app; `.deb` and macOS builds only notify you, so reinstall over the old one.
+> Windows installers are CI-built and untested here. macOS installers are
+> not published in v0.0.5; [build from source](#build-from-source) instead.
 
 ## Download and install
 
@@ -20,7 +21,7 @@ Get your file from the
 | Linux x64 (recommended) | `OpenRecord-linux-amd64.deb`       | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64               | `OpenRecord-linux-x86_64.AppImage` | `chmod +x`, then run it                         |
 | Windows x64             | `OpenRecord-windows-x64.exe`       | Run, then launch from the Start menu            |
-| macOS (Apple Silicon and Intel) | Not published in v0.0.4 | [Build from source](#build-from-source) |
+| macOS (Apple Silicon and Intel) | Not published in v0.0.5 | [Build from source](#build-from-source) |
 
 ### Linux
 
@@ -45,7 +46,7 @@ binaries on first launch.
 
 ### macOS
 
-Not published in v0.0.4, and there is no macOS DMG on the release page. Build the app from
+Not published in v0.0.5, and there is no macOS DMG on the release page. Build the app from
 source instead: see [Build from source](#build-from-source).
 
 <!-- Restore this section when macOS DMGs are published again.
@@ -70,7 +71,7 @@ npm run desktop:dist
 `desktop:dist` builds the web UI and server, fetches the bundled yt-dlp and ffmpeg, and writes
 the installer for the current OS to `dist/apps/desktop/release/`. On macOS, set
 `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder skips signing-identity lookup, as CI
-does. Local builds are unsigned and are not tested by the project on macOS for v0.0.4.
+does. Local builds are unsigned and are not tested by the project on macOS for v0.0.5.
 
 ## First run
 
@@ -250,12 +251,14 @@ owner account or add a user under **Authentication > Users**.
 reset, or copy it to back up (imported audio is inside). **Settings > Storage > Clear all
 data** clears records, playlists and settings. Uninstall via `sudo apt remove
 open-record-desktop` on Linux, deleting the AppImage, **Settings > Apps** on
-Windows, or the Trash on macOS; the data folder usually survives. There is no auto-update: install a newer build over the
-old one, and the fixed address and reused folder keep the library, imports and settings.
+Windows, or the Trash on macOS; the data folder usually survives. Windows and AppImage builds update in the
+app. For `.deb` and macOS builds, install the newer build over the old one; the fixed address and
+reused folder keep the library, imports and settings.
 
 ## Limits
 
-- Unsigned installers and no auto-update: expect warnings; update by reinstalling. The
+- Unsigned installers: expect warnings. `.deb` and macOS builds update by reinstalling; Windows and
+  AppImage builds update in the app. The
   server is LAN-only: never expose 47900; use
   [Public access](../README.md#public-access) for outside access.
 - Remote search, streaming and saving need internet and the bundled yt-dlp. Stream links

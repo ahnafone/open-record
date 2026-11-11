@@ -352,9 +352,28 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # The in-app updater shows this body as the release notes, so it is the
+      # "What's new" section of RELEASE_NOTES.md (plain markdown only).
+      - name: Extract release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          awk -v tag="${TAG#v}" '
+            /^## What.s new in v/ { on = index($0, "v" tag) > 0; next }
+            /^## / { on = 0 }
+            on { print }
+          ' RELEASE_NOTES.md > release-notes-body.md
+          if [ ! -s release-notes-body.md ]; then
+            echo "::error::No 'What's new in v${TAG#v}' section in RELEASE_NOTES.md"
+            exit 1
+          fi
+          cat release-notes-body.md
+
       - name: Upload assets to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          body_path: release-notes-body.md
           files: release-assets/*
           fail_on_unmatched_files: true
         env:
