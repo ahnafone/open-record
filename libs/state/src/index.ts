@@ -31,3 +31,6 @@ export * from './lib/track-art';
 export * from './lib/queue-window';
 export * from './lib/access.service';
 export * from './lib/artist-credit';
+export * from './lib/update.types';
+export * from './lib/update.store';
+export * from './lib/update-version';

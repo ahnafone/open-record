@@ -13,7 +13,25 @@ export interface DesktopStatus {
   supabaseHost: string | null;
   dataDir: string;
   version: string;
+  /**
+   * Whether this build can download and install updates itself. Optional:
+   * builds before auto-update did not send it.
+   */
+  canSelfUpdate?: boolean;
   error: string | null;
+}
+
+/** Electron auto-update bridge (`window.openRecordDesktop.updates`). */
+export interface DesktopUpdatesApi {
+  supported(): Promise<boolean>;
+  download(): Promise<void>;
+  install(): Promise<void>;
+  /** Download progress 0..1. Returns an unsubscribe function. */
+  onProgress(listener: (fraction: number) => void): () => void;
+  /** Fired once the update is fully downloaded. Returns an unsubscribe function. */
+  onDownloaded(listener: () => void): () => void;
+  /** Why the previous install did not take effect, or null. Reported once per failure. */
+  installError(): Promise<string | null>;
 }
 
 /** The local server's address and the static token every request must carry. */
@@ -45,6 +63,8 @@ export interface OpenRecordDesktopApi {
   getPairing(): Promise<{ lanUrl: string | null }>;
   openGuide(): Promise<void>;
   openDataFolder(): Promise<void>;
+  /** Electron auto-update. Optional so older desktop builds still load. */
+  updates?: DesktopUpdatesApi;
 }
 
 declare global {

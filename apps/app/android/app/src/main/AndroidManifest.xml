@@ -50,4 +50,6 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Asked once (BackgroundWorkPlugin): Doze otherwise cuts the network while downloads run with the screen off. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- In-app update (AppUpdatePlugin): hand the downloaded release APK to the system installer. The user grants it per app in Settings. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 </manifest>

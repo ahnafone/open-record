@@ -37,6 +37,9 @@ import {
   SettingsStore,
   StreamResolverPort,
   SyncPort,
+  UPDATE_APP_VERSION,
+  UPDATE_PLATFORM,
+  UpdateStore,
   WEB_BUILD,
   isBusy,
   provideState,
@@ -62,7 +65,11 @@ import { SupabaseAuth } from './supabase-auth';
 import { SupabasePlayCounts } from './supabase-play-counts';
 import { SupabaseSync } from './supabase-sync';
 import { SUPABASE_BUILD_CONFIG } from './supabase.config';
+import { createUpdatePlatform } from './update-platform';
 import { autoPairWeb } from './web-pairing';
+// Root package.json: a named JSON import keeps only `version` in the bundle (same as features/about).
+// eslint-disable-next-line @nx/enforce-module-boundaries
+import { version as APP_VERSION } from '../../../../package.json';
 
 /** Music sources registered at startup; the UI never sees a concrete provider. */
 const sources = new MusicSourceRegistry();
@@ -317,6 +324,11 @@ export const appConfig: ApplicationConfig = {
       });
       return desktopReady;
     }),
+    // Update checks run in the background; never awaited, so startup is not blocked.
+    // A no-op on web. Each check is also gated by the user's "Check for updates" pref.
+    provideAppInitializer(() => {
+      inject(UpdateStore).start();
+    }),
     // Route params (e.g. playlist `:id`) bind to component inputs. 'computed'
     // stamps each history entry with a page index (ɵrouterPageId) that
     // survives Back/popstate, which App uses to tell if there is an in-app
@@ -343,6 +355,9 @@ export const appConfig: ApplicationConfig = {
     { provide: DeviceStoragePort, useFactory: createDeviceStorage },
     // Android: foreground service so downloads continue with the screen off (null elsewhere).
     { provide: BackgroundWorkPort, useFactory: createBackgroundWork },
+    // In-app updates: the Electron or Android adapter; null on web and iOS (notify only or nothing).
+    { provide: UPDATE_PLATFORM, useFactory: createUpdatePlatform },
+    { provide: UPDATE_APP_VERSION, useValue: APP_VERSION },
     { provide: AuthPort, useValue: supabase },
     { provide: AUTH_ACCESS_RECHECK, useValue: recheckServerAccess },
     // Library + playlist metadata sync for signed-in users (same client).

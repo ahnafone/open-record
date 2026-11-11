@@ -1,6 +1,12 @@
 import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
-import { AuthStore, CuratedStore, PlaylistsStore, WEB_BUILD } from '@open-record/state';
+import {
+  AuthStore,
+  CuratedStore,
+  PlaylistsStore,
+  UpdateStore,
+  WEB_BUILD,
+} from '@open-record/state';
 import { type IconName, OrIcon } from '@open-record/ui';
 
 interface NavItem {
@@ -135,8 +141,9 @@ const NAV: readonly NavItem[] = [
         routerLink="/about"
         routerLinkActive="active"
         ariaCurrentWhenActive="page"
+        [class.update]="updates.notice() !== 'none'"
       >
-        <or-icon name="info" [size]="20" />About
+        <or-icon [name]="aboutIcon()" [size]="20" />{{ aboutLabel() }}
       </a>
     </nav>
   `,
@@ -264,7 +271,8 @@ const NAV: readonly NavItem[] = [
       color: var(--color-text);
       background: var(--color-surface);
     }
-    .link.active or-icon {
+    .link.active or-icon,
+    .link.update or-icon {
       color: var(--color-primary);
     }
     .curated {
@@ -356,7 +364,29 @@ export class OrSidebar {
   protected readonly playlists = inject(PlaylistsStore);
   protected readonly curated = inject(CuratedStore);
   protected readonly auth = inject(AuthStore);
+  protected readonly updates = inject(UpdateStore);
   protected readonly nav = NAV;
+  /** About row: says so when an update is available or downloaded (the link still goes to /about). */
+  protected readonly aboutLabel = computed(() => {
+    switch (this.updates.notice()) {
+      case 'ready':
+        return 'Restart to Update';
+      case 'available':
+        return 'Update is Available';
+      default:
+        return 'About';
+    }
+  });
+  protected readonly aboutIcon = computed<IconName>(() => {
+    switch (this.updates.notice()) {
+      case 'ready':
+        return 'refresh';
+      case 'available':
+        return 'download';
+      default:
+        return 'info';
+    }
+  });
   /** Web build, signed out: Playlists (and Library) sit behind sign-in. */
   protected readonly gated = computed(
     () => this.webBuild && this.auth.accountsReady() && !this.auth.signedIn(),

@@ -52,12 +52,14 @@ jobs:
             arch: x64
             artifact: open-record-linux-x64
             builder_args: --linux --x64
+            update_feed: latest-linux.yml
           - name: windows-x64
             os: windows-2025
             platform: win32
             arch: x64
             artifact: open-record-windows-x64
             builder_args: --win --x64
+            update_feed: latest.yml
           # macOS is currently skipped: GitHub rejects the macos-14 runner
           # configuration for this repo ("not supported"). Re-add the
           # macos-arm64 / macos-x64 entries once a macOS runner works.
@@ -109,15 +111,24 @@ jobs:
           --publish never
           ${{ matrix.builder_args }}
 
+      # electron-updater trusts the feed file: a feed that names a missing
+      # installer, or lacks a sha512, would ship a broken update.
+      - name: Verify update feed matches the built installers
+        run: node scripts/check-update-metadata.mjs dist/apps/desktop/release ${{ matrix.update_feed }}
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+          # latest*.yml and blockmaps are the electron-updater feed: they must
+          # be attached to the release next to the installers they describe.
           path: |
             dist/apps/desktop/release/*.AppImage
             dist/apps/desktop/release/*.deb
             dist/apps/desktop/release/*.exe
             dist/apps/desktop/release/*.dmg
+            dist/apps/desktop/release/latest*.yml
+            dist/apps/desktop/release/*.blockmap
           if-no-files-found: error
           retention-days: 14
 
@@ -261,12 +272,25 @@ jobs:
           mkdir -p dist/android-release
           mv "$src" dist/android-release/OpenRecord-android.apk
 
+      # The app refuses to install an APK it cannot verify, so every release
+      # must publish this checksum file next to the APK.
+      - name: Generate and verify APK SHA-256 checksum
+        if: steps.signing.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          cd dist/android-release
+          sha256sum OpenRecord-android.apk > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
       - name: Upload APK
         if: steps.signing.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: open-record-android
-          path: dist/android-release/OpenRecord-android.apk
+          path: |
+            dist/android-release/OpenRecord-android.apk
+            dist/android-release/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
 
@@ -311,6 +335,9 @@ jobs:
             OpenRecord-linux-amd64.deb
             OpenRecord-windows-x64.exe
             OpenRecord-android.apk
+            SHA256SUMS
+            latest.yml
+            latest-linux.yml
           )
           for file in "${expected[@]}"; do
             if [ ! -s "release-assets/$file" ]; then

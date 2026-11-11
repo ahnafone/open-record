@@ -11,7 +11,16 @@ productName: Open Record
 executableName: open-record
 asar: true
 npmRebuild: false
-publish: null
+# Update feed for electron-updater: builds emit app-update.yml (embedded in the
+# app) and latest.yml / latest-linux.yml + blockmaps next to the installers.
+# Upload is still done by the release workflow (`--publish never`), so this
+# block never publishes by itself. Release asset names must match the
+# artifactName values below exactly (no spaces).
+publish:
+  provider: github
+  owner: ahnafone
+  repo: open-record
+  releaseType: release
 
 directories:
   app: dist/apps/desktop/app
@@ -46,7 +55,10 @@ extraResources:
     to: THIRD_PARTY_NOTICES.md
 
 extraMetadata:
-  version: 0.0.3
+  # Must equal the root package.json version: this is what app.getVersion()
+  # reports and what the updater compares against. Checked by
+  # scripts/check-version-sync.mjs.
+  version: 0.0.4
   description: Open Record desktop app
   author: Open Record contributors
   # Electron's Linux app_id / WM_CLASS; linux.syncDesktopName uses it for the

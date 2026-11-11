@@ -20,6 +20,13 @@ const METADATA_ORIGINS = ['https://itunes.apple.com', 'https://api.deezer.com'];
  */
 const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 
+/**
+ * GitHub releases API, read by the renderer's UpdateStore for the in-app update
+ * check (GET only, public endpoint, no credentials). The download itself is
+ * done by the main process and never goes through this origin's connect-src.
+ */
+export const GITHUB_API_ORIGIN = 'https://api.github.com';
+
 /** Computes a CSP builder once per launch (inline script hashes are static). */
 export function createCspBuilder(
   getConfig: () => DesktopConfig,
@@ -43,6 +50,7 @@ export function buildContentSecurityPolicy(
     `http://localhost:${SERVER_PORT}`,
     `ws://localhost:${SERVER_PORT}`,
     ...METADATA_ORIGINS,
+    GITHUB_API_ORIGIN,
   ]);
 
   if (config.lanEnabled && lanUrl) {

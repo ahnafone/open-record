@@ -76,6 +76,17 @@ function main() {
       ),
     },
     {
+      // electron-builder writes this into the packaged app's package.json; it
+      // is what app.getVersion() and the auto-updater compare against.
+      file: 'apps/desktop/electron-builder.yml',
+      label: 'extraMetadata.version',
+      value: extract(
+        'apps/desktop/electron-builder.yml',
+        new RegExp(`^extraMetadata:\\s*\\n(?:[ \\t]+[^\\n]*\\n|\\s*\\n)*?[ \\t]+version:[ \\t]*(${SEMVER})\\b`, 'm'),
+        'extraMetadata: version x.y.z',
+      ),
+    },
+    {
       file: 'apps/app/android/app/build.gradle',
       label: 'versionName',
       value: extract(

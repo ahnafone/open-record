@@ -41,10 +41,18 @@ if (missing.length > 0) {
 }
 
 // The generated package.json is the packaged app's metadata. Keep it minimal
-// and dependency-free: everything else lives in extraResources.
+// and dependency-free: everything else lives in extraResources. The version is
+// read from the root package.json (the source of truth; the version sync check
+// covers electron-builder.yml extraMetadata.version too).
+const rootPkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const version = rootPkg.version;
+// Plain semver, optionally with a pre-release suffix such as -beta.1.
+if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  fail(`root package.json has an invalid version: ${version}`);
+}
 const pkg = {
   name: 'open-record-desktop',
-  version: '0.0.3',
+  version,
   main: 'main.cjs',
 };
 
@@ -59,7 +67,7 @@ for (const file of [...REQUIRED, 'package.json']) {
   if (!existsSync(path) || statSync(path).size === 0) fail(`staging failed: ${path} is missing or empty`);
 }
 const stagedPkg = JSON.parse(readFileSync(join(out, 'package.json'), 'utf8'));
-if (stagedPkg.main !== 'main.cjs' || stagedPkg.version !== '0.0.3') {
+if (stagedPkg.main !== 'main.cjs' || stagedPkg.version !== version) {
   fail('staged package.json has unexpected main/version fields');
 }
 if (stagedPkg.dependencies || stagedPkg.devDependencies) {

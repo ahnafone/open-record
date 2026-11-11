@@ -25,6 +25,7 @@ import {
   isLocalOrigin,
   lockPermissions,
 } from './security';
+import { canSelfUpdate, createDesktopUpdater } from './updater';
 import {
   isPortAvailable,
   pickLanIpv4,
@@ -69,6 +70,12 @@ let reloadTimer: NodeJS.Timeout | null = null;
 let allowDataNavigation = false;
 let ipcRegistered = false;
 
+const desktopUpdater = createDesktopUpdater({
+  getWindow: () => win,
+  prepareInstall: prepareUpdateInstall,
+  resumeAfterFailedInstall: resumeAfterFailedUpdateInstall,
+});
+
 /** Stable loopback origin. Never changes: IndexedDB and localStorage are keyed by it. */
 function currentStatus(): DesktopStatus {
   const activeLan = config.lanEnabled && state.server === 'ready' ? lanUrl : null;
@@ -81,6 +88,7 @@ function currentStatus(): DesktopStatus {
     supabaseHost: supabaseHost(config),
     dataDir: app.getPath('userData'),
     version: app.getVersion(),
+    canSelfUpdate: canSelfUpdate(),
     error: state.error,
   };
 }
@@ -486,6 +494,33 @@ async function restartServerAction(): Promise<ActionResult> {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Auto-update                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Runs before the update installer starts: the installer must never race the
+ * bundled server's files or process. Like a quit, this stops the server; the
+ * before-quit handler then sees no server and lets the app exit.
+ */
+async function prepareUpdateInstall(): Promise<void> {
+  if (actionBusy) throw new Error(BUSY_ERROR);
+  quitting = true;
+  cancelScheduledReload();
+  try {
+    await stopServer();
+  } catch (err) {
+    console.error(`[desktop] server shutdown before update failed: ${errorText(err)}`);
+  }
+}
+
+/** The installer did not start: bring the local server back so the app stays usable. */
+async function resumeAfterFailedUpdateInstall(): Promise<void> {
+  quitting = false;
+  const result = await restartForIpc();
+  if (!result.ok) console.error(`[desktop] could not restart the server: ${result.error}`);
+}
+
+/* -------------------------------------------------------------------------- */
 /* IPC                                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -511,6 +546,10 @@ function registerIpc(): void {
     const failure = await shell.openPath(dir);
     if (failure) throw new Error(`could not open the data folder: ${failure}`);
   });
+  handle(DESKTOP_CHANNELS.updatesSupported, () => desktopUpdater.supported());
+  handle(DESKTOP_CHANNELS.updatesDownload, () => desktopUpdater.download());
+  handle(DESKTOP_CHANNELS.updatesInstall, () => desktopUpdater.install());
+  handle(DESKTOP_CHANNELS.updatesInstallError, () => desktopUpdater.installError());
 }
 
 type IpcHandler = (...args: unknown[]) => unknown;
