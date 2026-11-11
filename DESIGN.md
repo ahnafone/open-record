@@ -426,7 +426,9 @@ overlays.
   download-state tags as playlist rows and a trailing tabular duration
   (`h:mm:ss` from an hour); missing fields are simply omitted. Library rows
   (Saved and Imported) end with a bookmark toggle and a ⋯ options menu (Play
-  next, Fix source only when the record has a source link, and Close); the
+  next, Add to Stack, Fix source only when the record has a source link, and
+  Close; Play next and Add to Stack are hidden while another device or Cast
+  owns playback); the
   playing row gets a faint coral tint and an "On the turntable" / "Paused"
   line. On desktop each Library list gains Album,
   Source and Date added columns (saved date for Saved, import date for
@@ -445,7 +447,18 @@ overlays.
   ascending, descending, then back to the custom playlist order
   (`aria-sort`); Play, Shuffle and row taps follow the displayed order, and
   Move up/down only appear in custom order. The options menu also has Play
-  next and, when the record has a source link, Fix source.
+  next, Add to Stack (both hidden while another device or Cast owns playback)
+  and, when the record has a source link, Fix source.
+- **Search rows:** each record row ends with a ⋯ options button whose menu has
+  Play next, Add to Stack (same rule as Library) and, when the record has a
+  source link, Fix source, then Close.
+- **Swipe to queue (native phone app only):** on song rows in Library,
+  Playlist, Album, Artist and Search, a right swipe past the commit point adds
+  the song to Your Stack and shows a toast (`“Title” added to Your Stack`). A
+  coral reveal with a queue icon sits in the gap as the row moves. On Now
+  Playing, a right swipe removes that row from its queue section. Swipe is off
+  on desktop and in the browser, and while another device or Cast owns
+  playback. Taps and the ⋯ menus work everywhere.
 - **Missing artwork:** a designed fallback, a grooved disc with an ivory centre
   label; never a broken-image icon or a fake sleeve.
 - **Now Playing:** large sleeve over a disc, artist in muted 15px, a status
@@ -597,11 +610,18 @@ nothing changes.
   turns coral on hover, focus or drag; Arrow Left/Right (Shift = 64px) and
   Home/End resize it, and double-click resets to 360px. The panel is toggled
   from the player bar, and its open/closed state and width are remembered per
-  device and restored on reload. It shows art, details and Up next only;
-  transport controls live in the player bar. Up next rows have an options menu
-  (Play next, Remove from queue), and tracks marked Play next play before the
-  normal queue. The `/now-playing` route becomes two columns (sticky sleeve left,
-  details and queue right).
+  device and restored on reload. It shows art, details and the queue only;
+  transport controls live in the player bar. The queue has two sections, each
+  with a serif heading, and a small Clear button:
+  **Your Stack** (user-added; Clear empties the stack
+  with a toast) and **Keep Spinning** (autoplay; Clear stops
+  the autoplay window with a toast). Stack plays before Keep Spinning. Starting
+  a new play keeps Your Stack; only Clear empties it. The stack holds at most
+  500 entries; extra adds are dropped silently. An empty section is hidden. Stack rows have a ⋯ menu with Remove from Stack; Keep
+  Spinning rows have Play next, Add to Stack (both hidden while another device
+  or Cast owns playback), Remove from queue and Copy source link when available.
+  Phone swipe right removes a queue row. The `/now-playing` route becomes two
+  columns (sticky sleeve left, details and queue right).
 - **Keyboard:** Space play/pause, PageDown next, PageUp previous, Left/Right
   seek 5s, Shift+Left/Right previous/next, M mute, / search. PC media keys
   (play/pause, next and previous) work through Media Session, with a keydown

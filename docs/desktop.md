@@ -83,7 +83,7 @@ origin, and if 47900 is taken the app reports an error rather than choosing anot
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Browsing the bundled catalogue and your library                   | Searching download sources (YouTube, YouTube Music, SoundCloud), pasting links |
 | Importing audio (Import > "Audio files on this device"), playback | Streaming or saving remote tracks, tag/cover-art lookups                       |
-| Playlists, import history, play counts, settings                  | Signing in and syncing with Supabase                                           |
+| Playlists, Your Stack, import history, play counts, settings      | Signing in and syncing with Supabase                                           |
 
 Without an account the app is anonymous and every local feature works; an account is
 needed for sync, Cast and phones. If Supabase is configured but the network is down,

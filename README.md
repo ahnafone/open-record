@@ -164,7 +164,7 @@ and the runbooks.
   downloads running with the screen off. Failed songs show a reason, Retry and a Fix link page at
   `/downloads/failed`.
 - **Accounts, sync and Cast (optional):** your own Supabase project adds email/password sign-in and
-  syncs track metadata, saved songs, playlists and import history, never audio. Conflicts are
+  syncs track metadata, saved songs, playlists, Your Stack and import history, never audio. Conflicts are
   last-write-wins. Signing in also shares the playback queue, and Google Cast speakers on the LAN
   appear in the **Play on** picker.
 - **Settings:** storage usage, clear data, separate streaming and download quality, mobile data
@@ -219,7 +219,7 @@ no accounts, audio or relay.
 4. Desktop: save the same values under **Settings > Desktop app** (`/desktop`).
 
 Use the anon key only; never put a `service_role` or `sb_secret_...` key in the server, the desktop
-config or a build. Sync covers metadata, saved songs, playlists and import history, never audio;
+config or a build. Sync covers metadata, saved songs, playlists, Your Stack and import history, never audio;
 conflicts are last-write-wins.
 
 ## Stream-link server
