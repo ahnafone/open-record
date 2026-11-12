@@ -144,7 +144,7 @@ and the runbooks.
 - **Browse:** a "Now on the turntable" record with a spinning disc and sleeve, Play record and Open
   player buttons, and record-shop genre bins (All, Dance band, Fox trot, Ragtime and more).
 - **Search:** by title, artist, year or genre, with quick suggestions. With a stream server, search
-  YouTube, YouTube Music and SoundCloud, or paste a link from a yt-dlp site.
+  music first (YouTube Music, with YouTube results only when it is thin), pick SoundCloud or another source, or paste a link from a yt-dlp site.
 - **Library:** saved records with a bookmark toggle, plus playlists marked Private or Public. Filter
   by title, artist and album; long lists render as you scroll; on desktop the list is a sortable table.
 - **Playlists:** play or shuffle, add records, rename, delete, and reorder. Each row shows its source,

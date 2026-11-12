@@ -215,7 +215,17 @@ StreamResponse = {
 - `/search` returns `400` for `bandcamp`, `audiomack` and `mixcloud`, which
   yt-dlp cannot search; paste a link into `/resolve` or `/stream` instead.
   `ytmusic` searches the Songs shelf of `music.youtube.com/search`; for speed
-  it returns flat results, so `artist` and `durationSec` are often empty.
+  it returns flat results, so `artist` and `durationSec` are often empty. The
+  server fills them in for the results of each search (`yt-dlp -J --no-playlist`
+  per result, 3 at a time, within a 15 s budget; a failed lookup leaves the
+  result as it was).
+- **Default search source.** The server's `/search` still defaults to `youtube`.
+  The app searches music-first: it asks `ytmusic` first and queries `youtube`
+  only when `ytmusic` returns fewer than 3 results or errors. Those YouTube
+  hits are filtered on the client: over 10 minutes (unknown durations pass) and
+  titles with full album, full concert, live set, reaction, podcast, compilation
+  or "N hours" wording are dropped. Results are blended with no label. See
+  `RemoteProvider.search` in `libs/providers/remote`.
 - `/resolve` and `/stream` refuse playlists (`400`); use a single track link.
   Only `/playlist` reads playlists, and it returns metadata only.
 - **`/meta/enrich`** looks each song up in YT Music (via yt-dlp), iTunes Search,

@@ -1,4 +1,5 @@
-import { AuthError, NetworkError, RemoteClient, RemoteProvider, createFetchTransport, type HttpTransport } from '../index';
+import { AuthError, NetworkError, RemoteClient, RemoteProvider, createFetchTransport, toRemoteTrack, type HttpTransport } from '../index';
+import { isMusicFallback } from './remote-provider';
 
 function fakeTransport(status: number, data: unknown): HttpTransport & { urls: string[]; auth: (string | undefined)[] } {
   const urls: string[] = [];
@@ -13,6 +14,16 @@ function fakeTransport(status: number, data: unknown): HttpTransport & { urls: s
     },
   };
 }
+
+/** Real-shaped 11-char YouTube video ids (the dedup key parses them). */
+const ID = {
+  a: 'dQw4w9WgXcQ',
+  b: 'jNQXAC9IVRw',
+  c: 'kJQP7kiw5Fk',
+  d: 'Zi_XLOBDo_Y',
+  e: 'M7lc1UVf-VE',
+  f: 'aqz-KE-bpKQ',
+};
 
 describe('remote provider', () => {
   it('maps /search results to Tracks and sends the bearer token', async () => {
@@ -39,6 +50,114 @@ describe('remote provider', () => {
         source: { site: 'youtube', url: 'https://www.youtube.com/watch?v=abc', id: 'abc' },
       },
     ]);
+  });
+
+  describe('search fallback', () => {
+    const musicHit = (id: string, title: string) => ({
+      id,
+      title,
+      artist: 'A',
+      url: `https://music.youtube.com/watch?v=${id}`,
+      site: 'ytmusic',
+    });
+    const ytHit = (id: string, title: string, durationSec?: number) => ({
+      id,
+      title,
+      artist: 'A',
+      url: `https://www.youtube.com/watch?v=${id}`,
+      site: 'youtube',
+      ...(durationSec === undefined ? {} : { durationSec }),
+    });
+    /** Transport that answers per `source`; `ytmusic`/`youtube` may be a status error. */
+    const bySource = (answers: Record<string, { status: number; data: unknown }>) => {
+      const sources: string[] = [];
+      const transport: HttpTransport = {
+        async request(req) {
+          const source = new URL(req.url).searchParams.get('source') ?? '';
+          sources.push(source);
+          const answer = answers[source] ?? { status: 200, data: { results: [] } };
+          return { status: answer.status, headers: { 'content-type': 'application/json' }, data: answer.data };
+        },
+      };
+      return { sources, transport };
+    };
+    const ok = (results: unknown[]) => ({ status: 200, data: { results } });
+
+    it('searches YT Music first, falls back to YouTube only when it is short, drops non-music hits and dedups the same video across both', async () => {
+      const { sources, transport } = bySource({
+        ytmusic: ok([musicHit(ID.a, 'Song 1'), musicHit(ID.b, 'Song 2')]),
+        youtube: ok([
+          ytHit(ID.a, 'Song 1'),
+          ytHit(ID.c, 'Song 3', 200),
+          ytHit(ID.d, 'Full Album 2001', 3000),
+          ytHit(ID.e, 'Reaction to Song 1', 300),
+          ytHit(ID.f, 'Song 4'),
+        ]),
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      const tracks = await provider.search('song');
+
+      expect(sources).toEqual(['ytmusic', 'youtube']);
+      expect(tracks.map((t) => t.title)).toEqual(['Song 1', 'Song 2', 'Song 3', 'Song 4']);
+    });
+
+    it('makes no YouTube call when YT Music has enough results', async () => {
+      const { sources, transport } = bySource({
+        ytmusic: ok([musicHit('m1', 'Song 1'), musicHit('m2', 'Song 2'), musicHit('m3', 'Song 3')]),
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      const tracks = await provider.search('song');
+
+      expect(sources).toEqual(['ytmusic']);
+      expect(tracks).toHaveLength(3);
+    });
+
+    it('falls back to YouTube when YT Music fails with a server error', async () => {
+      const { sources, transport } = bySource({
+        ytmusic: { status: 500, data: { error: 'boom' } },
+        youtube: ok([ytHit('y1', 'Song 1')]),
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      const tracks = await provider.search('song');
+
+      expect(sources).toEqual(['ytmusic', 'youtube']);
+      expect(tracks.map((t) => t.title)).toEqual(['Song 1']);
+    });
+
+    it('rethrows AuthError from YT Music without trying YouTube', async () => {
+      const { sources, transport } = bySource({
+        ytmusic: { status: 401, data: { error: 'Unauthorized' } },
+        youtube: ok([ytHit('y1', 'Song 1')]),
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      await expect(provider.search('song')).rejects.toBeInstanceOf(AuthError);
+      expect(sources).toEqual(['ytmusic']);
+    });
+
+    it('goes straight to defaultSite when it is not YT Music', async () => {
+      const { sources, transport } = bySource({ youtube: ok([ytHit('y1', 'Song 1')]) });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport, defaultSite: 'youtube' });
+
+      const tracks = await provider.search('song');
+
+      expect(sources).toEqual(['youtube']);
+      expect(tracks.map((t) => t.title)).toEqual(['Song 1']);
+    });
+
+    it('judges fallback hits by duration and title, not by substrings of ordinary words', () => {
+      const track = (title: string, durationSec?: number) =>
+        toRemoteTrack({ id: title, title, artist: 'A', url: 'https://www.youtube.com/watch?v=x', site: 'youtube', durationSec });
+      expect(isMusicFallback(track('Song', 600))).toBe(true);
+      expect(isMusicFallback(track('Song', 601))).toBe(false);
+      expect(isMusicFallback(track('Song'))).toBe(true);
+      expect(isMusicFallback(track('Chain Reaction'))).toBe(true);
+      expect(isMusicFallback(track('24 Hours'))).toBe(true);
+      expect(isMusicFallback(track('10 Hours of Rain Ambience'))).toBe(false);
+    });
   });
 
   it('fills a missing artist from lookupArtist, falling back to Unknown artist on failure', async () => {

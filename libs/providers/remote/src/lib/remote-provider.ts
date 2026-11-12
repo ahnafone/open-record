@@ -12,7 +12,14 @@ import type {
 } from '@open-record/models';
 import { RemoteClient, type RemoteAuthOptions, type RemoteConfig, type TrackAliasQuery, type TrackAliases } from './client';
 import { createLinkCache } from './link-cache';
-import { RemoteConfigError, RemoteError } from './errors';
+import {
+  GuestHostError,
+  HttpError,
+  NetworkError,
+  ProtocolError,
+  RemoteConfigError,
+  RemoteError,
+} from './errors';
 import { RemoteStreamResolver, type SaveBlob, type StreamLink } from './stream-resolver';
 import { createDefaultTransport, type HttpTransport } from './transport';
 
@@ -65,6 +72,72 @@ export const UNKNOWN_ARTIST = 'Unknown artist';
 const ARTIST_LOOKUP_TIMEOUT_MS = 4000;
 /** Artist lookups in flight at once (iTunes/Deezer are rate limited). */
 const ARTIST_LOOKUP_CONCURRENCY = 2;
+
+/** YT Music results needed before search skips the plain-YouTube fallback. */
+const MIN_MUSIC_RESULTS = 3;
+/** Longest a fallback (plain YouTube) hit may run; longer ones are mixes, sets or albums. */
+const MUSIC_FALLBACK_MAX_SEC = 600;
+/**
+ * Titles of full albums, concerts, live sets, reactions, podcasts, compilations
+ * and long mixes (case-insensitive). Bare words like "Reaction", "Chain Reaction"
+ * or "24 Hours" are songs, so they only match with their usual context.
+ */
+const NON_MUSIC_TITLE = new RegExp(
+  [
+    String.raw`\bfull\s+(album|concert|set|show|mixtape|playlist)\b`,
+    String.raw`\blive\s+(set|concert)s?\b`,
+    String.raw`\bpodcast`,
+    String.raw`\bcompilation\b`,
+    String.raw`\breacts?\s+to\b`,
+    String.raw`\breaction\s+(to|video)\b`,
+    String.raw`[([]\s*reaction\s*[)\]]`,
+    // Long "N hours" only with mix-style context somewhere in the title: "1 hour mix", "10 Hours of Rain Ambience"
+    String.raw`^(?=.*\b(mix|mixes|playlist|music|loop|ambien\w*|relax\w*|sleep)\b).*\b\d+\s*hours?\b`,
+  ].join('|'),
+  'i',
+);
+
+/**
+ * Whether a plain-YouTube fallback hit looks like a song: not over 10 minutes
+ * (unknown duration passes) and no full-album/concert/live-set/reaction/podcast/
+ * compilation/long-mix wording in the title.
+ */
+export function isMusicFallback(track: Track): boolean {
+  if (track.durationSec !== undefined && track.durationSec > MUSIC_FALLBACK_MAX_SEC) return false;
+  return !NON_MUSIC_TITLE.test(track.title);
+}
+
+/** Whether a failed YT Music search should fall back to plain YouTube (server or network trouble, not auth/quota/busy/abort). */
+function isFallbackError(err: unknown): boolean {
+  return err instanceof HttpError || err instanceof ProtocolError || err instanceof NetworkError || err instanceof GuestHostError;
+}
+
+const YOUTUBE_VIDEO_ID = /^[\w-]{11}$/;
+
+/** YouTube video id from a youtube.com / music.youtube.com / youtu.be page URL, or `undefined`. */
+function youtubeVideoId(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.replace(/^(www|m|music)\./, '');
+  const id =
+    host === 'youtube.com'
+      ? parsed.searchParams.get('v')
+      : host === 'youtu.be'
+        ? (parsed.pathname.split('/')[1] ?? null)
+        : null;
+  return id && YOUTUBE_VIDEO_ID.test(id) ? id : undefined;
+}
+
+/** Dedup key: the YouTube video id (same video on YT Music and YouTube), else the track id. */
+function canonicalKey(track: Track): string {
+  const videoId = youtubeVideoId(track.source?.url);
+  return videoId ? `yt:${videoId}` : track.id;
+}
 
 /** Runs at most `max` tasks at once; the rest wait in FIFO order. */
 function createLimiter(max: number): <T>(task: () => Promise<T>) => Promise<T> {
@@ -239,15 +312,58 @@ export class RemoteProvider {
     return this.client.probeServer(signal);
   }
 
-  /** MusicSourceProvider search on the default site. Empty when no server is configured. */
+  /**
+   * MusicSourceProvider search, music-first: YouTube Music's Songs shelf. Only
+   * when that yields fewer than `MIN_MUSIC_RESULTS` (or fails with a server or
+   * network error) does it also query plain YouTube; those extra hits pass
+   * `isMusicFallback` and are deduped by video id. Auth, guest-limit and busy
+   * errors are rethrown. Empty when no server is configured.
+   */
   async search(query: string, signal?: AbortSignal): Promise<Track[]> {
     if (!this._client) return [];
-    return this.searchSite(query, this.options.defaultSite ?? 'youtube', signal);
+    const primary = this.options.defaultSite ?? 'ytmusic';
+    if (primary !== 'ytmusic') return this.searchSite(query, primary, signal);
+
+    let music: Track[] = [];
+    let musicError: unknown;
+    try {
+      music = await this.searchSite(query, 'ytmusic', signal);
+    } catch (err) {
+      // Auth, guest limit, busy and abort errors are not for a fallback to hide.
+      if (signal?.aborted || !isFallbackError(err)) throw err;
+      musicError = err;
+    }
+    signal?.throwIfAborted();
+    if (music.length >= MIN_MUSIC_RESULTS) return music;
+
+    const seen = new Set(music.map(canonicalKey));
+    let fallback: Track[];
+    try {
+      fallback = await this.searchTracks(query, 'youtube', signal, (t) => isMusicFallback(t) && !seen.has(canonicalKey(t)));
+    } catch (err) {
+      // Keep whatever YT Music found; surface the error only when there is nothing.
+      if (signal?.aborted || !isFallbackError(err)) throw err;
+      if (music.length) return music;
+      throw musicError ?? err;
+    }
+    signal?.throwIfAborted();
+    return [...music, ...fallback];
   }
 
   async searchSite(query: string, site: DownloadSite, signal?: AbortSignal): Promise<Track[]> {
+    return this.searchTracks(query, site, signal);
+  }
+
+  /** Server search mapped to Tracks; `keep` drops hits before any artist lookup runs on them. */
+  private async searchTracks(
+    query: string,
+    site: DownloadSite,
+    signal?: AbortSignal,
+    keep?: (track: Track) => boolean,
+  ): Promise<Track[]> {
     const results = await this.client.search(query, site, signal);
-    return Promise.all(results.map((r) => this.withArtist(r)));
+    const hits = keep ? results.filter((r) => keep(toRemoteTrack(r))) : results;
+    return Promise.all(hits.map((r) => this.withArtist(r)));
   }
 
   /**
