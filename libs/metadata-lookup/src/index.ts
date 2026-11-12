@@ -9,6 +9,7 @@ export {
   splitArtistTitle,
   titleSimilarity,
 } from './lib/normalize';
+export { normalizeGenre } from './lib/genre';
 export { romanize } from './lib/romanize';
 export { MATCH_THRESHOLD, pickBest } from './lib/score';
 export type { MetadataFetch, MetadataFetchInit } from './lib/providers';

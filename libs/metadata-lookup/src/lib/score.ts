@@ -1,3 +1,4 @@
+import { normalizeGenre } from './genre';
 import { artistSimilarity, normalizeArtist, normalizeTitle, splitArtistTitle, titleSimilarity } from './normalize';
 import type { MetadataMatch, MetadataQuery } from './types';
 
@@ -73,7 +74,10 @@ export function pickBest(query: MetadataQuery, candidates: MetadataMatch[]): Met
     .sort((x, y) => y.s - x.s);
   if (!accepted.length) return null;
 
-  const best = { ...accepted[0].c };
+  const best: MetadataMatch = { ...accepted[0].c };
+  const bestGenre = normalizeGenre(best.genre);
+  if (bestGenre) best.genre = bestGenre;
+  else delete best.genre;
   const bestTitle = normalizeTitle(best.title);
   const bestArtist = normalizeArtist(best.artist);
   for (const { c } of accepted.slice(1)) {
@@ -82,7 +86,8 @@ export function pickBest(query: MetadataQuery, candidates: MetadataMatch[]): Met
     }
     best.album ??= c.album;
     best.year ??= c.year;
-    best.genre ??= c.genre;
+    const genre = normalizeGenre(c.genre);
+    if (genre) best.genre ??= genre;
     best.artworkUrl ??= c.artworkUrl;
   }
   return best;

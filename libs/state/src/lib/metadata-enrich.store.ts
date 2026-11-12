@@ -6,6 +6,7 @@ import {
   type MetadataCandidate,
   type Track,
 } from '@open-record/models';
+import { normalizeGenre } from '@open-record/metadata-lookup';
 import { SETTINGS_KEYS, StoragePort, type JsonValue } from '@open-record/storage';
 import { LibraryStore } from './library.store';
 import { RemoteServerPort } from './ports';
@@ -138,7 +139,7 @@ export function enrichTrack(
   const title = text(match.title);
   const artist = text(match.artist);
   const album = text(match.album);
-  const genre = text(match.genre);
+  const genre = normalizeGenre(text(match.genre));
   if (title && !edited.has('title')) next.title = title;
   if (artist && !edited.has('artist')) next.artist = artist;
   if (album && !edited.has('album')) next.album = album;
