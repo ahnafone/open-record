@@ -699,6 +699,12 @@ export class PlayerEngine {
       positionSec?: number;
       /** Session mode: force `_shuffle=false`, `_repeat='off'`. Default true. */
       sessionMode?: boolean;
+      /**
+       * Entry ids of Your Stack. They occupy `order[cursor+1 .. cursor+n]` in
+       * the same order, so the engine stack mirrors the session stack.
+       * Default: no stack.
+       */
+      stackEntryIds?: readonly string[];
     } = {},
   ): Promise<{ reloaded: boolean; moved: boolean }> {
     const mediaKey = opts.mediaKey ?? defaultMediaKey;
@@ -729,7 +735,14 @@ export class PlayerEngine {
     this._queue.set([...order]);
     this._order.set(order.map((_, i) => i));
     this._cursor.set(index);
-    this._stack.set([]);
+    const stackIds = opts.stackEntryIds ?? [];
+    const stackSlots: StackSlot[] = [];
+    for (let k = 0; k < stackIds.length; k++) {
+      const at = index + 1 + k;
+      if (at >= order.length) break;
+      stackSlots.push({ entryId: stackIds[k], index: at });
+    }
+    this._stack.set(stackSlots);
     // The replaced queue has no history: only the track now current counts.
     this.played = new Set([index]);
 

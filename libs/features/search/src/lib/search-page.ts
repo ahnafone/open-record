@@ -700,11 +700,8 @@ export class SearchPage {
   /** End of Your Stack, with a confirmation toast (also the row swipe). */
   protected async addToStack(track: Track): Promise<void> {
     try {
-      const toQueue = this.player.addGoesToQueue();
       await this.player.addToStack(track);
-      this.toast.show(
-        toQueue ? `“${track.title}” added to queue` : `“${track.title}” added to Your Stack`,
-      );
+      this.toast.show(`“${track.title}” added to Your Stack`);
     } catch (err) {
       this.toast.show(
         err instanceof SessionRefusedError

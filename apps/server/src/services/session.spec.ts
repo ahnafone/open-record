@@ -1799,3 +1799,286 @@ describe('devices list', () => {
     expect(row).toMatchObject({ online: true, stale: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Your Stack: pending user songs sit right after the cursor, before autofill.
+// ---------------------------------------------------------------------------
+
+function stackOf(userId = 'u'): string[] {
+  return stateOf(userId).stack ?? [];
+}
+
+function enqueue(
+  tracks: SessionTrack[],
+  opts: { next: boolean; stack?: boolean },
+  clientId = 'a',
+  userId = 'u',
+) {
+  return service.command(userId, clientId, { type: 'enqueue', tracks, ...opts });
+}
+
+describe('Your Stack', () => {
+  it('enqueues at the stack front and end, keeping the stack right after the cursor', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+    await enqueue([track('s1')], { next: false, stack: true });
+    await enqueue([track('s2')], { next: true, stack: true });
+    expect(entryIds()).toEqual(['a', 's2', 's1', 'b', 'c']);
+    expect(stackOf()).toEqual(['s2', 's1']);
+    expect(stateOf().cursor).toBe(0);
+  });
+
+  it('rejects duplicate entries and stack overflow', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    expect(await enqueue([track('b')], { next: false, stack: true })).toEqual({
+      ok: false,
+      error: 'duplicate-entry-id',
+    });
+    const fill = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => track(`${prefix}${i}`));
+    for (let batch = 0; batch < 5; batch += 1) {
+      const result = await enqueue(fill(`p${batch}-`, 100), { next: false, stack: true });
+      expect(result.ok).toBe(true);
+    }
+    expect(stackOf()).toHaveLength(500);
+    expect(await enqueue([track('over')], { next: false, stack: true })).toEqual({
+      ok: false,
+      error: 'queue-too-large',
+    });
+  });
+
+  it('keeps autofill enqueued next right after the stack', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await enqueue([track('s1')], { next: false, stack: true });
+    await enqueue([track('n')], { next: true });
+    expect(entryIds()).toEqual(['a', 's1', 'n', 'b']);
+    expect(stackOf()).toEqual(['s1']);
+  });
+
+  it('plays the stack before autofill on next', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'next' });
+    expect(stateOf().cursor).toBe(1);
+    expect(stateOf().order[1]?.entryId).toBe('s1');
+    expect(stateOf().stack).toEqual([]);
+  });
+
+  it('plays the stack before autofill on an ended report', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await transferToDevice('a');
+    await enqueue([track('s1')], { next: true, stack: true });
+    report('a', 'ended', { entryId: 'a' });
+    expect(stateOf().order[stateOf().cursor]?.entryId).toBe('s1');
+    expect(stackOf()).toEqual([]);
+  });
+
+  it('plays the stack before autofill on a native skip to the next entry', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await transferToDevice('a');
+    await enqueue([track('s1')], { next: true, stack: true });
+    report('a', 'native-skip', { entryId: 's1' });
+    expect(stateOf().cursor).toBe(1);
+    expect(stackOf()).toEqual([]);
+  });
+
+  it('previous goes back through history and re-places the stack after the new cursor', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 1);
+    await enqueue([track('s1')], { next: true, stack: true });
+    expect(entryIds()).toEqual(['a', 'b', 's1', 'c']);
+    await service.command('u', 'a', { type: 'previous' });
+    expect(stateOf().cursor).toBe(0);
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c']);
+    expect(stackOf()).toEqual(['s1']);
+  });
+
+  it('keeps stack entries pending when playIndex jumps past them', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    // [a, s1, b, c, d]: jump to c (index 3).
+    await service.command('u', 'a', { type: 'playIndex', index: 3 });
+    expect(stateOf().order[stateOf().cursor]?.entryId).toBe('c');
+    expect(stackOf()).toEqual(['s1']);
+    expect(entryIds().slice(stateOf().cursor + 1, stateOf().cursor + 2)).toEqual(['s1']);
+  });
+
+  it('removes a stack entry from the stack when playIndex lands on it', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'playIndex', index: 1 });
+    expect(stateOf().cursor).toBe(1);
+    expect(stateOf().stack).toEqual([]);
+  });
+
+  it('removes a pending stack entry', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    const result = await service.command('u', 'a', { type: 'remove', entryId: 's1' });
+    expect(result.ok).toBe(true);
+    expect(entryIds()).toEqual(['a', 'b']);
+    expect(stateOf().stack).toEqual([]);
+  });
+
+  it('clearQueue stack drops pending stack entries and keeps autofill', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await enqueue([track('s1'), track('s2')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'clearQueue', which: 'stack' });
+    expect(entryIds()).toEqual(['a', 'b']);
+    expect(stateOf().stack).toEqual([]);
+    expect(stateOf().cursor).toBe(0);
+  });
+
+  it('clearQueue autofill drops everything after the stack', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'clearQueue', which: 'autofill' });
+    expect(entryIds()).toEqual(['a', 's1']);
+    expect(stackOf()).toEqual(['s1']);
+  });
+
+  it('setStack replaces the pending stack and keeps the current entry', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await service.command('u', 'a', {
+      type: 'setStack',
+      tracks: [track('s1'), track('s2')],
+    });
+    expect(entryIds()).toEqual(['a', 's1', 's2', 'b']);
+    await service.command('u', 'a', { type: 'setStack', tracks: [track('s3')] });
+    expect(entryIds()).toEqual(['a', 's3', 'b']);
+    expect(stackOf()).toEqual(['s3']);
+    expect(stateOf().order[0]?.entryId).toBe('a');
+  });
+
+  it('setStack drops incoming tracks already in the queue and rejects duplicates inside the list', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+    expect(
+      await service.command('u', 'a', {
+        type: 'setStack',
+        tracks: [track('b'), track('s1'), track('a')],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c']);
+    expect(stackOf()).toEqual(['s1']);
+    expect(
+      await service.command('u', 'a', {
+        type: 'setStack',
+        tracks: [track('s2'), track('s2')],
+      }),
+    ).toEqual({ ok: false, error: 'duplicate-entry-id' });
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c']);
+  });
+
+  it('setStack prunes unavailable marks of stack entries it replaces', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await service.command('u', 'a', { type: 'setStack', tracks: [track('s1')] });
+    service.setUnavailable('u', ['s1', 'b']);
+    await service.command('u', 'a', { type: 'setStack', tracks: [track('s2')] });
+    expect(entryIds()).toEqual(['a', 's2', 'b']);
+    expect(stateOf().unavailable).toEqual(['b']);
+  });
+
+  it('setQueue with a stack and shuffle shuffles only the rest and keeps the stack after the cursor', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd', 'e'], 0, {
+      shuffle: true,
+      stack: [track('s1'), track('s2')],
+    });
+    const state = stateOf();
+    expect(state.stack).toEqual(['s1', 's2']);
+    expect(state.order[state.cursor]?.entryId).toBe('a');
+    // The shuffle may move 'a' anywhere, so the stack is checked relative to the cursor.
+    expect(entryIds().slice(state.cursor + 1, state.cursor + 3)).toEqual(['s1', 's2']);
+    expect(entryIds().filter((id) => !id.startsWith('s')).sort()).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('setShuffle never reorders the stack', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: true });
+    let state = stateOf();
+    expect(state.order[state.cursor + 1]?.entryId).toBe('s1');
+    expect(stackOf()).toEqual(['s1']);
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: false });
+    state = stateOf();
+    expect(state.order[state.cursor]?.entryId).toBe('a');
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c', 'd']);
+  });
+
+  it('move may not start, land in, or cross the stack block', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    const moveAt = (from: number, to: number) =>
+      service.command('u', 'a', { type: 'move', from, to });
+    expect(await moveAt(1, 3)).toEqual({ ok: false, error: 'invalid-command' });
+    expect(await moveAt(4, 0)).toEqual({ ok: false, error: 'invalid-command' });
+    expect(await moveAt(3, 1)).toEqual({ ok: false, error: 'invalid-command' });
+    expect(await moveAt(2, 3)).toEqual({ ok: true, revision: stateOf().revision });
+    expect(entryIds()).toEqual(['a', 's1', 'c', 'b', 'd']);
+  });
+
+  it('plays a stack entry, then unshuffles: the played entry keeps its place', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd'], 0);
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: true });
+    await enqueue([track('s1')], { next: true, stack: true });
+    await service.command('u', 'a', { type: 'next' });
+    expect(stateOf().order[stateOf().cursor]?.entryId).toBe('s1');
+    expect(stackOf()).toEqual([]);
+
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: false });
+    const state = stateOf();
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c', 'd']);
+    expect(state.order[state.cursor]?.entryId).toBe('s1');
+    expect(state.shuffle).toBe(false);
+  });
+
+  it('move that shifts entries across the cursor keeps the stack right after the current entry', async () => {
+    join('u', 'a');
+    await setQueue(['h', 'c', 'x'], 1);
+    await enqueue([track('s1')], { next: true, stack: true });
+    expect(entryIds()).toEqual(['h', 'c', 's1', 'x']);
+    expect(await service.command('u', 'a', { type: 'move', from: 0, to: 1 })).toMatchObject({
+      ok: true,
+    });
+    const state = stateOf();
+    expect(state.order[state.cursor]?.entryId).toBe('c');
+    expect(stackOf()).toEqual(['s1']);
+    expect(entryIds().slice(state.cursor + 1, state.cursor + 2)).toEqual(['s1']);
+    expect(entryIds()).toEqual(['c', 's1', 'h', 'x']);
+  });
+
+  it('no pending stack: stack is emitted as an empty array, never omitted', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    expect(stateOf().stack).toEqual([]);
+    expect(service.touch('u', 'a', device('a')).session?.stack).toEqual([]);
+    await service.command('u', 'a', { type: 'next' });
+    expect(stateOf().cursor).toBe(1);
+    await enqueue([track('n')], { next: false });
+    expect(entryIds()).toEqual(['a', 'b', 'n']);
+  });
+
+  it('carries the stack in snapshots and polls', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 0);
+    await enqueue([track('s1')], { next: true, stack: true });
+    const snapshot = service.touch('u', 'a', device('a'));
+    expect(snapshot.session?.stack).toEqual(['s1']);
+  });
+});

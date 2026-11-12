@@ -1024,9 +1024,17 @@ export class NowPlayingPage {
   }
 
   /** Your Stack: empty it. Keep Spinning is not touched. */
-  protected clearStack(): void {
-    this.player.clearStack();
-    this.toast.show('Your Stack cleared');
+  protected async clearStack(): Promise<void> {
+    try {
+      await this.player.clearStack();
+      this.toast.show('Your Stack cleared');
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : 'Could not clear Your Stack. Try again.',
+      );
+    }
   }
 
   /** Keep Spinning: empty the window and stop it refilling. */
@@ -1059,13 +1067,8 @@ export class NowPlayingPage {
     const row = this.optionsFor();
     this.optionsFor.set(null);
     if (!row || row.stackEntryId !== null) return;
-    const toQueue = this.player.addGoesToQueue();
     if (!(await this.moveToStack(row, 'add'))) return;
-    this.toast.show(
-      toQueue
-        ? `“${row.track.title}” added to queue`
-        : `“${row.track.title}” added to Your Stack`,
-    );
+    this.toast.show(`“${row.track.title}” added to Your Stack`);
     // Appended: its options button is the last Your Stack row.
     this.focusOptions(this.stackRows().length - 1);
   }
@@ -1120,7 +1123,7 @@ export class NowPlayingPage {
   protected async removeRow(row: UpNextRow): Promise<boolean> {
     let removed: boolean;
     if (row.stackEntryId !== null) {
-      removed = this.player.removeStackEntry(row.stackEntryId);
+      removed = await this.player.removeStackEntry(row.stackEntryId);
     } else {
       removed = await this.player.removeUpcoming(row.queueIndex);
     }

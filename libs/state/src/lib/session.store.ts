@@ -26,7 +26,11 @@ import {
   type Track,
 } from '@open-record/models';
 import { PlayerService } from '@open-record/player';
-import type { PlayerStatus, RepeatMode } from '@open-record/player';
+import type {
+  PlayerStatus,
+  RepeatMode,
+  StackEntry,
+} from '@open-record/player';
 import { AuthStore } from './auth.store';
 import { LibraryStore } from './library.store';
 import { CastFilePort, CastUploadPort, SessionPort } from './ports';
@@ -34,6 +38,7 @@ import type { SessionConnectionState } from './ports';
 import { SettingsStore } from './settings.store';
 import {
   detectPlatform,
+  fitSessionOrder,
   fromSessionTrack,
   sessionTrackSignature,
   toSessionTrack,
@@ -222,6 +227,30 @@ export class SessionStore {
   });
   readonly remoteTracks = computed<readonly Track[]>(() =>
     this.remoteEntries().map((entry) => entry.track),
+  );
+  /** Entry ids of the session's Your Stack (`SessionState.stack`). */
+  readonly remoteStackIds = computed<ReadonlySet<string>>(
+    () => new Set(this.session()?.stack ?? []),
+  );
+  /** Session Your Stack entries in play order (they follow the current entry). */
+  readonly remoteStackEntries = computed<readonly StackEntry[]>(() => {
+    const stack = this.remoteStackIds();
+    return this.remoteEntries()
+      .filter((entry) => stack.has(entry.entryId))
+      .map((entry) => ({ entryId: entry.entryId, track: entry.track }));
+  });
+  /**
+   * The session's Your Stack is known while a session owns playback, its state
+   * carries a `stack` field, and every stack id resolves to an entry of its
+   * order. An absent `stack` is an older server that never sends one (the new
+   * server always sends `[]`), so it is unknown too. Until known, the stack must
+   * not read as empty, or sync would delete the account's entries.
+   */
+  readonly remoteStackKnown = computed(
+    () =>
+      this.ownsPlayback() &&
+      this.session()?.stack !== undefined &&
+      this.remoteStackEntries().length === this.remoteStackIds().size,
   );
   readonly remoteCurrent = computed<Track | null>(() => {
     const cursor = this.remoteCursor();
@@ -828,16 +857,23 @@ export class SessionStore {
     if (!this.canPublish()) return null;
     const current = this.engine.current();
     if (!current) return null;
+    // Your Stack entries keep their engine entry ids and travel in `stack`,
+    // not `order`: the server places them right after the cursor.
     // The queue indices keep the natural order: upcoming tracks are in play
     // order, which differs from the queue order while shuffle is on.
     const planned = [
-      { track: current, queueIndex: this.engine.currentIndex() },
+      { track: current, queueIndex: this.engine.currentIndex(), stackEntryId: null },
       ...this.engine.upcomingEntries(),
-    ].map(({ track, queueIndex }) => ({
+    ].map(({ track, queueIndex, stackEntryId }) => ({
       queueIndex,
-      entry: toSessionTrack(track, newEntryId()),
+      stackEntryId,
+      entry: toSessionTrack(track, stackEntryId ?? newEntryId()),
     }));
-    const entries = planned.map((item) => item.entry);
+    const orderItems = planned.filter((item) => item.stackEntryId === null);
+    const entries = orderItems.map((item) => item.entry);
+    const stack = planned
+      .filter((item) => item.stackEntryId !== null)
+      .map((item) => item.entry);
     // Autoplay reads the engine when each send happens, so a pause during the
     // publish is not overridden by a stale `true`. The order above already is
     // the play order: with shuffle on, `shuffled` tells the server to keep that
@@ -845,7 +881,7 @@ export class SessionStore {
     // off restore the natural order.
     const shuffle = this.engine.shuffle();
     const baseOrderIds = shuffle
-      ? [...planned]
+      ? [...orderItems]
           .sort((a, b) => a.queueIndex - b.queueIndex)
           .map((item) => item.entry.entryId)
       : undefined;
@@ -856,8 +892,9 @@ export class SessionStore {
       autoplay: this.localPlaybackActive(),
       shuffle,
       ...(shuffle && baseOrderIds ? { shuffled: true, baseOrderIds } : {}),
+      ...(stack.length ? { stack } : {}),
     });
-    for (const entry of entries) this.publishEntryIds.add(entry.entryId);
+    for (const entry of [...entries, ...stack]) this.publishEntryIds.add(entry.entryId);
     let result = await this.command(setQueue());
     if (!result.ok) {
       // One retry with the same entry ids, as in startSession.
@@ -957,21 +994,35 @@ export class SessionStore {
     this.error.set(null);
 
     let entries = order.map((track) => toSessionTrack(track, newEntryId()));
+    // Your Stack is one account-wide list: it carries over the new queue with
+    // its entry ids kept. Sent as `stack`, never inside `order`. The session's
+    // stack is the one that carries over while it owns playback.
+    const carried: readonly StackEntry[] = this.ownsPlayback()
+      ? this.remoteStackEntries()
+      : this.engine.stackEntries();
+    let stack = carried.map((entry) => toSessionTrack(entry.track, entry.entryId));
+    // The server refuses the whole setQueue when order + stack exceed its caps,
+    // so the autofill tail (then old history) is dropped first. The kept range
+    // is a slice, so `order[fit.start + i]` still matches `entries[i]`.
+    const fit = fitSessionOrder(entries, stack, cursor);
+    entries = entries.slice(fit.start, fit.end);
 
     // A new queue started while a speaker owns playback is queued ON the
     // speaker, so its `local:` imports must be uploaded before `setQueue`.
     // A stale cast target does not count: this client takes playback over.
     if (this.followsCastTarget()) {
-      const batch = await this.uploadLocalEntries(entries);
+      const batch = await this.uploadLocalEntries([...entries, ...stack]);
       if (batch && !batch.ok) {
         this.error.set(batch.error);
         return null;
       }
       if (batch) {
-        entries = entries.map((entry) => {
+        const withUpload = (entry: SessionTrack): SessionTrack => {
           const uploadId = batch.ids.get(entry.entryId);
           return uploadId ? { ...entry, uploadId } : entry;
-        });
+        };
+        entries = entries.map(withUpload);
+        stack = stack.map(withUpload);
       }
       this.castUpload.set(null);
     }
@@ -979,9 +1030,10 @@ export class SessionStore {
     const setQueue: SessionCommand = {
       type: 'setQueue',
       order: entries,
-      cursor: clampCursor(entries.length, cursor),
+      cursor: clampCursor(entries.length, fit.cursor),
       autoplay: opts.autoplay,
       shuffle: opts.shuffle,
+      ...(stack.length ? { stack } : {}),
     };
     let result = await this.command(setQueue);
     if (!result.ok) {
@@ -998,7 +1050,7 @@ export class SessionStore {
     // transfer reuses them instead of reading and uploading the files again.
     for (let i = 0; i < entries.length; i++) {
       const uploadId = entries[i]?.uploadId;
-      const track = order[i];
+      const track = order[fit.start + i];
       if (uploadId && track) {
         this.castUploadIds.set(this.castUploadKey(track), uploadId);
       }
@@ -1593,6 +1645,9 @@ export class SessionStore {
       positionSec: sameSong ? undefined : state.positionSec,
       sessionMode: true,
       mediaKey: sessionMediaKey,
+      // The engine keeps the same Your Stack as the session, so next, previous
+      // and native skips agree with the server.
+      stackEntryIds: state.stack ?? [],
     });
     if (!this.isTarget()) return;
     // The same song kept its position: a seek held during a publish is newer

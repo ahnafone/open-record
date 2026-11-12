@@ -1,4 +1,9 @@
-import type { SessionTrack, Track } from '@open-record/models';
+import {
+  SESSION_MAX_ENTRIES,
+  SESSION_MAX_ORDER_BYTES,
+  type SessionTrack,
+  type Track,
+} from '@open-record/models';
 import { LOCAL_PROVIDER_ID } from './library.store';
 import { remoteArtUrl, remoteHttpUrl } from './remote-url';
 
@@ -84,6 +89,46 @@ export function fromSessionTrack(entry: SessionTrack): Track {
   }
   if (entry.catalogFile !== undefined) track.catalogFile = entry.catalogFile;
   return track;
+}
+
+/**
+ * Fit a play order and its Your Stack under the server caps: `order` + `stack`
+ * must not exceed `SESSION_MAX_ENTRIES`, nor `SESSION_MAX_ORDER_BYTES` of JSON
+ * (the server refuses the whole `setQueue` otherwise).
+ *
+ * The autofill tail (entries after `cursor`) is dropped first, from the end.
+ * Only if that is still too big is the oldest history dropped. The current
+ * entry and the stack are never dropped. Returns the kept slice `[start, end)`
+ * of `order` and the cursor inside it.
+ */
+export function fitSessionOrder(
+  order: readonly SessionTrack[],
+  stack: readonly SessionTrack[],
+  cursor: number,
+): { start: number; end: number; cursor: number } {
+  const encoder = new TextEncoder();
+  const size = (entry: SessionTrack): number =>
+    encoder.encode(JSON.stringify(entry)).length;
+  const sizes = order.map(size);
+  const stackSizes = stack.map(size);
+  const stackBytes = stackSizes.reduce((sum, n) => sum + n, 0);
+
+  // Byte length of JSON.stringify([...order slice, ...stack]).
+  const fits = (start: number, end: number): boolean => {
+    const count = end - start + stack.length;
+    if (count > SESSION_MAX_ENTRIES) return false;
+    let bytes = 2 + stackBytes + Math.max(0, count - 1);
+    for (let i = start; i < end; i++) bytes += sizes[i] ?? 0;
+    return bytes <= SESSION_MAX_ORDER_BYTES;
+  };
+
+  const current = Math.min(order.length, Math.max(cursor, 0));
+  const minEnd = Math.min(order.length, current + 1);
+  let start = 0;
+  let end = order.length;
+  while (end > minEnd && !fits(start, end)) end--;
+  while (start < current && !fits(start, end)) start++;
+  return { start, end, cursor: Math.min(cursor, end - 1) - start };
 }
 
 /**

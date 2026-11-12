@@ -1,15 +1,84 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionTarget } from './session';
+import type { SessionTarget, SessionTrack } from './session';
 import {
   anchoredPosition,
   clampCursor,
+  insertPendingStack,
   isThisClient,
   joinUrl,
   newClientId,
   newEntryId,
   nextCursor,
+  placePendingStack,
   previousCursor,
 } from './session';
+
+function t(entryId: string): SessionTrack {
+  return { entryId, id: `song:${entryId}`, providerId: 'remote', title: entryId, artist: 'a' };
+}
+
+function ids(order: readonly SessionTrack[]): string[] {
+  return order.map((entry) => entry.entryId);
+}
+
+describe('placePendingStack', () => {
+  it('places pending entries right after the current entry, in play order', () => {
+    const placed = placePendingStack([t('a'), t('b'), t('c'), t('d')], 0, ['d', 'c']);
+    expect(ids(placed.order)).toEqual(['a', 'd', 'c', 'b']);
+    expect(placed.cursor).toBe(0);
+    expect(placed.stack).toEqual(['d', 'c']);
+  });
+
+  it('drops unknown and duplicate ids and never keeps the current entry pending', () => {
+    const placed = placePendingStack([t('a'), t('b')], 0, ['a', 'ghost', 'b', 'b']);
+    expect(ids(placed.order)).toEqual(['a', 'b']);
+    expect(placed.cursor).toBe(0);
+    expect(placed.stack).toEqual(['b']);
+  });
+
+  it('makes the first pending entry current when nothing is loaded', () => {
+    const placed = placePendingStack([t('a'), t('b')], -1, ['b', 'a']);
+    expect(ids(placed.order)).toEqual(['b', 'a']);
+    expect(placed.cursor).toBe(0);
+    expect(placed.stack).toEqual(['a']);
+  });
+
+  it('returns the order unchanged when nothing is loaded and nothing is pending', () => {
+    const placed = placePendingStack([t('a')], -1, []);
+    expect(ids(placed.order)).toEqual(['a']);
+    expect(placed.cursor).toBe(-1);
+    expect(placed.stack).toEqual([]);
+  });
+
+  it('keeps the invariant: stack ids are order[cursor+1 .. cursor+stack.length]', () => {
+    const placed = placePendingStack([t('x'), t('a'), t('y'), t('z')], 1, ['z']);
+    const after = ids(placed.order.slice(placed.cursor + 1, placed.cursor + 1 + placed.stack.length));
+    expect(after).toEqual(placed.stack);
+  });
+});
+
+describe('insertPendingStack', () => {
+  const order = [t('a'), t('b'), t('c')];
+
+  it('front inserts before existing pending entries', () => {
+    const placed = insertPendingStack(order, 0, ['b'], [t('n')], true);
+    expect(placed.stack).toEqual(['n', 'b']);
+    expect(ids(placed.order)).toEqual(['a', 'n', 'b', 'c']);
+  });
+
+  it('end inserts after existing pending entries', () => {
+    const placed = insertPendingStack(order, 0, ['b'], [t('n')], false);
+    expect(placed.stack).toEqual(['b', 'n']);
+    expect(ids(placed.order)).toEqual(['a', 'b', 'n', 'c']);
+  });
+
+  it('starts playing the first track when nothing is loaded', () => {
+    const placed = insertPendingStack([], -1, [], [t('n')], false);
+    expect(placed.cursor).toBe(0);
+    expect(placed.stack).toEqual([]);
+    expect(ids(placed.order)).toEqual(['n']);
+  });
+});
 
 describe('newEntryId', () => {
   it('prefers randomUUID when available', () => {

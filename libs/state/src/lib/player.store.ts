@@ -78,6 +78,17 @@ function sessionRefusalMessage(error: string | undefined): string {
   return 'Could not queue that record: the session refused the change.';
 }
 
+/** A refused or unanswered session change to Your Stack or Keep Spinning. */
+function sessionChangeError(action: string, error: string | undefined): SessionRefusedError {
+  const ambiguous = isAmbiguousCommandFailure(error);
+  return new SessionRefusedError(
+    ambiguous
+      ? `${action}: the playback session did not answer, so it may be partly changed.`
+      : `${action}: the playback session refused the change.`,
+    ambiguous,
+  );
+}
+
 /**
  * Per-device settings key for the recently-queued record (song id -> epoch ms).
  * Lives in local storage only, never synced.
@@ -171,28 +182,47 @@ export class PlayerStore {
       : this.engine.queue(),
   );
   /** Upcoming tracks with queue indices; Your Stack entries carry their entry id. */
+  /**
+   * Upcoming entries with queue indices. While a session owns playback they
+   * come from the session queue, and Your Stack is `session.stack`; otherwise
+   * from the engine.
+   */
   readonly upcomingEntries = computed<readonly UpcomingEntry[]>(() => {
-    if (!this.session.mirroring()) return this.engine.upcomingEntries();
+    if (!this.session.ownsPlayback()) return this.engine.upcomingEntries();
     const next = this.session.remoteCursor() + 1;
+    const stack = this.session.remoteStackIds();
     return this.session
       .remoteEntries()
       .slice(next)
       .map((entry, i) => ({
         track: entry.track,
         queueIndex: next + i,
-        stackEntryId: null,
+        stackEntryId: stack.has(entry.entryId) ? entry.entryId : null,
       }));
   });
   readonly upcoming = computed(() =>
     this.upcomingEntries().map((entry) => entry.track),
   );
-  /** Your Stack: user-added entries, in play order. Empty while a session owns playback. */
+  /**
+   * Your Stack: user-added entries, in play order. While a session owns
+   * playback it is the session's `stack`, one account-wide list.
+   */
   readonly stackEntries = computed<readonly StackEntry[]>(() =>
-    this.session.ownsPlayback() ? [] : this.engine.stackEntries(),
+    this.session.ownsPlayback()
+      ? this.session.remoteStackEntries()
+      : this.engine.stackEntries(),
   );
   /**
-   * This device's Your Stack, ignoring any session. Only the stack sync reads
-   * it, and it checks session ownership itself before it writes anything.
+   * False while a session owns playback but its Your Stack is not known yet
+   * (no state, or a partial one). `stackEntries` then is not the account's
+   * stack: sync must neither push nor pull against it.
+   */
+  readonly stackKnown = computed(
+    () => !this.session.ownsPlayback() || this.session.remoteStackKnown(),
+  );
+  /**
+   * This device's engine Your Stack, ignoring any session. Only the stack sync
+   * reads it, and it checks session ownership itself before it writes anything.
    */
   readonly deviceStackEntries = computed<readonly StackEntry[]>(() =>
     this.engine.stackEntries(),
@@ -201,12 +231,6 @@ export class PlayerStore {
   readonly keepSpinningEntries = computed<readonly UpcomingEntry[]>(() =>
     this.upcomingEntries().filter((entry) => entry.stackEntryId === null),
   );
-  /**
-   * True while a session (Cast or another device) owns playback. Add to Stack
-   * then appends to the session queue, which is a queue, not Your Stack, so
-   * toasts say "added to queue" instead.
-   */
-  readonly addGoesToQueue = computed(() => this.session.ownsPlayback());
   readonly current = computed(() =>
     this.session.mirroring()
       ? this.session.remoteCurrent()
@@ -415,6 +439,19 @@ export class PlayerStore {
       );
     });
 
+    // Your Stack is one account-wide list. While a session owns playback the
+    // engine keeps the session's stack (a mirroring device never applies the
+    // session order), so when the session ends or hands playback back, the
+    // stack is still here and the stack sync does not push the old local one.
+    // Never while the session cannot be used (signed out) or its stack is not
+    // known yet: an unknown stack must not empty the engine's.
+    effect(() => {
+      if (!this.session.ownsPlayback() || !this.session.available()) return;
+      if (!this.session.remoteStackKnown()) return;
+      const entries = this.session.remoteStackEntries();
+      untracked(() => this.engine.setStack(entries));
+    });
+
     // Keep the bounded queue topped up as it drains, pruning history once a
     // window is active. Reads the active mode's queue and cursor only.
     effect(() => {
@@ -576,7 +613,7 @@ export class PlayerStore {
   async playNext(track: Track): Promise<void> {
     this.library.remember([track]);
     if (this.session.ownsPlayback()) {
-      await this.enqueueSessionOrThrow([track], true);
+      await this.enqueueSessionOrThrow([track], true, true);
       return;
     }
     if (this.nothingToStartFrom()) {
@@ -590,13 +627,12 @@ export class PlayerStore {
   /**
    * Append `track` to the end of Your Stack. Same rules as `playNext`, but the
    * entry plays after the stack entries already queued. While a session owns
-   * playback there is no Your Stack: the track is appended to the session's
-   * queue (`addGoesToQueue`), after the entries already queued there.
+   * playback the session's Your Stack (the same list) takes it.
    */
   async addToStack(track: Track): Promise<void> {
     this.library.remember([track]);
     if (this.session.ownsPlayback()) {
-      await this.enqueueSessionOrThrow([track], false);
+      await this.enqueueSessionOrThrow([track], false, true);
       return;
     }
     if (this.nothingToStartFrom()) {
@@ -617,17 +653,29 @@ export class PlayerStore {
     if (this.engine.currentIndex() < 0) await this.engine.startStack();
   }
 
-  /** Remove one Your Stack entry by its entry id. Returns whether it existed. */
-  removeStackEntry(entryId: string): boolean {
-    // The device's stack is hidden while a session owns playback: leave it be.
-    if (this.session.ownsPlayback()) return false;
+  /**
+   * Remove one Your Stack entry by its entry id. Returns whether it existed
+   * (and, while a session owns playback, whether the session removed it).
+   */
+  async removeStackEntry(entryId: string): Promise<boolean> {
+    if (this.session.ownsPlayback()) {
+      const result = await this.session.command({ type: 'remove', entryId });
+      return result.ok;
+    }
     return this.engine.removeStackEntry(entryId);
   }
 
-  /** Empty Your Stack. The Keep Spinning window is not touched. */
-  clearStack(): void {
-    if (this.session.ownsPlayback()) return;
-    this.engine.clearStack();
+  /**
+   * Empty Your Stack. The Keep Spinning window is not touched. Throws
+   * `SessionRefusedError` when the session does not apply the change.
+   */
+  async clearStack(): Promise<void> {
+    if (!this.session.ownsPlayback()) {
+      this.engine.clearStack();
+      return;
+    }
+    const result = await this.session.command({ type: 'clearQueue', which: 'stack' });
+    if (!result.ok) throw sessionChangeError('Could not clear Your Stack', result.error);
   }
 
   /**
@@ -636,6 +684,26 @@ export class PlayerStore {
    */
   discardStack(): void {
     this.engine.clearStack();
+  }
+
+  /**
+   * Sign-out: empty Your Stack on this device, and while a session holds it,
+   * ask the session to clear it too (`clearQueue` stack) so it cannot come back
+   * through the session. The local discard runs synchronously first; the session
+   * clear is fire-and-forget and never blocks or undoes it. A late refusal is
+   * logged only.
+   */
+  discardStackOnSignOut(): void {
+    this.discardStack();
+    if (
+      this.session.ownsPlayback() &&
+      this.session.remoteStackKnown() &&
+      this.session.remoteStackEntries().length
+    ) {
+      this.clearStack().catch((err: unknown) =>
+        console.warn('Could not clear the session Your Stack on sign-out.', err),
+      );
+    }
   }
 
   /**
@@ -650,29 +718,25 @@ export class PlayerStore {
       this.engine.clearKeepSpinning();
       return;
     }
-    const cursor = this.session.remoteCursor();
-    const upcoming = this.session.remoteEntries().slice(cursor + 1);
-    for (const entry of upcoming) {
-      const result = await this.session.command({ type: 'remove', entryId: entry.entryId });
-      if (!result.ok) {
-        // Stop at the first refusal so the caller does not toast success.
-        const ambiguous = isAmbiguousCommandFailure(result.error);
-        throw new SessionRefusedError(
-          ambiguous
-            ? 'Could not clear Keep Spinning: the playback session did not answer, so it may be partly cleared.'
-            : 'Could not clear Keep Spinning: the playback session refused the change.',
-          ambiguous,
-        );
-      }
-    }
+    // One command: the server drops everything after the stack.
+    const result = await this.session.command({ type: 'clearQueue', which: 'autofill' });
+    if (!result.ok) throw sessionChangeError('Could not clear Keep Spinning', result.error);
   }
 
   /**
    * Apply a Your Stack replacement from a sync layer (e.g. another device).
-   * Replaces every pending stack entry with `entries`, keeping their ids.
+   * Replaces every pending stack entry with `entries`, keeping their ids. While
+   * a session owns playback the session's stack is replaced. Throws
+   * `SessionRefusedError` when the session refuses it.
    */
-  setStackFromRemote(entries: readonly StackEntry[]): void {
-    this.engine.setStack(entries);
+  async setStackFromRemote(entries: readonly StackEntry[]): Promise<void> {
+    if (!this.session.ownsPlayback()) {
+      this.engine.setStack(entries);
+      return;
+    }
+    const tracks = entries.map((entry) => toSessionTrack(entry.track, entry.entryId));
+    const result = await this.session.command({ type: 'setStack', tracks });
+    if (!result.ok) throw sessionChangeError('Could not update Your Stack', result.error);
   }
 
   /**
@@ -747,13 +811,22 @@ export class PlayerStore {
     }, RECENTLY_QUEUED_SAVE_MS);
   }
 
-  /** Send an `enqueue` command, remembering the entry ids this client wrote. */
+  /**
+   * Send an `enqueue` command, remembering the entry ids this client wrote.
+   * `stack` true targets Your Stack; otherwise the entries are autofill.
+   */
   private async enqueueSession(
     tracks: readonly Track[],
     next: boolean,
+    stack = false,
   ): Promise<CommandResult> {
     const entries = tracks.map((track) => toSessionTrack(track, newEntryId()));
-    const result = await this.session.command({ type: 'enqueue', tracks: entries, next });
+    const result = await this.session.command({
+      type: 'enqueue',
+      tracks: entries,
+      next,
+      ...(stack ? { stack: true } : {}),
+    });
     const source = this.queueSource();
     if (source) {
       for (const entry of entries) source.createdIds.add(entry.entryId);
@@ -765,8 +838,9 @@ export class PlayerStore {
   private async enqueueSessionOrThrow(
     tracks: readonly Track[],
     next: boolean,
+    stack = false,
   ): Promise<void> {
-    const result = await this.enqueueSession(tracks, next);
+    const result = await this.enqueueSession(tracks, next, stack);
     if (!result.ok) {
       throw new SessionRefusedError(
         sessionRefusalMessage(result.error),
@@ -1158,7 +1232,10 @@ export class PlayerStore {
         if (superseded()) return;
       }
     }
-    const upcoming = entries.length - 1 - cursor;
+    // Only autofill (Keep Spinning) counts against the window: Your Stack
+    // sits right after the cursor and does not.
+    const stackLength = this.session.remoteStackEntries().length;
+    const upcoming = entries.length - 1 - cursor - stackLength;
     if (upcoming >= source.window.limit || superseded()) return;
     // Reserve, don't consume: a refused enqueue must not lose these tracks.
     const reserved = source.window.reserve(

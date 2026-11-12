@@ -229,12 +229,30 @@ function fakeEngine() {
 
 /** Signals and spies for the parts of `SessionStore` the facade uses. */
 function fakeSession() {
+  const remoteEntries = signal<readonly SessionEntry[]>([]);
+  /** The session's Your Stack entry ids (`SessionState.stack`). */
+  const stack = signal<readonly string[]>([]);
+  const ownsPlayback = signal(false);
+  const remoteStackEntries = computed(() =>
+    remoteEntries()
+      .filter((entry) => stack().includes(entry.entryId))
+      .map((entry) => ({ entryId: entry.entryId, track: entry.track })),
+  );
   return {
+    /** Signed in, enabled and reachable: the session can take commands. */
     available: signal(false),
     mirroring: signal(false),
-    ownsPlayback: signal(false),
+    ownsPlayback,
     isTarget: signal(false),
-    remoteEntries: signal<readonly SessionEntry[]>([]),
+    remoteEntries,
+    stack,
+    remoteStackIds: computed(() => new Set(stack())),
+    remoteStackEntries,
+    remoteStackKnown: computed(
+      () =>
+        ownsPlayback() &&
+        remoteStackEntries().length === new Set(stack()).size,
+    ),
     remoteTracks: signal<readonly Track[]>([]),
     remoteCurrent: signal<Track | null>(null),
     remoteCursor: signal(-1),
@@ -1094,19 +1112,18 @@ describe('PlayerStore', () => {
       expect(stackIds(player)).toEqual(['fake:x']);
       expect(ids(player.upcoming())).toEqual(['fake:x', 'new:1', 'new:2']);
 
-      player.clearStack();
+      await player.clearStack();
       expect(player.stackEntries()).toEqual([]);
       expect(ids(player.upcoming())).toEqual(['new:1', 'new:2']);
     });
 
-    it('play next and add to stack enqueue on the session while it owns playback', async () => {
+    it('play next and add to stack enqueue on the session stack while it owns playback', async () => {
       const engine = fakeEngine();
       const session = fakeSession();
       session.ownsPlayback.set(true);
       configure(engine, session);
       const player = TestBed.inject(PlayerStore);
 
-      expect(player.addGoesToQueue()).toBe(true);
       await player.playNext(stackTrack('x'));
       await player.addToStack(stackTrack('y'));
 
@@ -1116,11 +1133,13 @@ describe('PlayerStore', () => {
           type: 'enqueue',
           tracks: [expect.objectContaining({ id: 'fake:x' })],
           next: true,
+          stack: true,
         },
         {
           type: 'enqueue',
           tracks: [expect.objectContaining({ id: 'fake:y' })],
           next: false,
+          stack: true,
         },
       ]);
       // Each session entry gets its own id, distinct from the other.
@@ -1165,7 +1184,7 @@ describe('PlayerStore', () => {
       );
     });
 
-    it('stack removal and clearing stay no-ops while a session owns playback', async () => {
+    it('removing and clearing Your Stack go to the session while it owns playback', async () => {
       const engine = fakeEngine();
       const session = fakeSession();
       configure(engine, session);
@@ -1175,10 +1194,218 @@ describe('PlayerStore', () => {
       const entryId = player.stackEntries()[0].entryId;
 
       session.ownsPlayback.set(true);
-      player.clearStack();
-      expect(player.removeStackEntry(entryId)).toBe(false);
+      expect(await player.removeStackEntry(entryId)).toBe(true);
+      expect(session.command).toHaveBeenLastCalledWith({ type: 'remove', entryId });
+      await player.clearStack();
+      expect(session.command).toHaveBeenLastCalledWith({
+        type: 'clearQueue',
+        which: 'stack',
+      });
       expect(engine.clearStack).not.toHaveBeenCalled();
       expect(engine.removeStackEntry).not.toHaveBeenCalled();
+    });
+
+    it('splits the session queue into Your Stack and Keep Spinning from session.stack', () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      const tracks = manyTracks(4);
+      const entries = tracks.map((track, i) => ({
+        entryId: `e${i}`,
+        track,
+      }));
+      session.ownsPlayback.set(true);
+      session.remoteEntries.set(entries);
+      session.remoteCursor.set(0);
+      session.stack.set(['e1']);
+
+      expect(player.stackEntries()).toEqual([entries[1]]);
+      expect(player.upcomingEntries()).toEqual([
+        { track: tracks[1], queueIndex: 1, stackEntryId: 'e1' },
+        { track: tracks[2], queueIndex: 2, stackEntryId: null },
+        { track: tracks[3], queueIndex: 3, stackEntryId: null },
+      ]);
+      expect(ids(player.keepSpinningEntries().map((e) => e.track))).toEqual([
+        'fake:2',
+        'fake:3',
+      ]);
+    });
+
+    it('the engine keeps the session stack while the session owns playback', () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      const tracks = manyTracks(3);
+      session.remoteEntries.set(
+        tracks.map((track, i) => ({ entryId: `e${i}`, track })),
+      );
+      session.stack.set(['e2']);
+      session.ownsPlayback.set(true);
+      session.available.set(true);
+      TestBed.tick();
+
+      expect(engine.setStack).toHaveBeenLastCalledWith([
+        { entryId: 'e2', track: tracks[2] },
+      ]);
+      expect(player.deviceStackEntries()).toEqual([
+        { entryId: 'e2', track: tracks[2] },
+      ]);
+    });
+
+    it('an unknown session stack never empties the engine stack', () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      const tracks = manyTracks(2);
+      session.remoteEntries.set(
+        tracks.map((track, i) => ({ entryId: `e${i}`, track })),
+      );
+      // 'gone' is named by the stack but not in the state yet: not known.
+      session.stack.set(['gone']);
+      session.ownsPlayback.set(true);
+      session.available.set(true);
+      TestBed.tick();
+
+      expect(player.stackKnown()).toBe(false);
+      expect(engine.setStack).not.toHaveBeenCalled();
+    });
+
+    it('a loaded empty session stack is known and empties the engine stack', () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      const tracks = manyTracks(2);
+      session.remoteEntries.set(
+        tracks.map((track, i) => ({ entryId: `e${i}`, track })),
+      );
+      session.stack.set([]);
+      session.ownsPlayback.set(true);
+      session.available.set(true);
+      TestBed.tick();
+
+      expect(player.stackKnown()).toBe(true);
+      expect(engine.setStack).toHaveBeenLastCalledWith([]);
+    });
+
+    it('sign-out clears the session stack and the engine, and the session stack is not refilled after', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      const tracks = manyTracks(2);
+      session.remoteEntries.set(
+        tracks.map((track, i) => ({ entryId: `e${i}`, track })),
+      );
+      session.stack.set(['e1']);
+      session.ownsPlayback.set(true);
+      session.available.set(true);
+      TestBed.tick();
+      expect(engine.setStack).toHaveBeenLastCalledWith([
+        { entryId: 'e1', track: tracks[1] },
+      ]);
+
+      // The session applies the clear while it is still reachable.
+      session.command.mockImplementationOnce(async () => {
+        session.stack.set([]);
+        return { ok: true };
+      });
+      player.discardStackOnSignOut();
+      expect(session.command).toHaveBeenLastCalledWith({
+        type: 'clearQueue',
+        which: 'stack',
+      });
+      expect(engine.clearStack).toHaveBeenCalled();
+
+      // Signed out: the session cannot take commands, and a stale state that
+      // still names the stack must not refill the engine.
+      session.available.set(false);
+      const before = engine.setStack.mock.calls.length;
+      session.stack.set(['e1']);
+      TestBed.tick();
+      expect(engine.setStack.mock.calls.length).toBe(before);
+    });
+
+    it('sign-out discards the engine stack synchronously, before the session answers', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      session.remoteEntries.set([{ entryId: 'e0', track: manyTracks(1)[0] }]);
+      session.stack.set(['e0']);
+      session.ownsPlayback.set(true);
+      session.available.set(true);
+      let answer: (result: CommandResult) => void = () => undefined;
+      session.command.mockImplementationOnce(
+        () => new Promise<CommandResult>((resolve) => (answer = resolve)),
+      );
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      player.discardStackOnSignOut();
+      // The local discard does not wait for the session's answer.
+      expect(engine.clearStack).toHaveBeenCalledTimes(1);
+
+      // A late refusal is only logged; it does not put the stack back.
+      answer({ ok: false, error: 'unavailable' });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      TestBed.tick();
+      expect(engine.clearStack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+
+    it('clear buttons send one clearQueue per window while a session owns playback', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(3), 0);
+
+      session.ownsPlayback.set(true);
+      await player.clearKeepSpinning();
+      expect(session.command).toHaveBeenLastCalledWith({
+        type: 'clearQueue',
+        which: 'autofill',
+      });
+      await player.clearStack();
+      expect(session.command).toHaveBeenLastCalledWith({
+        type: 'clearQueue',
+        which: 'stack',
+      });
+      expect(session.command.mock.calls.map(([c]) => c.type)).not.toContain('remove');
+    });
+
+    it('a refused clear throws a SessionRefusedError for the toast', async () => {
+      const session = fakeSession();
+      session.ownsPlayback.set(true);
+      session.command.mockResolvedValueOnce({ ok: false, error: 'unavailable' });
+      configure(fakeEngine(), session);
+      const player = TestBed.inject(PlayerStore);
+
+      await expect(player.clearKeepSpinning()).rejects.toBeInstanceOf(
+        SessionRefusedError,
+      );
+    });
+
+    it('a remote stack replacement is a setStack command while a session owns playback', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      session.ownsPlayback.set(true);
+      engine.setStack.mockClear();
+
+      await player.setStackFromRemote([{ entryId: 'e9', track: stackTrack('z') }]);
+
+      expect(session.command).toHaveBeenLastCalledWith({
+        type: 'setStack',
+        tracks: [expect.objectContaining({ entryId: 'e9', id: 'fake:z' })],
+      });
+      expect(engine.setStack).not.toHaveBeenCalled();
     });
 
     it('keeps duplicates, including the song that is playing, as separate entries', async () => {
@@ -1206,7 +1433,7 @@ describe('PlayerStore', () => {
       await player.playNext(stackTrack('x'));
       await player.addToStack(stackTrack('y'));
 
-      player.clearStack();
+      await player.clearStack();
 
       expect(player.stackEntries()).toEqual([]);
       expect(ids(player.upcoming())).toEqual(['fake:1', 'fake:2', 'fake:3']);

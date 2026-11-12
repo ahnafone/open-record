@@ -5,6 +5,7 @@
 
 import {
   anchoredPosition,
+  CAST_LOOKAHEAD,
   type SessionCommand,
   type SessionDevice,
   type SessionReportMessage,
@@ -87,6 +88,50 @@ function entryKey(entry: SessionTrack): string {
     entry.uploadId,
     entry.local,
   ]);
+}
+
+/**
+ * The entries a speaker is planned for: the current one and the next
+ * `CAST_LOOKAHEAD`. In the flat order these are the pending Your Stack first,
+ * then autofill. Entries beyond the window are not planned until they enter it.
+ */
+function lookaheadEntries(state: SessionState): SessionTrack[] {
+  if (state.cursor < 0) return [];
+  return state.order.slice(state.cursor, state.cursor + 1 + CAST_LOOKAHEAD);
+}
+
+/** Entry ids in `entries` whose plan is missing or not playable. */
+function unplayableIds(
+  entries: readonly SessionTrack[],
+  plans: ReadonlyMap<string, MediaPlan>,
+): string[] {
+  return entries
+    .filter((entry) => {
+      const plan = plans.get(entryKey(entry));
+      return plan === undefined || !isPlayable(plan);
+    })
+    .map((entry) => entry.entryId);
+}
+
+/**
+ * Unavailable ids for a fresh load: ids outside the window keep their old marks
+ * (they were not re-planned), window entries are re-derived from `failing`.
+ */
+function freshUnavailable(
+  state: SessionState,
+  windowIds: readonly string[],
+  failing: readonly string[],
+): string[] {
+  const present = new Set(state.order.map((entry) => entry.entryId));
+  const inWindow = new Set(windowIds);
+  const kept = (state.unavailable ?? []).filter(
+    (entryId) => present.has(entryId) && !inWindow.has(entryId),
+  );
+  return [...new Set([...kept, ...failing])];
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
 /**
@@ -249,6 +294,8 @@ export class CastService {
       const state = sessions.snapshot(userId);
       if (!state || state.target?.kind !== 'cast' || state.target.castId !== castId) return;
       await this.applyControl(conn, state, command);
+      // A finished entry (castEnded forwards `play`) moves the window: top it up.
+      await this.refreshLookahead(userId, castId);
     });
   }
 
@@ -263,44 +310,50 @@ export class CastService {
   /** `SessionCastHooks.onState`: structural commands reload the receiver. */
   async sync(userId: string, castId: string, state: SessionState): Promise<void> {
     await this.enqueue(castId, async () => {
-      const conn = this.casts.get(castId);
-      if (!conn || conn.userId !== userId) return;
-      const sessions = this.sessions;
-      if (!sessions) return;
-      const current = sessions.snapshot(userId);
-      if (!current || current.target?.kind !== 'cast' || current.target.castId !== castId) return;
-
-      const entry = state.cursor >= 0 ? state.order[state.cursor] : undefined;
-      if (!entry) {
-        try {
-          await conn.transport.stop();
-        } catch {
-          // Receiver gone; the disconnect path owns cleanup.
-        }
-        conn.entryId = null;
-        conn.loadKey = null;
-        this.beginFreshLoad(conn);
-        return;
-      }
-      if (conn.entryId === entry.entryId && conn.loadKey === entryKey(entry)) {
-        // Same media, but a paused queue replace (autoplay=false) must silence
-        // the speaker without reloading the track.
-        if (!state.playing && conn.transport.status()?.playing) {
-          try {
-            await conn.transport.pause();
-          } catch {
-            // The disconnect path owns a gone receiver.
-          }
-        }
-        return;
-      }
-
-      try {
-        await this.reload(conn, state, entry, anchoredPosition(state, this.now()), state.playing);
-      } catch {
-        // `reload` already marked the entry unavailable, paused and reported.
-      }
+      await this.syncSpeaker(userId, castId, state);
+      await this.refreshLookahead(userId, castId);
     });
+  }
+
+  /** Reloads or pauses the speaker to match a structural change (no lookahead work). */
+  private async syncSpeaker(userId: string, castId: string, state: SessionState): Promise<void> {
+    const conn = this.casts.get(castId);
+    if (!conn || conn.userId !== userId) return;
+    const sessions = this.sessions;
+    if (!sessions) return;
+    const current = sessions.snapshot(userId);
+    if (!current || current.target?.kind !== 'cast' || current.target.castId !== castId) return;
+
+    const entry = state.cursor >= 0 ? state.order[state.cursor] : undefined;
+    if (!entry) {
+      try {
+        await conn.transport.stop();
+      } catch {
+        // Receiver gone; the disconnect path owns cleanup.
+      }
+      conn.entryId = null;
+      conn.loadKey = null;
+      this.beginFreshLoad(conn);
+      return;
+    }
+    if (conn.entryId === entry.entryId && conn.loadKey === entryKey(entry)) {
+      // Same media, but a paused queue replace (autoplay=false) must silence
+      // the speaker without reloading the track.
+      if (!state.playing && conn.transport.status()?.playing) {
+        try {
+          await conn.transport.pause();
+        } catch {
+          // The disconnect path owns a gone receiver.
+        }
+      }
+      return;
+    }
+
+    try {
+      await this.reload(conn, state, entry, anchoredPosition(state, this.now()), state.playing);
+    } catch {
+      // `reload` already marked the entry unavailable, paused and reported.
+    }
   }
 
   dispose(): void {
@@ -346,18 +399,21 @@ export class CastService {
     // Plan every entry first so controllers can mark the whole queue. This must
     // not call `sessions.setUnavailable`: `transferToCast` has not committed the
     // clone yet and the update would be written to the previous state.
+    // Plan the lookahead window only (current + CAST_LOOKAHEAD). Later entries are
+    // planned when they enter the window (see `refreshLookahead`).
     const plans = new Map<string, MediaPlan>();
-    const unavailable: string[] = [];
-    for (const entry of state.order) {
-      const plan = await planFor(entry, { webDir: this.config.webDir });
-      plans.set(entry.entryId, plan);
-      if (!isPlayable(plan)) unavailable.push(entry.entryId);
-    }
+    const window = lookaheadEntries(state);
+    await this.planMissing(window, plans);
+    const unavailable = freshUnavailable(
+      state,
+      window.map((entry) => entry.entryId),
+      unplayableIds(window, plans),
+    );
     if (unavailable.length > 0) state.unavailable = unavailable;
     else delete state.unavailable;
 
     const entry = state.cursor >= 0 ? state.order[state.cursor] : undefined;
-    const plan = entry ? plans.get(entry.entryId) : undefined;
+    const plan = entry ? plans.get(entryKey(entry)) : undefined;
     if (entry && (!plan || !isPlayable(plan))) throw new Error('unavailable');
 
     if (existing && existing.userId !== userId) {
@@ -883,6 +939,52 @@ export class CastService {
     if (!state || state.target?.kind !== 'cast' || state.target.castId !== conn.castId) return;
     if ((state.castSeekRestarts === true) === value) return;
     sessions.setCastSeekRestarts(conn.userId, conn.castId, value);
+  }
+
+  /** Plans every entry in `entries` that is not in `plans` yet (keyed by `entryKey`). */
+  private async planMissing(
+    entries: readonly SessionTrack[],
+    plans: Map<string, MediaPlan>,
+  ): Promise<void> {
+    for (const entry of entries) {
+      const key = entryKey(entry);
+      if (plans.has(key)) continue;
+      plans.set(key, await planFor(entry, { webDir: this.config.webDir }));
+    }
+  }
+
+  /**
+   * Keeps `unavailable` in step with the lookahead window (current + CAST_LOOKAHEAD,
+   * stack first). Runs after every structural change and transport command, so a
+   * stack change or a finished entry plans the newly visible entries. Marks are
+   * sticky, like runtime failures: once an entry is unavailable it stays so until
+   * it is replaced or removed. The session is re-read after each await, so a
+   * queue change made while planning is never written over.
+   */
+  private async refreshLookahead(userId: string, castId: string): Promise<void> {
+    const sessions = this.sessions;
+    const conn = this.casts.get(castId);
+    if (!sessions || !conn || conn.userId !== userId) return;
+    const plans = new Map<string, MediaPlan>();
+    try {
+      for (;;) {
+        const state = sessions.snapshot(userId);
+        if (!state || state.target?.kind !== 'cast' || state.target.castId !== castId) return;
+        const window = lookaheadEntries(state);
+        const missing = window.filter((entry) => !plans.has(entryKey(entry)));
+        if (missing.length > 0) {
+          await this.planMissing(missing, plans);
+          continue;
+        }
+        const present = new Set(state.order.map((entry) => entry.entryId));
+        const existing = (state.unavailable ?? []).filter((entryId) => present.has(entryId));
+        const next = [...new Set([...existing, ...unplayableIds(window, plans)])];
+        if (!sameIds(next, state.unavailable ?? [])) sessions.setUnavailable(userId, next);
+        return;
+      }
+    } catch (error) {
+      console.warn(`[cast] ${castId}: lookahead refresh failed (${errorText(error)})`);
+    }
   }
 
   private enqueue<T>(castId: string, task: () => Promise<T>): Promise<T> {

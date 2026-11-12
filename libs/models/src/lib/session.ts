@@ -62,6 +62,14 @@ export interface SessionState {
   /** Entry ids in the order before shuffle was enabled, so it can be restored. */
   baseOrderIds?: string[];
   /**
+   * Your Stack: entry ids of the user-added songs that have not played yet, in
+   * play order. INVARIANT: they are exactly `order[cursor + 1 .. cursor + stack.length]`
+   * (pending stack entries always follow the current entry), so every index into
+   * `order` stays valid and older clients still see the true play order. Everything
+   * after them is autofill (Keep Spinning). Absent = empty (older servers/clients).
+   */
+  stack?: string[];
+  /**
    * SERVER-SIDE availability only (what the server/Cast cannot play).
    * Device-local availability is a client signal (SessionStore.localUnavailable).
    */
@@ -133,8 +141,27 @@ export type SessionCommand =
        * shuffled queue). The server keeps it as given instead of reshuffling.
        */
       shuffled?: boolean;
+      /**
+       * Pending Your Stack entries. NOT part of `order`: the server places them
+       * right after the cursor (in this order) and shuffles only `order`.
+       */
+      stack?: SessionTrack[];
     }
-  | { type: 'enqueue'; tracks: SessionTrack[]; next: boolean }
+  | {
+      type: 'enqueue';
+      tracks: SessionTrack[];
+      next: boolean;
+      /**
+       * true = Your Stack entries: `next` puts them at the FRONT of the stack,
+       * otherwise at its END. Absent/false = autofill (Keep Spinning): `next`
+       * puts them at the front of autofill (after the stack), otherwise at the end.
+       */
+      stack?: boolean;
+    }
+  /** Replace the whole pending Your Stack (used by account sync). Entry ids are kept. */
+  | { type: 'setStack'; tracks: SessionTrack[] }
+  /** Empty the pending Your Stack, or the autofill part (everything after the stack). */
+  | { type: 'clearQueue'; which: 'stack' | 'autofill' }
   | { type: 'remove'; entryId: string }
   | { type: 'move'; from: number; to: number }
   | { type: 'replace'; entryId: string; track: SessionTrack }
@@ -231,6 +258,10 @@ export const PREVIOUS_RESTART_SEC = 3;
 
 /** Caps and cadences shared by both sides. */
 export const SESSION_MAX_ENTRIES = 1000;
+/** Pending Your Stack entries in a session (same cap as the local stack). */
+export const SESSION_MAX_STACK = 500;
+/** Songs sent to a Cast speaker ahead of the current one (stack first, then autofill). */
+export const CAST_LOOKAHEAD = 3;
 export const SESSION_MAX_ORDER_BYTES = 512 * 1024;
 export const WS_MAX_PAYLOAD_BYTES = 640 * 1024;
 export const PRE_HELLO_MAX_BYTES = 8 * 1024;
@@ -308,6 +339,93 @@ export function previousCursor(
   if (positionSec > PREVIOUS_RESTART_SEC) return { cursor: clamped, restart: true };
   if (clamped > 0) return { cursor: clamped - 1, restart: false };
   return { cursor: clamped, restart: true };
+}
+
+/** A re-placed queue: the flat play order, the cursor, and the pending Your Stack ids in play order. */
+export interface StackPlacement {
+  order: SessionTrack[];
+  cursor: number;
+  stack: string[];
+}
+
+/**
+ * Re-establishes the Your Stack invariant: `stack` ids are exactly
+ * `order[cursor + 1 .. cursor + stack.length]`.
+ *
+ * `pending` lists the pending entry ids in play order. Each one is taken out of
+ * wherever it sits and placed right after the current entry (`order[cursor]`).
+ * Rules:
+ * - Unknown and duplicate ids are dropped.
+ * - The current entry is never pending: if it is in `pending`, it is dropped.
+ * - With no current entry (`cursor` -1 or out of range) and pending entries, the
+ *   first pending entry becomes current (cursor 0) and the rest follow it.
+ * - With no current entry and nothing pending, `order` is returned unchanged.
+ *
+ * Pure: `order` is not mutated; entries are shared, not copied.
+ */
+export function placePendingStack(
+  order: readonly SessionTrack[],
+  cursor: number,
+  pending: readonly string[],
+): StackPlacement {
+  const byId = new Map<string, SessionTrack>();
+  for (const entry of order) {
+    if (!byId.has(entry.entryId)) byId.set(entry.entryId, entry);
+  }
+  const clamped = clampCursor(order.length, cursor);
+  const currentId = clamped >= 0 ? order[clamped]?.entryId : undefined;
+
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const id of pending) {
+    if (seen.has(id) || id === currentId || !byId.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  const pendingEntries = ids.flatMap((id) => {
+    const entry = byId.get(id);
+    return entry ? [entry] : [];
+  });
+  const rest = order.filter((entry) => !seen.has(entry.entryId));
+
+  if (currentId === undefined) {
+    if (pendingEntries.length === 0) {
+      return { order: [...order], cursor: -1, stack: [] };
+    }
+    return {
+      order: [...pendingEntries, ...rest],
+      cursor: 0,
+      stack: ids.slice(1),
+    };
+  }
+
+  const at = rest.findIndex((entry) => entry.entryId === currentId);
+  return {
+    order: [
+      ...rest.slice(0, at + 1),
+      ...pendingEntries,
+      ...rest.slice(at + 1),
+    ],
+    cursor: at,
+    stack: ids,
+  };
+}
+
+/**
+ * Adds `tracks` to the pending Your Stack (`front`: before the existing pending
+ * entries, otherwise after them) and re-places the stack after the cursor. The
+ * tracks must not already be in `order` (the caller checks duplicates).
+ */
+export function insertPendingStack(
+  order: readonly SessionTrack[],
+  cursor: number,
+  stack: readonly string[],
+  tracks: readonly SessionTrack[],
+  front: boolean,
+): StackPlacement {
+  const added = tracks.map((entry) => entry.entryId);
+  const ids = front ? [...added, ...stack] : [...stack, ...added];
+  return placePendingStack([...order, ...tracks], cursor, ids);
 }
 
 /** True only for the device target whose `clientId` matches; always false for cast/null. */

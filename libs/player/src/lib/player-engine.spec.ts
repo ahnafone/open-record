@@ -1204,6 +1204,21 @@ describe('PlayerEngine', () => {
       expect(player.upcoming().map((t) => t.id)).toEqual(['b']);
     });
 
+    it('restores session stack entry ids as slots right after the cursor', async () => {
+      const { player } = setup();
+      await player.setQueue(tracks.slice(0, 1), { startIndex: 0 });
+
+      await player.applyOrder([track('a'), track('x'), track('y'), track('b')], 0, {
+        stackEntryIds: ['e1', 'e2'],
+      });
+
+      expect(player.stackEntries().map((s) => [s.entryId, s.track.id])).toEqual([
+        ['e1', 'x'],
+        ['e2', 'y'],
+      ]);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['x', 'y', 'b']);
+    });
+
     it('forces shuffle and repeat off for a session order, unless sessionMode is false', async () => {
       const { player } = setup();
       await player.setQueue(tracks, { startIndex: 0 });

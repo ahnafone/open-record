@@ -3,7 +3,6 @@ import { TestBed } from '@angular/core/testing';
 import type { Track } from '@open-record/models';
 import type { StackEntry } from '@open-record/player';
 import { PlayerStore } from './player.store';
-import { SessionStore } from './session.store';
 import {
   SETTINGS_KEYS,
   StoragePort,
@@ -93,16 +92,26 @@ function boot(opts: {
   const storage = createInMemoryStorage();
   const stack = signal<StackEntry[]>([]);
   const session = { ownsPlayback: signal(false) };
-  // Mirrors PlayerStore: the session hides the stack, the device stack is not hidden.
+  /** The session's Your Stack (`SessionState.stack`), used while it owns playback. */
+  const sessionStack = signal<StackEntry[]>([]);
+  // Mirrors PlayerStore: while a session owns playback, the stack is the session's.
+  const effective = () => (session.ownsPlayback() ? sessionStack : stack);
+  /** False while the session's stack state is not loaded (PlayerStore.stackKnown). */
+  const sessionKnown = signal(true);
   const player = {
-    stackEntries: computed(() => (session.ownsPlayback() ? [] : stack())),
+    stackEntries: computed(() => effective()()),
+    stackKnown: computed(() => !session.ownsPlayback() || sessionKnown()),
     deviceStackEntries: computed(() => stack()),
-    setStackFromRemote: vi.fn((entries: readonly StackEntry[]) =>
-      stack.set([...entries]),
+    discardStackOnSignOut: vi.fn(() => {
+      sessionStack.set([]);
+      stack.set([]);
+    }),
+    setStackFromRemote: vi.fn(async (entries: readonly StackEntry[]) =>
+      effective().set([...entries]),
     ),
     discardStack: vi.fn(() => stack.set([])),
-    removeStackEntry: vi.fn((entryId: string) => {
-      stack.update((s) => s.filter((e) => e.entryId !== entryId));
+    removeStackEntry: vi.fn(async (entryId: string) => {
+      effective().update((s) => s.filter((e) => e.entryId !== entryId));
       return true;
     }),
   };
@@ -112,7 +121,6 @@ function boot(opts: {
     providers: [
       { provide: StoragePort, useValue: storage },
       { provide: PlayerStore, useValue: player },
-      { provide: SessionStore, useValue: session },
       { provide: AuthPort, useValue: fakeAuth(opts.signedIn) },
       { provide: StackSyncPort, useValue: opts.port },
       ...(user
@@ -130,7 +138,9 @@ function boot(opts: {
   return {
     player,
     session,
+    sessionKnown,
     stack,
+    sessionStack,
     store,
     storage,
     ready: user ? Promise.resolve() : auth.start(),
@@ -173,45 +183,60 @@ describe('StackSyncStore', () => {
     expect(player.setStackFromRemote).not.toHaveBeenCalled();
   });
 
-  it('does not push while a session owns playback', async () => {
+  it('pushes the session stack while a session owns playback', async () => {
     const { port, pushes } = fakePort();
-    const { session, stack, store, ready } = boot({ signedIn: true, port });
+    const { session, sessionStack, store, ready } = boot({ signedIn: true, port });
     await ready;
     store.start();
     await settle();
 
     session.ownsPlayback.set(true);
-    stack.set([entry('e1', a)]);
-    await settle(5_000);
-    expect(pushes).toHaveLength(0);
+    sessionStack.set([entry('e1', a)]);
+    await settle(2_000);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].upsert.map((r) => r.entryId)).toEqual(['e1']);
   });
 
-  it('does not push when a session takes playback while the sync state loads', async () => {
+  it('keeps a cloud entry the session stack still holds when a session takes playback', async () => {
     const { port } = fakePort();
-    const { storage, session, stack, store, ready } = boot({ signedIn: true, port });
-    // The cloud holds e0; this device still has it, so a push with the session-hidden
-    // (empty) stack would delete it from the cloud.
+    const { storage, session, sessionStack, store, ready } = boot({
+      signedIn: true,
+      port,
+    });
+    // The cloud and this device's sync state both hold e0.
     await storage.settings.set(
       SETTINGS_KEYS.stackSync,
       { userId: 'u1', entries: { e0: 0 } } as unknown as JsonValue,
     );
     await ready;
-    // e1 is new on this device, so a push would have something to write.
-    stack.set([entry('e0', a), entry('e1', b)]);
-    // Hold the sync-state read until the session has taken playback.
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const realGet = storage.settings.get.bind(storage.settings);
-    vi.spyOn(storage.settings, 'get').mockImplementationOnce(async (key) => {
-      await gate;
-      return realGet(key);
-    });
-    store.start();
-    await settle();
-
     session.ownsPlayback.set(true);
-    release();
+    sessionStack.set([entry('e0', a)]);
+    store.start();
     await settle(10_000);
+    // The session's stack equals the known state: nothing to write, nothing deleted.
+    expect(port.push).not.toHaveBeenCalled();
+  });
+
+  it('applies a pull during a session through setStack and does not push it back', async () => {
+    const remote = [
+      { entryId: 'r1', position: 0, track: { id: 'remote:a', providerId: 'remote', title: 'A', artist: 'X' } },
+    ];
+    const { port } = fakePort(remote);
+    const { player, session, sessionStack, store, ready } = boot({
+      signedIn: true,
+      port,
+    });
+    await ready;
+    session.ownsPlayback.set(true);
+    store.start();
+    await settle(10_000);
+
+    expect(player.setStackFromRemote).toHaveBeenCalledTimes(1);
+    expect(sessionStack().map((e) => e.entryId)).toEqual(['r1']);
+    expect(port.push).not.toHaveBeenCalled();
+    // Sync keeps running and no push/pull loop forms.
+    await settle(60_000);
+    expect(player.setStackFromRemote).toHaveBeenCalledTimes(1);
     expect(port.push).not.toHaveBeenCalled();
   });
 
@@ -249,6 +274,104 @@ describe('StackSyncStore', () => {
     await settle(10_000);
     expect(pushes).toHaveLength(0);
     expect(port.push).not.toHaveBeenCalled();
+  });
+
+  it('an unloaded session stack neither pushes, pulls nor deletes', async () => {
+    const remote = [
+      {
+        entryId: 'e0',
+        position: 0,
+        track: { id: 'remote:a', providerId: 'remote', title: 'A', artist: 'X' },
+      },
+    ];
+    const { port } = fakePort(remote);
+    const { storage, player, session, sessionKnown, sessionStack, store, ready } = boot({
+      signedIn: true,
+      port,
+    });
+    // This device knows e0 from the account; the session state has not loaded.
+    await storage.settings.set(
+      SETTINGS_KEYS.stackSync,
+      { userId: 'u1', entries: { e0: 0 } } as unknown as JsonValue,
+    );
+    await ready;
+    session.ownsPlayback.set(true);
+    sessionKnown.set(false);
+    store.start();
+    await settle(40_000);
+
+    expect(port.push).not.toHaveBeenCalled();
+    expect(port.pull).not.toHaveBeenCalled();
+    expect(player.setStackFromRemote).not.toHaveBeenCalled();
+
+    // The state loads with e0 still in it: nothing is written, nothing deleted.
+    sessionStack.set([entry('e0', a)]);
+    sessionKnown.set(true);
+    await settle(40_000);
+    expect(port.push).not.toHaveBeenCalled();
+    expect(player.setStackFromRemote).not.toHaveBeenCalled();
+  });
+
+  it('a loaded empty session stack syncs as empty', async () => {
+    const { port, pushes } = fakePort([]);
+    const { storage, session, store, ready } = boot({ signedIn: true, port });
+    await storage.settings.set(
+      SETTINGS_KEYS.stackSync,
+      { userId: 'u1', entries: { e0: 0 } } as unknown as JsonValue,
+    );
+    await ready;
+    session.ownsPlayback.set(true);
+    store.start();
+    await settle(10_000);
+
+    // Known loaded and empty: the cloud's e0 is removed, as a local clear would do.
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].remove).toEqual(['e0']);
+  });
+
+  it('a song a controller adds to the session is pushed exactly once, and the pull does not push it again', async () => {
+    const { port, pushes } = fakePort([]);
+    const { player, session, sessionStack, store, ready } = boot({
+      signedIn: true,
+      port,
+    });
+    await ready;
+    session.ownsPlayback.set(true);
+    store.start();
+    await settle();
+
+    // Another controller adds a song: the server's state now names it.
+    sessionStack.set([entry('s1', a)]);
+    await settle(2_000);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].upsert.map((r) => r.entryId)).toEqual(['s1']);
+
+    // The account now holds s1 (the pull reflects the push).
+    const pushed = pushes[0].upsert[0];
+    port.pull.mockResolvedValueOnce([
+      { entryId: 's1', position: pushed.position, track: pushed.track },
+    ]);
+    await store.pull();
+    await settle(10_000);
+
+    expect(pushes).toHaveLength(1);
+    expect(port.push).toHaveBeenCalledTimes(1);
+    expect(player.setStackFromRemote).not.toHaveBeenCalled();
+  });
+
+  it('sign-out asks the player to clear the stack, session included', async () => {
+    const user = signal<{ id: string } | null>({ id: 'u1' });
+    const { port } = fakePort();
+    const { player, stack, store, ready } = boot({ signedIn: true, port, user });
+    await ready;
+    store.start();
+    await settle();
+    stack.set([entry('e1', a)]);
+
+    user.set(null);
+    await settle();
+
+    expect(player.discardStackOnSignOut).toHaveBeenCalledTimes(1);
   });
 
   it('is a no-op while signed out', async () => {

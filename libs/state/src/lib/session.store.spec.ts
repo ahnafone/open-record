@@ -2,6 +2,7 @@
 import { computed, signal } from '@angular/core';
 import type { Provider } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
+import { SESSION_MAX_ENTRIES } from '@open-record/models';
 import type {
   CommandResult,
   SessionClientMessage,
@@ -50,14 +51,35 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
   const playOrder = signal<readonly number[] | null>(null);
   /** Whether the current track's media is in the engine (PlayerEngine.mediaLoaded). */
   const loaded = signal(true);
+  /** Your Stack slots as queue indexes, like PlayerEngine's pending stack. */
+  const stackSlots = signal<{ entryId: string; index: number }[]>([]);
   const upcomingEntries = computed(() => {
     const indexes = playOrder() ?? queue().map((_, i) => i);
     const position = indexes.indexOf(currentIndex());
+    const stackByIndex = new Map(
+      stackSlots().map((slot) => [slot.index, slot.entryId] as const),
+    );
     return indexes.slice(position + 1).map((queueIndex) => ({
       track: queue()[queueIndex] as Track,
       queueIndex,
-      playNext: false,
+      stackEntryId: stackByIndex.get(queueIndex) ?? null,
     }));
+  });
+  const stackEntries = computed(() =>
+    stackSlots().map((slot) => ({
+      entryId: slot.entryId,
+      track: queue()[slot.index] as Track,
+    })),
+  );
+  /** Minimal stand-in: appends the entries and makes them the pending stack. */
+  const setStack = vi.fn((entries: readonly { entryId: string; track: Track }[]) => {
+    const next = [...queue()];
+    const slots = entries.map((entry) => {
+      next.push(entry.track);
+      return { entryId: entry.entryId, index: next.length - 1 };
+    });
+    queue.set(next);
+    stackSlots.set(slots);
   });
 
   const applyOrder = vi.fn(
@@ -124,6 +146,9 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     seekIfDrifted,
     upcoming: computed(() => upcomingEntries().map((entry) => entry.track)),
     upcomingEntries,
+    stackSlots,
+    stackEntries,
+    setStack,
     playOrder,
     playNextIndices: signal<readonly number[]>([]),
     shuffle: signal(false),
@@ -2368,6 +2393,89 @@ describe('SessionStore', () => {
     expect(setQueue.order.map((entry) => entry.id)).toEqual(['b', 'a']);
     expect(setQueue.shuffle).toBe(true);
     expect(setQueue.shuffled).toBe(true);
+  });
+
+  it('publishes Your Stack in stack, never inside order', async () => {
+    const { port, engine } = await setup();
+    const player = TestBed.inject(PlayerStore);
+    engine.queue.set([catalogTrack('a'), catalogTrack('b'), catalogTrack('s')]);
+    engine.currentIndex.set(0);
+    engine.stackSlots.set([{ entryId: 'stk', index: 2 }]);
+
+    await player.play();
+    await settle(40);
+
+    const setQueue = port.commands[0]?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order.map((entry) => entry.id)).toEqual(['a', 'b']);
+    expect(setQueue.stack?.map((entry) => entry.entryId)).toEqual(['stk']);
+    expect(setQueue.stack?.[0]?.id).toBe('s');
+  });
+
+  it('an older server that sends no stack field leaves the session stack unknown', async () => {
+    const { store, port } = await setup();
+    port.push(
+      welcome(store, device(store, { order: [wire('e0', 'catalog:a')], cursor: 0 })),
+    );
+    await settle();
+    expect(store.ownsPlayback()).toBe(true);
+    expect(store.remoteStackKnown()).toBe(false);
+
+    // The new server always sends `stack`, even when empty: that is known.
+    port.push({
+      type: 'state',
+      session: device(store, {
+        order: [wire('e0', 'catalog:a')],
+        cursor: 0,
+        stack: [],
+        revision: 2,
+      }),
+    });
+    await settle();
+    expect(store.remoteStackKnown()).toBe(true);
+  });
+
+  it('trims the autofill so order + stack fits the server caps before setQueue', async () => {
+    const { store, port, engine } = await setup();
+    engine.queue.set([catalogTrack('a'), catalogTrack('s')]);
+    engine.currentIndex.set(0);
+    engine.stackSlots.set([{ entryId: 'stk', index: 1 }]);
+    const many = Array.from({ length: SESSION_MAX_ENTRIES + 200 }, (_, i) =>
+      catalogTrack(`catalog:${i}`),
+    );
+
+    await store.startSession(many, 3, { shuffle: false, repeat: 'off', autoplay: true });
+
+    const setQueue = port.commands.find(
+      (entry) => entry.command.type === 'setQueue',
+    )?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.order.length + (setQueue.stack?.length ?? 0)).toBeLessThanOrEqual(
+      SESSION_MAX_ENTRIES,
+    );
+    expect(setQueue.order[0]?.id).toBe('catalog:0');
+    expect(setQueue.cursor).toBe(3);
+  });
+
+  it('starts a session with the device stack in stack, not in order', async () => {
+    const { store, port, engine } = await setup();
+    engine.queue.set([catalogTrack('a'), catalogTrack('s')]);
+    engine.currentIndex.set(0);
+    engine.stackSlots.set([{ entryId: 'stk', index: 1 }]);
+
+    await store.startSession([catalogTrack('catalog:x')], 0, {
+      shuffle: false,
+      repeat: 'off',
+      autoplay: true,
+    });
+
+    const setQueue = port.commands.find(
+      (entry) => entry.command.type === 'setQueue',
+    )?.command;
+    if (setQueue?.type !== 'setQueue') throw new Error('expected setQueue');
+    expect(setQueue.stack?.map((entry) => entry.entryId)).toEqual(['stk']);
+    expect(setQueue.stack?.[0]?.id).toBe('s');
+    expect(setQueue.order.map((entry) => entry.entryId)).not.toContain('stk');
   });
 
   it('sends the natural order with a shuffled publish so shuffle off can restore it', async () => {

@@ -10,10 +10,13 @@
 import {
   anchoredPosition,
   clampCursor,
+  insertPendingStack,
   nextCursor,
+  placePendingStack,
   previousCursor,
   SESSION_MAX_ENTRIES,
   SESSION_MAX_ORDER_BYTES,
+  SESSION_MAX_STACK,
   TARGET_STALE_AFTER_MS,
   type CommandResult,
   type SessionCommand,
@@ -24,6 +27,7 @@ import {
   type SessionState,
   type SessionTarget,
   type SessionTrack,
+  type StackPlacement,
 } from '@open-record/models';
 
 /** One socket / REST stream. `id` distinguishes a reconnect from the old socket. */
@@ -162,6 +166,7 @@ function defaultState(now: number): SessionState {
     target: null,
     revision: 1,
     positionSec: 0,
+    stack: [],
     updatedAt: now,
     updatedBy: null,
   };
@@ -186,8 +191,94 @@ function cloneState(state: SessionState): SessionState {
   };
   if (state.baseOrderIds) copy.baseOrderIds = [...state.baseOrderIds];
   if (state.unavailable) copy.unavailable = [...state.unavailable];
+  copy.stack = [...stackIdsOf(state)];
   if (state.castOwner) copy.castOwner = { ...state.castOwner };
   return copy;
+}
+
+// ---------------------------------------------------------------------------
+// Your Stack layout. `state.stack` holds the pending entry ids and they always
+// sit at `order[cursor + 1 ..]`. Every cursor move or list change goes through
+// `applyPlacement`, which re-establishes that. The shared rules live in
+// `placePendingStack` (@open-record/models).
+// ---------------------------------------------------------------------------
+
+/** Pending Your Stack ids in play order (empty when the key is absent). */
+function stackIdsOf(state: SessionState): string[] {
+  return state.stack ?? [];
+}
+
+/** The entries that are not pending Your Stack, in play order (the shuffle/base list). */
+function nonStackEntries(state: SessionState): SessionTrack[] {
+  const pending = new Set(stackIdsOf(state));
+  return state.order.filter((entry) => !pending.has(entry.entryId));
+}
+
+/** The pending Your Stack tracks, in play order. */
+function stackTracksOf(state: SessionState): SessionTrack[] {
+  const byId = new Map(state.order.map((entry) => [entry.entryId, entry]));
+  return stackIdsOf(state).flatMap((entryId) => {
+    const entry = byId.get(entryId);
+    return entry ? [entry] : [];
+  });
+}
+
+/**
+ * Writes a placement into the state. `stack` is always an array (empty when nothing
+ * is pending) so clients can tell a server without Your Stack (key absent) apart.
+ */
+function applyPlacement(state: SessionState, placed: StackPlacement): void {
+  const before = stackIdsOf(state);
+  state.order = placed.order;
+  state.cursor = placed.cursor;
+  state.stack = [...placed.stack];
+  adoptLeftStackEntries(state, before);
+}
+
+/**
+ * A pending stack entry that leaves the stack (it was played, or the cursor moved
+ * onto it) is not in `baseOrderIds` while shuffle is on: stack entries are kept
+ * out of the restore list. Add it right after the nearest preceding entry that is
+ * in the list, so unshuffle restores it at its played position, not at the end.
+ */
+function adoptLeftStackEntries(state: SessionState, before: readonly string[]): void {
+  if (!state.shuffle || !state.baseOrderIds) return;
+  const pending = new Set(stackIdsOf(state));
+  const base = state.baseOrderIds;
+  const inBase = new Set(base);
+  const position = new Map(state.order.map((entry, index) => [entry.entryId, index]));
+  for (const entryId of before) {
+    if (pending.has(entryId) || inBase.has(entryId)) continue;
+    const at = position.get(entryId);
+    if (at === undefined) continue;
+    let anchor = -1;
+    for (let index = at - 1; index >= 0 && anchor < 0; index -= 1) {
+      const precedingId = state.order[index]?.entryId;
+      if (precedingId !== undefined) anchor = base.indexOf(precedingId);
+    }
+    base.splice(anchor + 1, 0, entryId);
+    inBase.add(entryId);
+  }
+}
+
+/** Moves the cursor (an index into the current `order`) and re-places the stack after it. */
+function moveCursor(state: SessionState, cursor: number): void {
+  applyPlacement(state, placePendingStack(state.order, cursor, stackIdsOf(state)));
+}
+
+/** Drops baseOrderIds/unavailable ids that no longer name an entry. */
+function pruneToOrder(state: SessionState): void {
+  const present = new Set(state.order.map((entry) => entry.entryId));
+  if (state.baseOrderIds) {
+    const kept = state.baseOrderIds.filter((entryId) => present.has(entryId));
+    if (kept.length > 0) state.baseOrderIds = kept;
+    else delete state.baseOrderIds;
+  }
+  if (state.unavailable) {
+    const kept = state.unavailable.filter((entryId) => present.has(entryId));
+    if (kept.length > 0) state.unavailable = kept;
+    else delete state.unavailable;
+  }
 }
 
 function errorText(error: unknown, fallback: string): string {
@@ -316,13 +407,19 @@ function isSessionCommand(value: unknown): value is SessionCommand {
         (value['baseOrderIds'] === undefined ||
           isBaseOrderIds(value['baseOrderIds'])) &&
         (value['shuffled'] === undefined ||
-          typeof value['shuffled'] === 'boolean')
+          typeof value['shuffled'] === 'boolean') &&
+        (value['stack'] === undefined || isSessionTrackArray(value['stack']))
       );
     case 'enqueue':
       return (
         isSessionTrackArray(value['tracks']) &&
-        typeof value['next'] === 'boolean'
+        typeof value['next'] === 'boolean' &&
+        (value['stack'] === undefined || typeof value['stack'] === 'boolean')
       );
+    case 'setStack':
+      return isSessionTrackArray(value['tracks']);
+    case 'clearQueue':
+      return value['which'] === 'stack' || value['which'] === 'autofill';
     case 'remove':
       return isId(value['entryId']);
     case 'move':
@@ -639,6 +736,7 @@ export class SessionService {
         state.cursor = -1;
         state.positionSec = 0;
         state.playing = false;
+        state.stack = [];
         delete state.baseOrderIds;
         delete state.unavailable;
         // A cast target keeps the speaker (CastService observes the empty state);
@@ -652,7 +750,7 @@ export class SessionService {
         const next = nextCursor(state.cursor, length, state.repeat, false);
         // At the end with repeat off there is nowhere to go: do not restart.
         if (next === state.cursor) break;
-        state.cursor = next;
+        moveCursor(state, next);
         state.positionSec = 0;
         state.playing = true;
         room.lastEndedEntryId = null;
@@ -668,7 +766,7 @@ export class SessionService {
           length,
           anchoredPosition(state, now),
         );
-        state.cursor = previous.cursor;
+        moveCursor(state, previous.cursor);
         state.positionSec = 0;
         state.playing = true;
         room.lastEndedEntryId = null;
@@ -696,7 +794,7 @@ export class SessionService {
           (entry) => entry.entryId === command.entryId,
         );
         if (index < 0) return { ok: false, error: 'entry-not-found' };
-        state.cursor = index;
+        moveCursor(state, index);
         state.positionSec = 0;
         state.playing = true;
         room.lastEndedEntryId = null;
@@ -706,7 +804,7 @@ export class SessionService {
       case 'playIndex': {
         if (command.index >= state.order.length)
           return { ok: false, error: 'index-out-of-range' };
-        state.cursor = command.index;
+        moveCursor(state, command.index);
         state.positionSec = 0;
         state.playing = true;
         room.lastEndedEntryId = null;
@@ -715,11 +813,15 @@ export class SessionService {
       }
       case 'setQueue': {
         const order = command.order.map((entry) => ({ ...entry }));
-        if (hasDuplicateIds(order))
+        const stackTracks = (command.stack ?? []).map((entry) => ({ ...entry }));
+        const everything = [...order, ...stackTracks];
+        if (hasDuplicateIds(everything))
           return { ok: false, error: 'duplicate-entry-id' };
+        if (stackTracks.length > SESSION_MAX_STACK)
+          return { ok: false, error: 'queue-too-large' };
         if (
-          order.length > SESSION_MAX_ENTRIES ||
-          orderByteLength(order) > SESSION_MAX_ORDER_BYTES
+          everything.length > SESSION_MAX_ENTRIES ||
+          orderByteLength(everything) > SESSION_MAX_ORDER_BYTES
         ) {
           return { ok: false, error: 'queue-too-large' };
         }
@@ -754,13 +856,22 @@ export class SessionService {
           // `shuffled`: the client already sent play order; keep it as given.
           if (!command.shuffled) playOrder = shuffled(order);
         }
-        state.order = playOrder;
-        state.shuffle = command.shuffle;
-        state.baseOrderIds = baseOrderIds;
-        state.cursor = currentEntryId
+        // Your Stack sits right after the cursor; with an empty `order` the first
+        // stack entry becomes current (see placePendingStack).
+        let cursorIndex = currentEntryId
           ? playOrder.findIndex((entry) => entry.entryId === currentEntryId)
           : clampedCursor;
-        if (state.cursor < 0) state.cursor = clampedCursor;
+        if (cursorIndex < 0) cursorIndex = clampedCursor;
+        applyPlacement(
+          state,
+          placePendingStack(
+            [...playOrder, ...stackTracks],
+            cursorIndex,
+            stackTracks.map((entry) => entry.entryId),
+          ),
+        );
+        state.shuffle = command.shuffle;
+        state.baseOrderIds = baseOrderIds;
         state.positionSec = 0;
         state.playing = command.autoplay && state.cursor >= 0;
         delete state.unavailable;
@@ -784,13 +895,34 @@ export class SessionService {
         ) {
           return { ok: false, error: 'queue-too-large' };
         }
+        const pendingIds = stackIdsOf(state);
+        if (command.stack === true) {
+          if (pendingIds.length + additions.length > SESSION_MAX_STACK)
+            return { ok: false, error: 'queue-too-large' };
+          this.freezePosition(state, now);
+          // Your Stack: front of the stack (plays next) or its end. Not autofill,
+          // so it never enters the shuffle restore list (baseOrderIds).
+          applyPlacement(
+            state,
+            insertPendingStack(
+              state.order,
+              state.cursor,
+              pendingIds,
+              additions,
+              command.next,
+            ),
+          );
+          mutated = true;
+          break;
+        }
         this.freezePosition(state, now);
+        // Autofill: `next` lands right after the stack, otherwise at the very end.
         const at = command.next
-          ? Math.max(0, state.cursor + 1)
+          ? Math.max(0, state.cursor + pendingIds.length + 1)
           : state.order.length;
         const baseBefore = state.baseOrderIds
           ? [...state.baseOrderIds]
-          : state.order.map((entry) => entry.entryId);
+          : nonStackEntries(state).map((entry) => entry.entryId);
         state.order.splice(at, 0, ...additions);
         if (state.shuffle) {
           state.baseOrderIds = [
@@ -830,6 +962,16 @@ export class SessionService {
           state.order.splice(index, 1);
           if (index < state.cursor) state.cursor -= 1;
         }
+        // Removing a pending stack entry drops it from the stack; removing the
+        // current entry may make the first pending one current. Re-placing covers both.
+        applyPlacement(
+          state,
+          placePendingStack(
+            state.order,
+            state.cursor,
+            stackIdsOf(state).filter((entryId) => entryId !== command.entryId),
+          ),
+        );
         if (state.unavailable) {
           const filtered = state.unavailable.filter(
             (entryId) => entryId !== command.entryId,
@@ -853,16 +995,33 @@ export class SessionService {
           return { ok: false, error: 'index-out-of-range' };
         }
         if (command.from !== command.to) {
+          // Your Stack is the block right after the cursor. A move may not start or
+          // land inside it, nor cross it (stack <-> autofill). Rejected, not reordered.
+          const pendingCount = stackIdsOf(state).length;
+          if (pendingCount > 0) {
+            const lo = state.cursor + 1;
+            const hi = state.cursor + pendingCount;
+            const side = (index: number): number =>
+              index < lo ? 0 : index > hi ? 2 : 1;
+            const fromSide = side(command.from);
+            const toSide = side(command.to);
+            if (fromSide === 1 || toSide === 1 || fromSide !== toSide)
+              return { ok: false, error: 'invalid-command' };
+          }
           this.freezePosition(state, now);
           const currentEntryId = state.order[state.cursor]?.entryId;
           const [moved] = state.order.splice(command.from, 1);
           if (!moved) return { ok: false, error: 'index-out-of-range' };
           state.order.splice(command.to, 0, moved);
-          if (currentEntryId) {
-            state.cursor = state.order.findIndex(
-              (entry) => entry.entryId === currentEntryId,
-            );
-          }
+          // The cursor follows the current entry by id. Re-placing keeps the stack
+          // right after it even when the move shifted entries across the cursor.
+          const cursor = currentEntryId
+            ? state.order.findIndex((entry) => entry.entryId === currentEntryId)
+            : state.cursor;
+          applyPlacement(
+            state,
+            placePendingStack(state.order, cursor, stackIdsOf(state)),
+          );
           mutated = true;
         }
         break;
@@ -888,14 +1047,17 @@ export class SessionService {
         if (command.shuffle === state.shuffle) break;
         this.freezePosition(state, now);
         const currentEntryId = state.order[state.cursor]?.entryId;
+        // Only the non-stack list is shuffled or restored; the stack stays after the cursor.
+        const stackIds = stackIdsOf(state);
+        const stackTracks = stackTracksOf(state);
+        const body = nonStackEntries(state);
+        let nextBody: SessionTrack[];
         if (command.shuffle) {
-          state.baseOrderIds = state.order.map((entry) => entry.entryId);
-          state.order = shuffled(state.order);
+          state.baseOrderIds = body.map((entry) => entry.entryId);
+          nextBody = shuffled(body);
           state.shuffle = true;
         } else {
-          const byId = new Map(
-            state.order.map((entry) => [entry.entryId, entry]),
-          );
+          const byId = new Map(body.map((entry) => [entry.entryId, entry]));
           const restored: SessionTrack[] = [];
           for (const entryId of state.baseOrderIds ?? []) {
             const entry = byId.get(entryId);
@@ -903,19 +1065,88 @@ export class SessionService {
             restored.push(entry);
             byId.delete(entryId);
           }
-          for (const entry of state.order) {
+          for (const entry of body) {
             if (byId.has(entry.entryId)) {
               restored.push(entry);
               byId.delete(entry.entryId);
             }
           }
-          state.order = restored;
+          nextBody = restored;
           state.shuffle = false;
           delete state.baseOrderIds;
         }
-        state.cursor = currentEntryId
-          ? state.order.findIndex((entry) => entry.entryId === currentEntryId)
-          : clampCursor(state.order.length, state.cursor);
+        const cursorIndex = currentEntryId
+          ? nextBody.findIndex((entry) => entry.entryId === currentEntryId)
+          : clampCursor(nextBody.length, state.cursor);
+        applyPlacement(
+          state,
+          placePendingStack([...nextBody, ...stackTracks], cursorIndex, stackIds),
+        );
+        mutated = true;
+        break;
+      }
+      case 'setStack': {
+        // Replaces the pending stack. The current entry and autofill are kept; the
+        // new tracks (which may reuse the old pending entry ids) follow the cursor.
+        const incoming = command.tracks.map((entry) => ({ ...entry }));
+        if (incoming.length > SESSION_MAX_STACK)
+          return { ok: false, error: 'queue-too-large' };
+        if (hasDuplicateIds(incoming))
+          return { ok: false, error: 'duplicate-entry-id' };
+        const body = nonStackEntries(state);
+        // A track already in the queue as current/history/autofill is dropped: the
+        // queue keeps its entry, the stack does not get a second copy of it.
+        const bodyIds = new Set(body.map((entry) => entry.entryId));
+        const tracks = incoming.filter((entry) => !bodyIds.has(entry.entryId));
+        const everything = [...body, ...tracks];
+        if (
+          everything.length > SESSION_MAX_ENTRIES ||
+          orderByteLength(everything) > SESSION_MAX_ORDER_BYTES
+        ) {
+          return { ok: false, error: 'queue-too-large' };
+        }
+        this.freezePosition(state, now);
+        const currentEntryId = state.order[state.cursor]?.entryId;
+        const cursorIndex = currentEntryId
+          ? body.findIndex((entry) => entry.entryId === currentEntryId)
+          : -1;
+        applyPlacement(
+          state,
+          placePendingStack(
+            [...body, ...tracks],
+            cursorIndex,
+            tracks.map((entry) => entry.entryId),
+          ),
+        );
+        // Nothing was loaded: the first pending track is now current but waits for a play.
+        if (cursorIndex < 0 && state.cursor >= 0) {
+          state.playing = false;
+          state.positionSec = 0;
+        }
+        // Replaced stack entries leave the order; drop their unavailable marks.
+        pruneToOrder(state);
+        mutated = true;
+        break;
+      }
+      case 'clearQueue': {
+        const pending = new Set(stackIdsOf(state));
+        if (command.which === 'stack') {
+          if (pending.size === 0) break;
+          // The stack sits right after the cursor, so the cursor index is unchanged.
+          state.order = state.order.filter((entry) => !pending.has(entry.entryId));
+          state.stack = [];
+        } else {
+          // Everything after the stack is autofill. With nothing loaded it is the whole list.
+          const keep = state.cursor < 0 ? 0 : state.cursor + pending.size + 1;
+          if (keep >= state.order.length) break;
+          state.order = state.order.slice(0, keep);
+        }
+        pruneToOrder(state);
+        if (state.order.length === 0) {
+          state.cursor = -1;
+          state.positionSec = 0;
+          state.playing = false;
+        }
         mutated = true;
         break;
       }
@@ -1040,11 +1271,11 @@ export class SessionService {
           state.positionSec = 0;
           state.playing = true;
         } else if (state.cursor + 1 < length) {
-          state.cursor += 1;
+          moveCursor(state, state.cursor + 1);
           state.positionSec = 0;
           state.playing = true;
         } else if (state.repeat === 'all') {
-          state.cursor = 0;
+          moveCursor(state, 0);
           state.positionSec = 0;
           state.playing = true;
         } else {
@@ -1073,7 +1304,7 @@ export class SessionService {
           this.commitStaleClear(room, now, staleCleared); // entry vanished
           return;
         }
-        state.cursor = index;
+        moveCursor(state, index);
         state.positionSec = report.positionSec;
         state.playing = report.playing;
         state.updatedAt = now;
@@ -1170,11 +1401,11 @@ export class SessionService {
       state.positionSec = 0;
       state.playing = true;
     } else if (state.cursor + 1 < state.order.length) {
-      state.cursor += 1;
+      moveCursor(state, state.cursor + 1);
       state.positionSec = 0;
       state.playing = true;
     } else if (state.repeat === 'all') {
-      state.cursor = 0;
+      moveCursor(state, 0);
       state.positionSec = 0;
       state.playing = true;
     } else {

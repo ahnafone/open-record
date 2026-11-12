@@ -15,7 +15,6 @@ import {
 } from '@open-record/storage';
 import { AuthStore } from './auth.store';
 import { PlayerStore } from './player.store';
-import { SessionStore } from './session.store';
 import {
   NetworkStatusPort,
   StackFullError,
@@ -70,14 +69,17 @@ interface SyncedEntry {
  *
  * Local-only (`local:`) tracks never sync. Without a `StackSyncPort`, or when
  * signed out, the stack stays on this device and nothing here runs. While a
- * session owns playback (Cast, another device) the stack is not ours to write.
+ * session owns playback (Cast, another device) the synced stack is the
+ * session's stack: it is pushed and pulled the same way, and a pull applies
+ * through the session (`setStack`). While that session stack is not known yet
+ * (no state, or a partial one), nothing is pushed or pulled and a pull is
+ * retried later: an unknown stack must not read as an empty one.
  */
 @Injectable({ providedIn: 'root' })
 export class StackSyncStore {
   private readonly port = inject(StackSyncPort, { optional: true });
   private readonly auth = inject(AuthStore);
   private readonly player = inject(PlayerStore);
-  private readonly session = inject(SessionStore);
   private readonly storage = inject(StoragePort);
   private readonly network = inject(NetworkStatusPort, { optional: true });
   private readonly document = inject(DOCUMENT, { optional: true });
@@ -119,11 +121,13 @@ export class StackSyncStore {
         if (id && this.started) this.pullNow();
       });
     });
-    // Local stack changed (add, remove, reorder, a play-through, a remote apply).
-    // Safe for applied pulls: the diff against `known` is then empty.
+    // Your Stack changed (add, remove, reorder, a play-through, a remote apply),
+    // on this device or in the session that owns playback. Safe for applied
+    // pulls: the diff against `known` is then empty.
     effect(() => {
-      this.player.deviceStackEntries();
-      this.session.ownsPlayback();
+      this.player.stackEntries();
+      // A session stack that became known is a change too (its push was skipped).
+      this.player.stackKnown();
       untracked(() => {
         if (this.started && this.enabled()) this.scheduleSync(PUSH_DEBOUNCE_MS);
       });
@@ -189,9 +193,9 @@ export class StackSyncStore {
     });
   }
 
-  /** `pull()` that never rejects; a failure retries later. */
+  /** `pull()` that never rejects; a failure retries later (push and pull). */
   private pullNow(): void {
-    this.pull().catch(() => this.scheduleSync(RETRY_MS));
+    this.pull().catch(() => this.schedulePull(RETRY_MS));
   }
 
   /** Serialize pushes and pulls so they never interleave. */
@@ -232,26 +236,34 @@ export class StackSyncStore {
    */
   private forgetAccount(): void {
     this.cancelTimers();
-    // Direct clear: the stack must not survive into the next account's sync,
-    // even when a session holds playback (`clearStack` would refuse then).
-    this.player.discardStack();
+    // The stack must not survive into the next account's sync, even when a
+    // session holds it: the session's stack is cleared too (best effort).
+    this.player.discardStackOnSignOut();
     this.known = { userId: '', entries: new Map() };
     void this.saveKnown();
+  }
+
+  /**
+   * While a session owns playback and its stack is not known yet, the stack
+   * this device sees is not the account's: nothing is pushed or pulled, and a
+   * pull is scheduled for later. A loaded session stack (even an empty one)
+   * syncs as it is.
+   */
+  private stackUnknown(): boolean {
+    if (this.player.stackKnown()) return false;
+    this.schedulePull(RETRY_MS);
+    return true;
   }
 
   private async pushPending(): Promise<void> {
     const port = this.port;
     const me = this.auth.user()?.id;
     if (!port || !this.enabled() || !me) return;
+    if (this.stackUnknown()) return;
     if ((await port.userId()) !== me) return;
-    // Read after the await: a session may have taken playback meanwhile.
-    if (this.session.ownsPlayback()) return;
     const generation = this.generation;
 
     const known = await this.loadKnown();
-    // Re-checked after the last await: a session may have taken playback while
-    // the sync state loaded. The stack is then not ours to write.
-    if (this.session.ownsPlayback()) return;
     // The stack on this device belongs to another account: it is replaced by
     // that account's pull, never pushed into this one.
     if (known.userId && known.userId !== me) return;
@@ -293,7 +305,7 @@ export class StackSyncStore {
       // the failing write's entries (earlier writes are stored), then push the
       // rest: known entries, moves and removals must not wait for the next change.
       console.warn('Your Stack is full; dropped the entries that did not fit.');
-      for (const id of err.entryIds) this.player.removeStackEntry(id);
+      for (const id of err.entryIds) await this.player.removeStackEntry(id);
       if (err.entryIds.length) return this.pushPending();
       return;
     }
@@ -322,18 +334,15 @@ export class StackSyncStore {
     const port = this.port;
     const me = this.auth.user()?.id;
     if (!port || !this.enabled() || !me) return;
+    if (this.stackUnknown()) return;
     if ((await port.userId()) !== me) return;
     const known = await this.loadKnown();
     const before = this.stackKey();
     const rows = await port.pull();
-    // Signed out, switched account, or a session took playback: leave it alone.
-    if (
-      !this.enabled() ||
-      this.auth.user()?.id !== me ||
-      this.session.ownsPlayback()
-    ) {
-      return;
-    }
+    // Signed out or switched account while the request was in flight.
+    if (!this.enabled() || this.auth.user()?.id !== me) return;
+    // The session lost its stack state while the request was in flight.
+    if (this.stackUnknown()) return;
     // The stack changed while the request was in flight: these rows are stale.
     // The change's own push goes up; pull again shortly to pick up the account.
     if (this.stackKey() !== before) {
@@ -347,18 +356,23 @@ export class StackSyncStore {
     const foreign = known.userId !== '' && known.userId !== me;
     const stored =
       known.userId === me ? known.entries : new Map<string, number>();
-    const local = this.player.deviceStackEntries();
+    const local = this.player.stackEntries();
     // Kept after the synced ones, in local order: local files (never sync) and
     // entries this device added that the account does not hold yet (a failed
     // push; they go up on the retry). An entry `known` holds but the remote
     // lacks was removed on another device, so it is dropped.
+    // An entry id the account already holds is never kept twice: the session
+    // refuses duplicate ids, which would fail every retry of this pull.
     const kept = local.filter(
       (e) =>
-        e.track.id.startsWith('local:') ||
-        (!foreign && !stored.has(e.entryId) && !remoteIds.has(e.entryId)),
+        !remoteIds.has(e.entryId) &&
+        (e.track.id.startsWith('local:') ||
+          (!foreign && !stored.has(e.entryId))),
     );
     const next = [...remote.map((r) => r.entry), ...kept];
-    if (!sameEntries(next, local)) this.player.setStackFromRemote(next);
+    // Applied before `known` moves: a refused apply throws, so the diff is
+    // retried instead of being recorded as done.
+    if (!sameEntries(next, local)) await this.player.setStackFromRemote(next);
 
     this.known = {
       userId: me,
@@ -370,14 +384,14 @@ export class StackSyncStore {
   /** The synced part of the stack: local files excluded, positions counted over it. */
   private syncedStack(): StackEntry[] {
     return this.player
-      .deviceStackEntries()
+      .stackEntries()
       .filter((entry) => !entry.track.id.startsWith('local:'));
   }
 
-  /** Every entry id on this device, in order (detects any change). */
+  /** Every entry id in the effective stack, in order (detects any change). */
   private stackKey(): string {
     return this.player
-      .deviceStackEntries()
+      .stackEntries()
       .map((e) => e.entryId)
       .join('\n');
   }

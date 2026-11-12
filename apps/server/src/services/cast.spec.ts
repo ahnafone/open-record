@@ -913,3 +913,43 @@ describe('cast sync', () => {
     expect(transport.loads).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Lookahead window (current + CAST_LOOKAHEAD)
+// ---------------------------------------------------------------------------
+
+describe('cast lookahead window', () => {
+  it('plans and marks only the current entry and the next CAST_LOOKAHEAD', async () => {
+    // Indices 0..3 are the window; the local entry at 2 is inside it, at 4 outside.
+    const h = createHarness({
+      queue: [remoteTrack('a'), remoteTrack('b'), localTrack('c'), remoteTrack('d'), localTrack('e')],
+      cursor: 0,
+      playing: true,
+    });
+    await castTo(h);
+
+    // Written on the clone during the transfer, not through setUnavailable.
+    expect(h.state().unavailable).toEqual(['c']);
+    expect(h.calls.unavailable).toEqual([]);
+  });
+
+  it('marks a newly visible local stack entry after a sync that moves it into the window', async () => {
+    const queue = [remoteTrack('a'), remoteTrack('b'), remoteTrack('c'), remoteTrack('d'), localTrack('e')];
+    const h = createHarness({ queue, cursor: 0, playing: true });
+    await castTo(h);
+    expect(h.state().unavailable).toBeUndefined();
+
+    // A pending local stack entry lands at index 1 (inside the window), pushing the rest back.
+    const [a, b, c, d, e] = queue as [SessionTrack, SessionTrack, SessionTrack, SessionTrack, SessionTrack];
+    h.setState({
+      ...h.state(),
+      order: [a, localTrack('s'), b, c, d, e],
+      stack: ['s'],
+    });
+    await h.service.sync('u1', 'cast-1', h.state());
+
+    expect(h.state().unavailable).toEqual(['s']);
+    // Current entry unchanged, so the speaker is not reloaded.
+    expect(h.transport.loads).toHaveLength(1);
+  });
+});
