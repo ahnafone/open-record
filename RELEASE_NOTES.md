@@ -1,7 +1,12 @@
-# Open Record v0.0.6 (beta)
+# Open Record v0.0.7 (beta)
 
 Open Record is a vinyl record-shop listening room: browse the crates, build playlists, import your
-own music and play it on a virtual turntable. This is the sixth beta.
+own music and play it on a virtual turntable. This is the seventh beta.
+
+## What's new in v0.0.7
+
+- **Smarter shuffle:** shuffled autoplay now skips songs you have played, skipped or removed from the queue in the last 12 hours. Songs that were queued but never reached can come back. Skipping includes swiping back and jumping ahead past songs. Clear does not count.
+- **Synced across devices:** when you are signed in, this follows you across your devices. If you run your own Supabase project, apply the `recent_exclusions` migration (in `supabase/migrations`) first.
 
 ## What's new in v0.0.6
 
@@ -50,7 +55,7 @@ Download links always point at the latest release. File names are the same as be
 | Linux x64 (recommended) | [OpenRecord-linux-amd64.deb](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-amd64.deb) | `sudo apt install ./OpenRecord-linux-amd64.deb` |
 | Linux x64 | [OpenRecord-linux-x86_64.AppImage](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-linux-x86_64.AppImage) | `chmod +x`, then run |
 | Windows x64 | [OpenRecord-windows-x64.exe](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-windows-x64.exe) | SmartScreen warning; More info > Run anyway |
-| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.6; macOS installers coming later |
+| macOS | [Build from source](docs/desktop.md#build-from-source) | Not in v0.0.7; macOS installers coming later |
 | Android | [OpenRecord-android.apk](https://github.com/ahnafone/open-record/releases/latest/download/OpenRecord-android.apk) | Android 7+. Signed release APK; beta-tested |
 | iPhone / iPad | [Build from source](docs/ios-install.md) | **Not tested yet.** Needs a Mac, Xcode and a free Apple ID |
 
@@ -63,7 +68,7 @@ There is no App Store, TestFlight, Play Store or enterprise build.
 - **iPhone:** not tested on a device yet. It is build-from-source only, and a free Apple ID build
   expires after **7 days** and must be re-signed from Xcode.
 - **Desktop:** installers are **unsigned**, so Windows (SmartScreen) shows warnings. Windows and AppImage builds update in the app. `.deb` and macOS builds need a manual reinstall over the old version. Your library is kept in the app's data folder.
-- **macOS installers are not part of v0.0.6.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
+- **macOS installers are not part of v0.0.7.** Build from source; see [docs/desktop.md](docs/desktop.md#build-from-source).
 - **Streaming and saving** depend on a stream-link server and `yt-dlp`. Links expire. With your own
   server, streaming works on the same network as the server, not on mobile data. Guest streaming on the
   public web app is rate-limited and only on servers that enable it.

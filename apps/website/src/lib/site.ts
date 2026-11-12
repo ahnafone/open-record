@@ -1,7 +1,7 @@
 // Shared site facts. Every link and asset path on the site goes through url() or absolute(),
 // so the GitHub Pages project base (/open-record/) is applied in one place.
 
-export const VERSION = 'v0.0.6';
+export const VERSION = 'v0.0.7';
 export const BADGE_TEXT = `Beta · ${VERSION}`;
 
 export const REPO = 'https://github.com/ahnafone/open-record';
