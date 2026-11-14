@@ -33,6 +33,44 @@ import type { SessionConnectionState } from './ports';
 import { SessionStore } from './session.store';
 import { SettingsStore } from './settings.store';
 
+// Android system volume: off by default, switched on per test.
+const android = vi.hoisted(() => {
+  const listeners = new Map<string, ((payload: unknown) => void)[]>();
+  return {
+    available: false,
+    listeners,
+    /** Fires a plugin event at every subscriber, as the native plugin does. */
+    emit(event: string, payload: unknown): void {
+      for (const cb of listeners.get(event) ?? []) cb(payload);
+    },
+    setKeyIntercept: vi.fn(async (_opts: { enabled: boolean }) => undefined),
+    setVolume: vi.fn(async (_opts: { volume: number }) => undefined),
+    getVolume: vi.fn(async () => ({ volume: 1 })),
+    addListener: vi.fn(
+      async (event: string, cb: (payload: unknown) => void) => {
+        listeners.set(event, [...(listeners.get(event) ?? []), cb]);
+        return {
+          remove: async () => {
+            listeners.set(
+              event,
+              (listeners.get(event) ?? []).filter((item) => item !== cb),
+            );
+          },
+        };
+      },
+    ),
+  };
+});
+
+vi.mock('@open-record/player', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@open-record/player')>();
+  return {
+    ...actual,
+    isAndroidSystemVolumeAvailable: () => android.available,
+    SystemVolume: android,
+  };
+});
+
 type ApplyOptions = {
   autoplay?: boolean;
   positionSec?: number;
@@ -126,6 +164,12 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     currentIndex.set(currentIndex() + 1);
     return true;
   });
+  const volume = signal(1);
+  const muted = signal(false);
+  const setVolume = vi.fn((next: number) => {
+    volume.set(next);
+    if (next > 0) muted.set(false);
+  });
 
   return {
     playAt,
@@ -158,8 +202,9 @@ function fakeEngine(options: { blocked?: boolean } = {}) {
     lastPlay: signal(null),
     loadSeq: signal(0),
     error: signal(null),
-    volume: signal(1),
-    muted: signal(false),
+    volume,
+    muted,
+    setVolume,
     loaded,
     /** Mirrors PlayerEngine.mediaLoaded; tests flip `loaded` to model a load. */
     get mediaLoaded() {
@@ -221,6 +266,12 @@ class FakePort implements SessionPort {
 
   send(message: SessionClientMessage): void {
     this.sent.push(message);
+  }
+
+  volumeUpdates: { volume?: number; volumeControl?: string }[] = [];
+
+  setDeviceVolume(update: { volume?: number; volumeControl?: string }): void {
+    this.volumeUpdates.push(update);
   }
 
   async command(id: string, command: SessionCommand): Promise<CommandResult> {
@@ -1586,7 +1637,12 @@ describe('SessionStore', () => {
     expect(store.isTarget()).toBe(true);
     expect(engine.play).not.toHaveBeenCalled();
     expect(engine.status()).not.toBe('playing');
-    expect(port.commands).toHaveLength(2);
+    // Only the device's own level follows the transfer: no play command.
+    expect(port.commands.map((entry) => entry.command.type)).toEqual([
+      'pause',
+      'transfer',
+      'setVolume',
+    ]);
   });
 
   it('retries only the transfer after a failed transfer, and resets on sign-out', async () => {
@@ -3201,5 +3257,442 @@ describe('SessionStore', () => {
     await setup();
     expect(() => TestBed.inject(PlayerStore)).not.toThrow();
     expect(TestBed.inject(PlayerStore)).toBeTruthy();
+  });
+});
+
+describe('SessionStore volume', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+  afterEach(() => vi.useRealTimers());
+
+  const laptop: SessionDevice = {
+    id: 'other-client',
+    deviceId: 'device-2',
+    name: 'Laptop',
+    platform: 'web',
+    online: true,
+    lastSeenAt: Date.now(),
+    capabilities: { cast: true, localFiles: false },
+    volumeControl: 'full',
+  };
+
+  it('controller sends setVolume to a remote device, clamped and throttled', async () => {
+    vi.useFakeTimers();
+    const { store, port } = await setup();
+    port.push(
+      welcome(
+        store,
+        session({
+          revision: 2,
+          target: remoteTarget(),
+          volume: 0.4,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: true,
+        }),
+        [laptop],
+      ),
+    );
+    await settle();
+
+    expect(store.isControllingRemote()).toBe(true);
+    expect(store.remoteVolume()).toBe(0.4);
+
+    store.setRemoteVolume(1.7);
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'setVolume',
+      volume: 1,
+    });
+    expect(store.remoteVolume()).toBe(1);
+
+    // Within the throttle window: optimistic at once, sent once the window ends.
+    const sentBefore = port.commands.length;
+    store.setRemoteVolume(-3);
+    expect(store.remoteVolume()).toBe(0);
+    expect(port.commands).toHaveLength(sentBefore);
+    vi.advanceTimersByTime(200);
+    // Serialized: the value waits until the in-flight command settles.
+    await settle();
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'setVolume',
+      volume: 0,
+    });
+  });
+
+  it('a device that becomes target sends its own level, not the server volume', async () => {
+    const { store, port, engine } = await setup();
+    const playing = device(store, {
+      revision: 2,
+      volume: 0.3,
+      order: [wire('e1', 't1')],
+      cursor: 0,
+      playing: false,
+    });
+    port.push(welcome(store, playing));
+    await settle();
+
+    expect(engine.setVolume).not.toHaveBeenCalled();
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'setVolume',
+      volume: 1,
+    });
+
+    // The server echoes that level back: nothing is applied or sent again.
+    const sent = port.commands.length;
+    port.push({ type: 'state', session: { ...playing, revision: 3, volume: 1 } });
+    await settle();
+    expect(engine.setVolume).not.toHaveBeenCalled();
+    expect(port.commands).toHaveLength(sent);
+  });
+
+  it('a remote volume arriving right after a local change does not revert it', async () => {
+    vi.useFakeTimers();
+    const { store, port, engine } = await setup();
+    port.push(
+      welcome(
+        store,
+        device(store, {
+          revision: 2,
+          volume: 1,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: false,
+        }),
+      ),
+    );
+    await settle();
+
+    engine.volume.set(0.6);
+    await settle();
+    // Target-side sends share the controller's throttled, serialized sender.
+    vi.advanceTimersByTime(200);
+    await settle();
+    expect(port.commands.at(-1)?.command).toEqual({
+      type: 'setVolume',
+      volume: 0.6,
+    });
+
+    // A state with a different level arrives inside the grace window.
+    port.push({
+      type: 'state',
+      session: {
+        ...device(store, {
+          revision: 3,
+          volume: 0.9,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: false,
+        }),
+      },
+    });
+    await settle();
+    expect(engine.setVolume).not.toHaveBeenCalledWith(0.9);
+  });
+
+  it('Android: volume keys are intercepted only while controlling a remote', async () => {
+    android.available = true;
+    try {
+      const { store, port } = await setup();
+      port.push(
+        welcome(
+          store,
+          session({
+            revision: 2,
+            target: remoteTarget(),
+            volume: 0.4,
+            order: [wire('e1', 't1')],
+            cursor: 0,
+            playing: true,
+          }),
+          [laptop],
+        ),
+      );
+      await settle();
+      expect(android.setKeyIntercept).toHaveBeenLastCalledWith({
+        enabled: true,
+      });
+
+      port.push({
+        type: 'state',
+        session: device(store, {
+          revision: 3,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: false,
+        }),
+      });
+      await settle();
+      expect(android.setKeyIntercept).toHaveBeenLastCalledWith({
+        enabled: false,
+      });
+    } finally {
+      android.available = false;
+    }
+  });
+
+  it('Android: the OS snapping a just-applied remote level is not a user change', async () => {
+    android.available = true;
+    android.listeners.clear();
+    // Native plugin model: the OS holds 1/15 steps and emits the snapped level.
+    let osVolume = 1;
+    android.setVolume.mockImplementation(
+      async ({ volume }: { volume: number }) => {
+        const snapped = Math.round(volume * 15) / 15;
+        if (snapped === osVolume) return;
+        osVolume = snapped;
+        android.emit('volumeChanged', { volume: snapped });
+      },
+    );
+    try {
+      const { store, port, engine } = await setup();
+      engine.setVolume.mockImplementation((next: number) => {
+        engine.volume.set(next);
+        void android.setVolume({ volume: next });
+      });
+      port.push(
+        welcome(
+          store,
+          device(store, {
+            revision: 2,
+            volume: 1,
+            order: [wire('e1', 't1')],
+            cursor: 0,
+            playing: false,
+          }),
+        ),
+      );
+      await settle();
+      const sentBefore = port.commands.length;
+
+      // The controller sets 0.37; the OS snaps it to 0.40 and echoes that back.
+      port.push({
+        type: 'state',
+        session: device(store, {
+          revision: 3,
+          volume: 0.37,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: false,
+        }),
+      });
+      await settle();
+      expect(osVolume).toBe(0.4);
+      expect(engine.volume()).toBe(0.4);
+      // The echo is known, not a local change: no setVolume command went out.
+      expect(
+        port.commands.slice(sentBefore).filter((c) => c.command.type === 'setVolume'),
+      ).toEqual([]);
+
+      // No local grace was started, so the next controller level applies.
+      port.push({
+        type: 'state',
+        session: device(store, {
+          revision: 4,
+          volume: 0.8,
+          order: [wire('e1', 't1')],
+          cursor: 0,
+          playing: false,
+        }),
+      });
+      await settle();
+      expect(android.setVolume).toHaveBeenLastCalledWith({ volume: 0.8 });
+      expect(
+        port.commands.slice(sentBefore).filter((c) => c.command.type === 'setVolume'),
+      ).toEqual([]);
+    } finally {
+      android.available = false;
+      android.listeners.clear();
+      android.setVolume.mockImplementation(async () => undefined);
+    }
+  });
+});
+
+describe('SessionStore desktop target volume', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+  afterEach(() => vi.useRealTimers());
+
+  /** A desktop (web) client that is the target and playing a two-track queue. */
+  async function playingDesktop(volume = 1) {
+    const ctx = await setup();
+    ctx.port.push(
+      welcome(
+        ctx.store,
+        device(ctx.store, {
+          revision: 2,
+          volume,
+          order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+          cursor: 0,
+          playing: true,
+        }),
+      ),
+    );
+    await settle();
+    // The fresh start re-bases the anchor with a report: clear its throttle.
+    vi.advanceTimersByTime(2001);
+    ctx.port.sent.length = 0;
+    return ctx;
+  }
+
+  function stateWithVolume(
+    store: SessionStore,
+    revision: number,
+    volume: number,
+  ): SessionServerMessage {
+    return {
+      type: 'state',
+      session: device(store, {
+        revision,
+        volume,
+        order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+        cursor: 0,
+        playing: true,
+      }),
+    };
+  }
+
+  it('desktop target: volume state after its own ticks is applied', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    expect(store.isTarget()).toBe(true);
+    // The desktop's own tick reports its level (1) to the server.
+    store.report('tick');
+    expect(port.reports().at(-1)?.volume).toBe(1);
+
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+    expect(engine.setVolume).toHaveBeenLastCalledWith(0.8);
+    expect(engine.volume()).toBe(0.8);
+  });
+
+  it('desktop target: volume applied right after a saved volume is restored', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    // The saved volume lands after the first reading (restoreVolume).
+    engine.volume.set(0.6);
+    await settle();
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+    // Inside the local-change grace the level is held back, then re-applied.
+    await vi.advanceTimersByTimeAsync(1600);
+    await settle();
+    expect(engine.volume()).toBe(0.8);
+  });
+
+  it('desktop target: volume applied while muted (reports 0)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    engine.muted.set(true);
+    // Mute is a local change: wait out the local grace before the controller.
+    vi.advanceTimersByTime(2000);
+    await settle();
+    store.report('tick');
+    expect(port.reports().at(-1)?.volume).toBe(0);
+
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+    expect(engine.setVolume).toHaveBeenLastCalledWith(0.8);
+    expect(engine.muted()).toBe(false);
+    expect(engine.volume()).toBe(0.8);
+  });
+
+  it('desktop target: a pending grace retry is cancelled when the target moves away and back', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    engine.volume.set(0.6);
+    await settle();
+    // Inside the grace: the controller's 0.8 is held and a retry is queued.
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+
+    // Away to another device (its state carries no volume), then back with
+    // the server's stored 0.8. The stale retry must not fire.
+    port.push({
+      type: 'state',
+      session: session({
+        revision: 4,
+        target: remoteTarget(),
+        order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+        cursor: 0,
+        playing: true,
+      }),
+    });
+    await settle();
+    port.push(stateWithVolume(store, 5, 0.8));
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(1600);
+    await settle();
+    expect(engine.setVolume).not.toHaveBeenCalledWith(0.8);
+    expect(engine.volume()).toBe(0.6);
+  });
+
+  it('desktop target: no grace retry applies while a newer local command is in flight', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    // The local change's command never settles, so it stays in flight.
+    vi.spyOn(port, 'command').mockReturnValue(new Promise(() => undefined));
+    engine.volume.set(0.6);
+    await settle();
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(1600);
+    await settle();
+    expect(engine.setVolume).not.toHaveBeenCalledWith(0.8);
+    expect(engine.volume()).toBe(0.6);
+  });
+
+  it('desktop target: Android-style sequence 0.9, 0.8, 0.7 at 150ms spacing', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    store.report('tick');
+    port.push(stateWithVolume(store, 3, 0.9));
+    await settle();
+    vi.advanceTimersByTime(150);
+    port.push(stateWithVolume(store, 4, 0.8));
+    await settle();
+    vi.advanceTimersByTime(150);
+    store.report('tick');
+    port.push(stateWithVolume(store, 5, 0.7));
+    await settle();
+    expect(engine.setVolume.mock.calls.map(([v]) => v)).toEqual([0.9, 0.8, 0.7]);
+    expect(engine.volume()).toBe(0.7);
+  });
+
+  it('desktop target: applies controller volume after a reconnect welcome', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    const { store, port, engine } = await playingDesktop(1);
+    port.push(stateWithVolume(store, 3, 0.8));
+    await settle();
+    expect(engine.volume()).toBe(0.8);
+
+    // Reconnect: the welcome carries the server's level, which is this device's.
+    port.emitConnection('off');
+    port.emitConnection('open');
+    port.push({
+      ...welcome(
+        store,
+        device(store, {
+          revision: 4,
+          volume: 0.8,
+          order: [wire('e0', 'catalog:a'), wire('e1', 'catalog:b')],
+          cursor: 0,
+          playing: true,
+        }),
+      ),
+    });
+    await settle();
+    vi.advanceTimersByTime(2001);
+    port.sent.length = 0;
+
+    port.push(stateWithVolume(store, 5, 0.6));
+    await settle();
+    expect(engine.volume()).toBe(0.6);
   });
 });

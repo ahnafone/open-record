@@ -10,6 +10,7 @@ import type {
   SessionCommand,
   SessionDevice,
   SessionServerMessage,
+  SessionVolumeControl,
   Track,
 } from '@open-record/models';
 import type { MetadataFetch } from '@open-record/metadata-lookup';
@@ -589,4 +590,16 @@ export abstract class SessionPort {
   abstract send(message: SessionClientMessage): void;
   /** Commands resolve with their result (WS: by ack id; native: the POST body). */
   abstract command(id: string, command: SessionCommand): Promise<CommandResult>;
+  /**
+   * Updates this device's own volume in the profile the transport presents:
+   * the next `hello` (WS) or poll query (native). Not a message, so a device
+   * that is not the target can still keep the server's copy fresh. Optional
+   * so other ports need no change.
+   */
+  setDeviceVolume(update: {
+    volume?: number;
+    volumeControl?: SessionVolumeControl;
+  }): void {
+    void update;
+  }
 }

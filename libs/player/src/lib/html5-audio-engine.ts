@@ -515,6 +515,18 @@ function probeVolume(audio: HTMLAudioElement): boolean {
   }
 }
 
+/**
+ * Whether this browser lets a page change its own output volume (iOS web does
+ * not: the volume is the hardware's). Used to report `volumeControl`.
+ */
+export function html5VolumeSupported(): boolean {
+  try {
+    return probeVolume(new Audio());
+  } catch {
+    return false;
+  }
+}
+
 function clampGain(gain: number): number {
   return Math.min(1, Math.max(0, gain));
 }

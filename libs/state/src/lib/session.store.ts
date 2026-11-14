@@ -5,6 +5,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
 } from '@angular/core';
 import {
   REPORT_KEEPALIVE_MS,
@@ -23,9 +24,15 @@ import {
   type SessionState,
   type SessionTarget,
   type SessionTrack,
+  type SessionVolumeControl,
   type Track,
 } from '@open-record/models';
-import { PlayerService } from '@open-record/player';
+import {
+  PlayerService,
+  SystemVolume,
+  html5VolumeSupported,
+  isAndroidSystemVolumeAvailable,
+} from '@open-record/player';
 import type {
   PlayerStatus,
   RepeatMode,
@@ -43,6 +50,7 @@ import {
   sessionTrackSignature,
   toSessionTrack,
 } from './session-track';
+import { saveVolumeState } from './volume-storage';
 
 /** How close the local engine must be to the server anchor to leave it alone. */
 const SEEK_TOLERANCE_SEC = 2;
@@ -63,6 +71,28 @@ const LOCAL_SEEK_GRACE_MS = 3000;
 
 /** Window in which the same (entry, reason, playing) report is not sent twice. */
 const REPORT_DEDUPE_MS = 1000;
+
+/** Minimum gap between `setVolume` commands while a remote volume is dragged. */
+const REMOTE_VOLUME_THROTTLE_MS = 150;
+/** One hardware volume-key press moves a controlled remote by this much. */
+const VOLUME_KEY_STEP = 0.05;
+/** Volumes closer than this are the same level (OS and engine rounding). */
+const VOLUME_EPSILON = 0.005;
+/** A remote volume arriving this soon after a local change is stale. */
+const LOCAL_VOLUME_GRACE_MS = 1500;
+/**
+ * The OS snaps a level to its step count (1/15 on Android), so the echo of a
+ * level just applied lands within half a step. Matches the server's tolerance.
+ */
+const VOLUME_ECHO_TOLERANCE = 0.035;
+/** An OS echo of a remote level is expected this long after it was applied. */
+const VOLUME_ECHO_WINDOW_MS = 1000;
+/** A value set by a controller this recently is the base for the next key step. */
+const OPTIMISTIC_VOLUME_MS = 1000;
+
+function clampVolume(volume: number): number {
+  return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
+}
 
 /** After a failed publish, automatic re-publishing waits this long (no retry loop). */
 const PUBLISH_RETRY_MS = 15_000;
@@ -214,6 +244,51 @@ export class SessionStore {
   readonly castSeekRestarts = computed(
     () => this.session()?.castSeekRestarts === true,
   );
+  /** This client controls a playback target other than itself (device or cast). */
+  readonly isControllingRemote = computed(
+    () => this.ownsPlayback() && !this.isTarget(),
+  );
+  /** The controlled target's volume 0..1; 1 when not controlling a remote. */
+  readonly remoteVolume = computed(() =>
+    this.isControllingRemote() ? clampVolume(this.session()?.volume ?? 1) : 1,
+  );
+  /**
+   * Whether the controlled target's volume can be changed: a cast speaker
+   * always can; a device can unless it reports `volumeControl: 'none'`.
+   */
+  readonly remoteVolumeControllable = computed(() => {
+    if (!this.isControllingRemote()) return false;
+    const target = this.target();
+    if (target?.kind !== 'device') return true;
+    return (
+      this.devices().find((device) => device.id === target.clientId)
+        ?.volumeControl !== 'none'
+    );
+  });
+  /**
+   * Hardware volume keys belong to the controlled remote only while the session
+   * is live and its target is fresh. Otherwise they stay with the OS.
+   */
+  private readonly volumeKeysOwned = computed(
+    () =>
+      this.connection() === 'open' &&
+      this.isControllingRemote() &&
+      this.remoteVolumeControllable() &&
+      !this.targetStale(),
+  );
+  /** Identifies the remote whose volume this client may change; null otherwise. */
+  private readonly remoteControlKey = computed<string | null>(() => {
+    if (!this.isControllingRemote() || !this.remoteVolumeControllable()) {
+      return null;
+    }
+    return this.targetKey();
+  });
+  private readonly activity = signal(0);
+  /**
+   * Bumps when the controlled remote's volume changes from a remote command,
+   * a report, or a hardware volume-key step. Not on the initial state load.
+   */
+  readonly volumeActivity = this.activity.asReadonly();
 
   readonly remoteEntries = computed<readonly SessionEntry[]>(() => {
     const order = this.session()?.order ?? [];
@@ -394,9 +469,71 @@ export class SessionStore {
   private publishRetryAt = 0;
   /** Scheduled re-publish after the back-off; one at a time. */
   private republishTimer: ReturnType<typeof setTimeout> | null = null;
+  /** This device's output level: 0 while muted, else the engine volume. */
+  private readonly localVolume = computed(() =>
+    this.engine.muted() ? 0 : this.engine.volume(),
+  );
+  /**
+   * Last volume reported, applied or adopted. A change to this value is an
+   * echo of something already known, so it is not reported again.
+   */
+  private volumeSeen = -1;
+  /**
+   * False until the OS volume is read (Android). Until then the engine level is
+   * a placeholder, so it is neither reported nor saved to the profile.
+   */
+  private readonly volumeReady = signal(!isAndroidSystemVolumeAvailable());
+  /** Last local level change; a stale remote volume must not revert it. */
+  private lastLocalVolumeAt = Number.NEGATIVE_INFINITY;
+  private cachedVolumeControl: SessionVolumeControl | null = null;
+  private remoteVolumeSentAt = Number.NEGATIVE_INFINITY;
+  private pendingRemoteVolume: number | null = null;
+  private remoteVolumeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Re-applies a controller level dropped during the local-change grace. */
+  private graceRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** One `setVolume` at a time; the newest pending value follows when it settles. */
+  private remoteVolumeInFlight = false;
+  private remoteVolumeKey: string | null = null;
+  /** Last level applied from a controller, and when: its OS echo is not a user change. */
+  private remoteApplied: { volume: number; at: number } | null = null;
+  /** Last level this client set as a controller; key steps build on it. */
+  private lastSetVolume: { volume: number; at: number } | null = null;
+  /** Android: the OS volume cannot be changed (`isVolumeFixed`). */
+  private readonly systemVolumeFixed = signal(false);
+  private readonly systemVolumeHandles: { remove(): Promise<void> }[] = [];
 
   constructor() {
     this.clientId.set(newClientId());
+
+    // This device's volume: keep the server's copy of it fresh (profile), and
+    // report it when this device is the target. Changes that were just applied
+    // or adopted are already known, so they are skipped (no echo).
+    effect(() => {
+      const volume = this.reportedVolume();
+      untracked(() => this.observeLocalVolume(volume));
+    });
+
+    // Android: hardware volume keys drive the controlled remote, not the OS.
+    // Signals are read first so the effect tracks them even off Android.
+    effect(() => {
+      const enabled = this.volumeKeysOwned();
+      if (!isAndroidSystemVolumeAvailable()) return;
+      void SystemVolume.setKeyIntercept({ enabled }).catch(() => {
+        // Keys stay with the OS if the plugin is unavailable.
+      });
+    });
+
+    // Pending remote volume belongs to one target: drop it when control is
+    // lost or the target changes, so it cannot reach the wrong device.
+    effect(() => {
+      const key = this.remoteControlKey();
+      untracked(() => {
+        if (key === this.remoteVolumeKey) return;
+        this.remoteVolumeKey = key;
+        this.stopRemoteVolume();
+        this.clearGraceRetry();
+      });
+    });
 
     // Remember a local resume that lands while a publish holds the state.
     // Only the pause is recorded here; whether a resume followed is sampled
@@ -537,6 +674,7 @@ export class SessionStore {
         this.handleMessage(message),
       );
     }
+    if (isAndroidSystemVolumeAvailable()) this.listenSystemVolume();
     void this.initialize();
   }
 
@@ -1152,6 +1290,315 @@ export class SessionStore {
     this.emitReport('tick', undefined, true);
   }
 
+  /**
+   * Set the controlled remote's volume (0..1). Optimistic: `remoteVolume`
+   * shows it at once, and `setVolume` is sent throttled, the last value always
+   * included. A no-op unless this client controls a remote that can change its
+   * volume.
+   */
+  setRemoteVolume(volume: number): void {
+    if (!this.isControllingRemote() || !this.remoteVolumeControllable()) return;
+    const next = clampVolume(volume);
+    this.lastSetVolume = { volume: next, at: Date.now() };
+    this.session.update((state) =>
+      state ? { ...state, volume: next } : state,
+    );
+    this.queueVolumeCommand(next);
+  }
+
+  /**
+   * The one `setVolume` sender: the controller's slider and keys, and this
+   * target's own level changes, all go through it so commands cannot reorder.
+   * Throttled; the newest value always goes out last. Callers check control.
+   */
+  private queueVolumeCommand(volume: number): void {
+    this.pendingRemoteVolume = volume;
+    const wait =
+      REMOTE_VOLUME_THROTTLE_MS - (Date.now() - this.remoteVolumeSentAt);
+    if (wait <= 0) {
+      this.flushRemoteVolume();
+    } else if (this.remoteVolumeTimer === null) {
+      this.remoteVolumeTimer = setTimeout(() => {
+        this.remoteVolumeTimer = null;
+        this.flushRemoteVolume();
+      }, wait);
+    }
+  }
+
+  private flushRemoteVolume(): void {
+    // Serialized: a value that arrives while one is in flight waits for it to
+    // settle, and the newest pending value is what gets sent then. Both
+    // transports time out their commands, so the in-flight flag always clears.
+    if (!this.started || this.remoteVolumeInFlight) return;
+    const volume = this.pendingRemoteVolume;
+    if (volume === null) return;
+    this.pendingRemoteVolume = null;
+    this.remoteVolumeSentAt = Date.now();
+    this.remoteVolumeInFlight = true;
+    void this.command({ type: 'setVolume', volume }).finally(() => {
+      this.remoteVolumeInFlight = false;
+      if (this.pendingRemoteVolume !== null) this.flushRemoteVolume();
+    });
+  }
+
+  private stopRemoteVolume(): void {
+    if (this.remoteVolumeTimer !== null) clearTimeout(this.remoteVolumeTimer);
+    this.remoteVolumeTimer = null;
+    this.pendingRemoteVolume = null;
+  }
+
+  /** One hardware volume-key press while controlling a remote. */
+  private stepRemoteVolume(direction: 'up' | 'down'): void {
+    if (!this.volumeKeysOwned()) return;
+    const step = direction === 'up' ? VOLUME_KEY_STEP : -VOLUME_KEY_STEP;
+    // A recent value (possibly still unacknowledged) is the base, not the
+    // session's copy, which a state echo may have rolled back.
+    const recent = this.lastSetVolume;
+    const base =
+      recent && Date.now() - recent.at < OPTIMISTIC_VOLUME_MS
+        ? recent.volume
+        : this.remoteVolume();
+    this.setRemoteVolume(base + step);
+    this.activity.update((count) => count + 1);
+  }
+
+  /** Android: read the OS volume now, then follow it and the volume keys. */
+  private listenSystemVolume(): void {
+    void SystemVolume.getVolume()
+      .then(({ volume, fixed }) => {
+        this.systemVolumeFixed.set(fixed === true);
+        this.adoptLocalVolume(volume);
+      })
+      .catch(() => {
+        // Without the plugin the engine keeps its own level.
+      })
+      .finally(() => {
+        this.volumeReady.set(true);
+        if (!this.started) return;
+        // The observer skipped the level while it was unknown: publish it now,
+        // or, when it was already seen, just send it as the target.
+        const volume = this.reportedVolume();
+        if (volume !== this.volumeSeen) {
+          this.observeLocalVolume(volume);
+        } else {
+          this.port?.setDeviceVolume({
+            volume,
+            volumeControl: this.volumeControl(),
+          });
+          if (this.isTarget()) this.adoptOwnVolume();
+        }
+      });
+    const keep = (
+      registration: Promise<{ remove(): Promise<void> }>,
+    ): void => {
+      void registration
+        .then((handle) => {
+          if (this.started) this.systemVolumeHandles.push(handle);
+          else void handle.remove();
+        })
+        .catch(() => {
+          // The listener is optional; the OS keeps its own volume without it.
+        });
+    };
+    keep(
+      SystemVolume.addListener('volumeChanged', ({ volume }) =>
+        this.adoptLocalVolume(volume),
+      ),
+    );
+    keep(
+      SystemVolume.addListener('volumeKey', ({ direction }) =>
+        this.stepRemoteVolume(direction),
+      ),
+    );
+  }
+
+  private releaseSystemVolume(): void {
+    for (const handle of this.systemVolumeHandles.splice(0)) {
+      void handle.remove().catch(() => {
+        // Already removed by the plugin.
+      });
+    }
+    if (isAndroidSystemVolumeAvailable()) {
+      void SystemVolume.setKeyIntercept({ enabled: false }).catch(() => {
+        // Keys stay with the OS if the plugin is unavailable.
+      });
+    }
+  }
+
+  /** The OS volume changed (Android): follow it. The effect reports it. */
+  private adoptLocalVolume(volume: number): void {
+    const next = clampVolume(volume);
+    if (Math.abs(next - this.reportedVolume()) < VOLUME_EPSILON) return;
+    this.engine.setVolume(next);
+    // The OS snapped a level this device was just set to: it is known, not a
+    // user change. The engine now holds the snapped level, so report that.
+    if (this.isRemoteEcho(next)) this.acknowledgeVolume(next);
+  }
+
+  /** A level within a step of one just applied from a controller: its OS echo. */
+  private isRemoteEcho(volume: number): boolean {
+    const applied = this.remoteApplied;
+    return (
+      applied !== null &&
+      Date.now() - applied.at < VOLUME_ECHO_WINDOW_MS &&
+      Math.abs(volume - applied.volume) <= VOLUME_ECHO_TOLERANCE
+    );
+  }
+
+  /**
+   * A level this device already has (an echo, or a snapped step): remember it,
+   * report it through the normal path so the server's pending match clears,
+   * and never send it back as a command or start the local grace.
+   */
+  private acknowledgeVolume(volume: number): void {
+    this.volumeSeen = volume;
+    if (!this.started) return;
+    this.port?.setDeviceVolume({ volume, volumeControl: this.volumeControl() });
+    if (
+      this.isTarget() &&
+      !this.holdingEcho() &&
+      !this.applyingRemote &&
+      this.engine.mediaLoaded
+    ) {
+      this.emitReport('tick', undefined, true);
+    }
+  }
+
+  /**
+   * A remote controller's volume arrived for this device (the target): apply
+   * it and remember it, so the effect does not report it back as a change.
+   */
+  private applyRemoteVolume(volume: number): void {
+    if (this.volumeControl() !== 'full') return;
+    // A local change this recent is newer than the state that is arriving. The
+    // dropped level is re-applied once the grace ends, so the controller's
+    // command is not lost (the server would otherwise revert it).
+    const sinceLocal = Date.now() - this.lastLocalVolumeAt;
+    if (sinceLocal < LOCAL_VOLUME_GRACE_MS) {
+      // Nothing to re-apply when the level is already here or this client
+      // reported it itself; a stale retry for an older level is dropped too.
+      if (
+        Math.abs(clampVolume(volume) - this.reportedVolume()) < VOLUME_EPSILON ||
+        this.session()?.updatedBy === this.clientId()
+      ) {
+        this.clearGraceRetry();
+        return;
+      }
+      this.scheduleRemoteVolumeRetry(LOCAL_VOLUME_GRACE_MS - sinceLocal);
+      return;
+    }
+    const next = clampVolume(volume);
+    if (Math.abs(next - this.reportedVolume()) < VOLUME_EPSILON) return;
+    // Recorded before the engine write: the OS may echo the snapped level at once.
+    this.remoteApplied = { volume: next, at: Date.now() };
+    this.engine.setVolume(next);
+    // The OS may have snapped the level: the one it now holds is what is known.
+    const reported = this.reportedVolume();
+    this.volumeSeen = reported;
+    this.port?.setDeviceVolume({ volume: reported });
+    saveVolumeState(this.engine.volume(), this.engine.muted());
+  }
+
+  /**
+   * Re-applies the session's current volume after a local-change grace window
+   * that dropped a controller's level. Only the latest level counts: a retry
+   * replaces any earlier one.
+   */
+  private scheduleRemoteVolumeRetry(delayMs: number): void {
+    this.clearGraceRetry();
+    // The target this retry belongs to: a different one cancels it.
+    const target = this.targetKey();
+    this.graceRetryTimer = setTimeout(() => {
+      this.graceRetryTimer = null;
+      if (!this.started || !this.isTarget() || this.targetKey() !== target) {
+        return;
+      }
+      const session = this.session();
+      if (!session || session.volume === undefined) return;
+      // A newer local command is queued or in flight: the local command wins.
+      if (this.pendingRemoteVolume !== null || this.remoteVolumeInFlight) return;
+      this.applyRemoteVolume(session.volume);
+    }, delayMs + 1);
+  }
+
+  /** Cancels a pending grace retry. Shared by every path that ends its target. */
+  private clearGraceRetry(): void {
+    if (this.graceRetryTimer) clearTimeout(this.graceRetryTimer);
+    this.graceRetryTimer = null;
+  }
+
+  /** Identifies the current remote-or-local target: `device:id`, `cast:id`, or null. */
+  private targetKey(): string | null {
+    const target = this.target();
+    if (!target) return null;
+    return target.kind === 'device'
+      ? `device:${target.clientId}`
+      : `cast:${target.castId}`;
+  }
+
+  /**
+   * This device just became the target: send its own level. The server's copy
+   * may be stale (a transfer clears it, a relaunch loses it), so it is never
+   * applied here.
+   */
+  private adoptOwnVolume(): void {
+    if (!this.volumeReady() || this.volumeControl() !== 'full') return;
+    this.queueVolumeCommand(this.reportedVolume());
+  }
+
+  /**
+   * Reacts to a local volume change: profile first. The target also sends its
+   * level as a command, not a tick: a tick carries the engine position, which
+   * can be wrong before the queue has loaded. Echoes of a just-applied remote
+   * level are acknowledged instead, and the first reading (the OS level at
+   * startup) is not a user change.
+   */
+  private observeLocalVolume(volume: number): void {
+    if (!this.volumeReady()) return;
+    if (volume === this.volumeSeen) return;
+    if (this.isRemoteEcho(volume)) {
+      this.acknowledgeVolume(volume);
+      return;
+    }
+    const firstReading = this.volumeSeen === -1;
+    this.volumeSeen = volume;
+    if (!firstReading) this.lastLocalVolumeAt = Date.now();
+    if (!this.started) return;
+    this.port?.setDeviceVolume({
+      volume,
+      volumeControl: this.volumeControl(),
+    });
+    if (this.isTarget() && this.volumeControl() === 'full') {
+      this.queueVolumeCommand(volume);
+    }
+  }
+
+  /** The level this device reports: its output, or 1 when it cannot change it. */
+  private reportedVolume(): number {
+    return this.volumeControl() === 'none' ? 1 : this.localVolume();
+  }
+
+  /**
+   * `full` when this device can set its own output; `none` on iOS, a fixed
+   * Android volume, and locked-down web. The Android fixed flag arrives after
+   * startup, so that case is never cached.
+   */
+  private volumeControl(): SessionVolumeControl {
+    if (isAndroidSystemVolumeAvailable()) {
+      return this.systemVolumeFixed() ? 'none' : 'full';
+    }
+    if (this.cachedVolumeControl) return this.cachedVolumeControl;
+    const platform = detectPlatform();
+    const control: SessionVolumeControl =
+      platform === 'ios' || platform === 'android'
+        ? 'none'
+        : html5VolumeSupported()
+          ? 'full'
+          : 'none';
+    this.cachedVolumeControl = control;
+    return control;
+  }
+
   entryIdAt(index: number): string | undefined {
     return this.session()?.order[index]?.entryId;
   }
@@ -1259,6 +1706,8 @@ export class SessionStore {
       online: true,
       lastSeenAt: Date.now(),
       capabilities: { cast: platform === 'web', localFiles: platform !== 'web' },
+      ...(this.volumeReady() ? { volume: this.reportedVolume() } : {}),
+      volumeControl: this.volumeControl(),
     };
   }
 
@@ -1298,6 +1747,7 @@ export class SessionStore {
   }
 
   private clearSession(): void {
+    this.clearGraceRetry();
     this.session.set(null);
     this.devices.set([]);
     this.revision.set(-1);
@@ -1317,12 +1767,14 @@ export class SessionStore {
     this.applyPending = null;
     this.pendingIncoming = null;
     this.needsGesture.set(false);
+    this.clearGraceRetry();
     // Local-only playback must survive a session that never owned the engine.
     if (wasActive && !options.keepPlaying) void this.engine.pause();
   }
 
   private stop(): void {
     this.started = false;
+    this.clearGraceRetry();
     this.resetCastUploads();
     this.disconnectOnly();
     this.unsubscribeChange?.();
@@ -1332,6 +1784,8 @@ export class SessionStore {
     this.stopClock();
     this.stopKeepalive();
     this.cancelRepublish();
+    this.stopRemoteVolume();
+    this.releaseSystemVolume();
   }
 
   // ---- Messages -----------------------------------------------------------
@@ -1344,12 +1798,12 @@ export class SessionStore {
         this.devicesRevision.set(message.devicesRevision);
         this.devices.set(message.devices);
         this.serverSkew.set(message.serverTime - Date.now());
-        this.applyIncoming(message.session ?? null);
+        this.applyIncoming(message.session ?? null, true);
         break;
       case 'state':
         if (message.session.revision < this.revision()) return;
         this.revision.set(message.session.revision);
-        this.applyIncoming(message.session);
+        this.applyIncoming(message.session, false);
         break;
       case 'tick': {
         if (message.revision < this.revision()) return;
@@ -1397,10 +1851,24 @@ export class SessionStore {
     }
   }
 
-  private applyIncoming(next: SessionState | null): void {
+  private applyIncoming(next: SessionState | null, fromWelcome: boolean): void {
     const nowTarget = isThisClient(next?.target ?? null, this.clientId());
     const wasTarget = this.targetActive;
+    const previous = this.session();
+    const volumeChanged =
+      (next?.volume ?? 1) !== (previous?.volume ?? 1);
     this.session.set(next);
+    // A remote volume change (not the first load) is what the popup shows.
+    if (previous && next && !nowTarget && volumeChanged) {
+      this.activity.update((count) => count + 1);
+    }
+    if (nowTarget && !wasTarget) {
+      // Becoming the target: send this device's level, never the server's.
+      this.adoptOwnVolume();
+    } else if (nowTarget && !fromWelcome && volumeChanged && next?.volume !== undefined) {
+      // A controller changed the level while this device is the target.
+      this.applyRemoteVolume(next.volume);
+    }
     // Nothing owns the session any more: an empty session (server restart), or
     // the target cleared by the server after a long silence (the queue stays).
     // A queue playing here keeps playing and is published again. A user's
@@ -1770,6 +2238,7 @@ export class SessionStore {
       // arrived, not this track's. Report 0 rather than anchor it far in.
       positionSec: this.engine.mediaLoaded ? this.engine.position() : 0,
       playing,
+      ...(this.volumeReady() ? { volume: this.reportedVolume() } : {}),
     };
     if (durationSec !== undefined) report.durationSec = durationSec;
     try {

@@ -4,5 +4,6 @@ export * from './lib/html5-audio-engine';
 export * from './lib/native-audio-engine';
 export * from './lib/player-engine';
 export * from './lib/media-session';
+export * from './lib/system-volume';
 export * from './lib/tab-title';
 export * from './lib/player.service';

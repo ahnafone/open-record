@@ -39,10 +39,8 @@ import {
   type RecentlyQueued,
 } from './queue-window';
 import { SessionStore, isAmbiguousCommandFailure } from './session.store';
-import { toSessionTrack } from './session-track';
-
-/** localStorage key for the per-device volume and mute (a convenience, not synced). */
-const VOLUME_KEY = 'or.volume';
+import { detectPlatform, toSessionTrack } from './session-track';
+import { VOLUME_KEY, saveVolumeState } from './volume-storage';
 
 /**
  * A session refused (or could not take) a Play next / Add to Stack change.
@@ -1298,6 +1296,9 @@ export class PlayerStore {
 
   private restoreVolume(): void {
     if (!this.engine.canSetVolume) return;
+    // Native volume is the OS's (Android): the saved value must not overwrite
+    // it at launch. `SessionStore` reads the OS volume instead.
+    if (detectPlatform() !== 'web') return;
     try {
       const raw = globalThis.localStorage?.getItem(VOLUME_KEY);
       if (!raw) return;
@@ -1310,17 +1311,7 @@ export class PlayerStore {
   }
 
   private saveVolume(): void {
-    try {
-      globalThis.localStorage?.setItem(
-        VOLUME_KEY,
-        JSON.stringify({
-          volume: this.engine.volume(),
-          muted: this.engine.muted(),
-        }),
-      );
-    } catch {
-      // Best effort.
-    }
+    saveVolumeState(this.engine.volume(), this.engine.muted());
   }
 
   /**

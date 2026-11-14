@@ -17,6 +17,7 @@ import {
   SESSION_MAX_ENTRIES,
   SESSION_MAX_ORDER_BYTES,
   SESSION_MAX_STACK,
+  SESSION_VOLUME_PENDING_MS,
   TARGET_STALE_AFTER_MS,
   type CommandResult,
   type SessionCommand,
@@ -27,6 +28,7 @@ import {
   type SessionState,
   type SessionTarget,
   type SessionTrack,
+  type SessionVolumeControl,
   type StackPlacement,
 } from '@open-record/models';
 
@@ -88,6 +90,18 @@ const DEFAULT_IDLE_TIMEOUT_MIN = 120;
 const CAST_TRANSFER_TIMEOUT_MS = 30_000;
 /** Speaker position drift tolerated after a transfer before it is re-seeked. */
 const TRANSFER_SEEK_TOLERANCE_SEC = 2;
+/**
+ * A device's applied level is rounded to its stream steps (about 1/15 on
+ * Android). While a `setVolume` is pending, a report this close to it is the
+ * applied level, not a stale one. Half a step, so a stale level that is only
+ * a small drag away is still ignored.
+ */
+const VOLUME_MATCH_TOLERANCE = 0.035;
+/**
+ * Continuous-volume devices (web, desktop) apply the commanded level exactly,
+ * so a pending report only matches within float noise.
+ */
+const VOLUME_MATCH_TIGHT_TOLERANCE = 0.005;
 
 /**
  * One cast transfer attempt. `abandoned`: the timeout gave up on it. `committed`:
@@ -138,6 +152,9 @@ interface RoomDevice {
   capabilities: SessionDevice['capabilities'];
   model?: string;
   lastSeenAt: number;
+  /** The device's own output volume as it last reported it. */
+  volume?: number;
+  volumeControl?: SessionVolumeControl;
 }
 
 interface Room {
@@ -154,6 +171,11 @@ interface Room {
   lastTargetContactAt: number;
   lastEndedEntryId: string | null;
   lastEndedAt: number;
+  /**
+   * A `setVolume` sent to a device target that the device has not echoed yet.
+   * Device volume reports that differ from it are stale until `until`.
+   */
+  pendingVolume: { volume: number; until: number } | null;
 }
 
 function defaultState(now: number): SessionState {
@@ -381,6 +403,33 @@ function isBaseOrderIds(value: unknown): value is string[] {
   );
 }
 
+function isVolume(value: unknown): value is number {
+  return isNonNegativeFinite(value) && value <= 1;
+}
+
+/** Builds the stored device row from a hello/poll payload. */
+function roomDeviceFrom(
+  device: SessionDevice,
+  fallbackDeviceId: string,
+  previous: RoomDevice | undefined,
+  now: number,
+): RoomDevice {
+  return {
+    deviceId: device.deviceId || previous?.deviceId || fallbackDeviceId,
+    name: device.name,
+    platform: device.platform,
+    capabilities: { ...device.capabilities },
+    ...(device.model ? { model: device.model } : {}),
+    ...(device.volume !== undefined || previous?.volume !== undefined
+      ? { volume: device.volume ?? previous?.volume }
+      : {}),
+    ...(device.volumeControl !== undefined
+      ? { volumeControl: device.volumeControl }
+      : {}),
+    lastSeenAt: now,
+  };
+}
+
 function isSessionCommand(value: unknown): value is SessionCommand {
   if (!isRecord(value)) return false;
   switch (value['type']) {
@@ -443,8 +492,8 @@ function isSessionCommand(value: unknown): value is SessionCommand {
       return isSessionTargetPayload(value['target']);
     case 'takeOver':
       return isId(value['castId']);
-    case 'setCastVolume':
-      return isNonNegativeFinite(value['volume']) && value['volume'] <= 1;
+    case 'setVolume':
+      return isVolume(value['volume']);
     default:
       return false;
   }
@@ -474,6 +523,7 @@ function isSessionReport(value: unknown): value is SessionReportMessage {
     !isNonNegativeFinite(value['durationSec'])
   )
     return false;
+  if (value['volume'] !== undefined && !isVolume(value['volume'])) return false;
   return true;
 }
 
@@ -599,14 +649,10 @@ export class SessionService {
     room.connections.set(conn.id, conn);
 
     const previous = room.devices.get(conn.clientId);
-    room.devices.set(conn.clientId, {
-      deviceId: device.deviceId || previous?.deviceId || conn.clientId,
-      name: device.name,
-      platform: device.platform,
-      capabilities: { ...device.capabilities },
-      ...(device.model ? { model: device.model } : {}),
-      lastSeenAt: now,
-    });
+    room.devices.set(
+      conn.clientId,
+      roomDeviceFrom(device, conn.clientId, previous, now),
+    );
     room.lastActivity = now;
 
     const staleCleared = this.noteContact(room, conn.clientId, now);
@@ -639,14 +685,7 @@ export class SessionService {
     const now = this.nowFn();
     const room = this.roomFor(userId, now);
     const previous = room.devices.get(clientId);
-    room.devices.set(clientId, {
-      deviceId: device.deviceId || previous?.deviceId || clientId,
-      name: device.name,
-      platform: device.platform,
-      capabilities: { ...device.capabilities },
-      ...(device.model ? { model: device.model } : {}),
-      lastSeenAt: now,
-    });
+    room.devices.set(clientId, roomDeviceFrom(device, clientId, previous, now));
     room.lastActivity = now;
 
     const staleCleared = this.noteContact(room, clientId, now);
@@ -688,7 +727,7 @@ export class SessionService {
       command.type === 'next' ||
       command.type === 'previous' ||
       command.type === 'stop' ||
-      command.type === 'setCastVolume';
+      (command.type === 'setVolume' && castTarget !== null);
     if (castTarget && forwardsToCast && !this.castHooks) {
       return { ok: false, error: 'cast-disabled' };
     }
@@ -1157,13 +1196,33 @@ export class SessionService {
         mutated = true;
         break;
       }
-      case 'setCastVolume': {
-        if (state.target?.kind !== 'cast')
+      case 'setVolume': {
+        const volumeTarget = state.target;
+        if (volumeTarget?.kind === 'cast') {
+          // Cast: CastService applies it to the speaker (forwarded below).
+          this.freezePosition(state, now);
+          state.volume = command.volume;
+          mutated = true;
+          forward = { type: 'setVolume', volume: command.volume };
+          break;
+        }
+        if (volumeTarget?.kind !== 'device')
           return { ok: false, error: 'invalid-command' };
+        if (
+          room.devices.get(volumeTarget.clientId)?.volumeControl === 'none'
+        ) {
+          return { ok: false, error: 'volume-unsupported' };
+        }
+        // Device: the target applies `state.volume` from the state it already
+        // receives (WS `state` push or the poll snapshot). The pending marker
+        // keeps its own older volume reports from snapping the value back.
         this.freezePosition(state, now);
-        state.castVolume = command.volume;
+        state.volume = command.volume;
+        room.pendingVolume = {
+          volume: command.volume,
+          until: now + SESSION_VOLUME_PENDING_MS,
+        };
         mutated = true;
-        forward = { type: 'setCastVolume', volume: command.volume };
         break;
       }
       default:
@@ -1218,6 +1277,7 @@ export class SessionService {
     const state = room.session;
     const staleCleared = this.noteContact(room, sourceId, now);
     room.lastActivity = now;
+    this.applyReportedVolume(room, sourceId, report.volume, now);
 
     switch (report.reason) {
       case 'tick': {
@@ -1318,6 +1378,55 @@ export class SessionService {
       default:
         return;
     }
+  }
+
+  /**
+   * A device target's own volume (hardware keys, its slider). Stored, then
+   * broadcast so every controller follows. A report equal to the stored value
+   * is an echo and changes nothing, which stops command/report loops. While a
+   * `setVolume` is pending, a differing report is the old level and is ignored.
+   * Only device targets report volume here; a cast's level is set by CastService.
+   */
+  private applyReportedVolume(
+    room: Room,
+    sourceId: string,
+    volume: number | undefined,
+    now: number,
+  ): void {
+    const state = room.session;
+    const target = state.target;
+    if (
+      volume === undefined ||
+      target?.kind !== 'device' ||
+      target.clientId !== sourceId
+    ) {
+      return;
+    }
+    const pending = room.pendingVolume;
+    if (pending && now < pending.until) {
+      // The device has not applied the command yet: its old level is ignored.
+      const tolerance = this.volumeMatchTolerance(room, sourceId);
+      if (Math.abs(volume - pending.volume) > tolerance) return;
+    }
+    room.pendingVolume = null;
+    if (state.volume === volume) return;
+    state.volume = volume;
+    state.updatedBy = sourceId;
+    state.revision += 1;
+    this.broadcast(room, { type: 'state', session: state });
+    this.refreshDevices(room, true, undefined, now);
+  }
+
+  /**
+   * How far a report may sit from a pending `setVolume` and still be the applied
+   * level. Only stepped devices (Android) round; a web/desktop device is exact.
+   * An unknown platform keeps the wide tolerance (cannot tell it is exact).
+   */
+  private volumeMatchTolerance(room: Room, deviceId: string): number {
+    const platform = room.devices.get(deviceId)?.platform;
+    return platform === 'web' || platform === 'ios'
+      ? VOLUME_MATCH_TIGHT_TOLERANCE
+      : VOLUME_MATCH_TOLERANCE;
   }
 
   /** Entry ids the server/Cast cannot play (set by CastService after planning). */
@@ -1511,6 +1620,7 @@ export class SessionService {
         lastTargetContactAt: now,
         lastEndedEntryId: null,
         lastEndedAt: 0,
+        pendingVolume: null,
       };
       this.rooms.set(userId, room);
     }
@@ -1575,7 +1685,10 @@ export class SessionService {
       this.freezePosition(state, now);
       delete state.targetStale;
       delete state.castOwner;
-      delete state.castVolume;
+      // The stored device row may be stale (a non-target never refreshes it), so
+      // its volume is not carried over. The new target sends its own level.
+      delete state.volume;
+      room.pendingVolume = null;
       state.updatedBy = clientId;
       state.updatedAt = now;
       state.revision += 1;
@@ -1767,6 +1880,8 @@ export class SessionService {
     const revisionBefore = previous.revision;
     const next = cloneState(previous);
     next.target = { kind: 'cast', castId };
+    // A device's output level is not the speaker's: start the speaker at its default.
+    if (previous.target?.kind !== 'cast') delete next.volume;
     // The speaker starts at the moment its hook runs, not at `now` (which
     // precedes any queue wait): anchor the start position there.
     const startedAt = this.nowFn();
@@ -1847,8 +1962,8 @@ export class SessionService {
       if (unavailable.length > 0)
         committed.unavailable = unavailable.map((entry) => entry.entryId);
       else delete committed.unavailable;
-      if (next.castVolume !== undefined) committed.castVolume = next.castVolume;
-      else delete committed.castVolume;
+      if (next.volume !== undefined) committed.volume = next.volume;
+      else delete committed.volume;
     }
 
     // The speaker loaded the entry `next` pointed at. If the live queue now points
@@ -2012,6 +2127,10 @@ export class SessionService {
       lastSeenAt: entry.lastSeenAt,
       ...(entry.model ? { model: entry.model } : {}),
       capabilities: { ...entry.capabilities },
+      ...(entry.volume !== undefined ? { volume: entry.volume } : {}),
+      ...(entry.volumeControl !== undefined
+        ? { volumeControl: entry.volumeControl }
+        : {}),
     };
   }
 
@@ -2050,6 +2169,7 @@ export class SessionService {
         device.model ?? '',
         device.capabilities.cast,
         device.capabilities.localFiles,
+        device.volumeControl ?? 'full',
       ]),
     );
     if (signature !== room.devicesSignature) {

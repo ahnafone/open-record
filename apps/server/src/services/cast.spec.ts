@@ -439,12 +439,12 @@ describe('cast setTarget', () => {
 
   it('applies the carried cast volume and stores the receiver-reported volume', async () => {
     const h = createHarness({ queue: [remoteTrack('a')], cursor: 0, playing: true });
-    h.setState({ ...h.state(), castVolume: 0.35 });
+    h.setState({ ...h.state(), volume: 0.35 });
 
     await castTo(h);
 
     expect(h.transport.volumeCalls).toEqual([0.35]);
-    expect(h.state().castVolume).toBe(0.35);
+    expect(h.state().volume).toBe(0.35);
   });
 
   it('rejects another user until force stops the owner and reports the loss', async () => {
@@ -554,7 +554,7 @@ describe('cast control', () => {
     await h.service.control('u1', 'cast-1', { type: 'seek', positionSec: 42 });
     expect(transport.calls).toContain('seek:42');
 
-    await h.service.control('u1', 'cast-1', { type: 'setCastVolume', volume: 0.25 });
+    await h.service.control('u1', 'cast-1', { type: 'setVolume', volume: 0.25 });
     expect(transport.volumeCalls).toContain(0.25);
 
     // SessionService moves the cursor before forwarding next/previous.

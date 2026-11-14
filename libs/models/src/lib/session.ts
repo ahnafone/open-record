@@ -74,8 +74,11 @@ export interface SessionState {
    * Device-local availability is a client signal (SessionStore.localUnavailable).
    */
   unavailable?: string[];
-  /** Cast volume 0..1, when the target is a cast device. */
-  castVolume?: number;
+  /**
+   * Volume 0..1 of the playback target (a cast speaker, or the device's own
+   * output). Absent = 1. Written by `setVolume` and by the target's reports.
+   */
+  volume?: number;
   /**
    * The current cast stream is transcoded (no byte ranges), so a seek restarts
    * the track on the speaker rather than jumping inside it. Clients may show a
@@ -111,7 +114,14 @@ export interface SessionDevice {
   castId?: string;
   model?: string;
   capabilities: { cast: boolean; localFiles: boolean };
+  /** The device's own output volume 0..1, as it last reported it (hello / poll / report). */
+  volume?: number;
+  /** `'none'` = the device cannot change its own volume (`setVolume` is rejected). Absent = `'full'`. */
+  volumeControl?: SessionVolumeControl;
 }
+
+/** Whether a device can change its own output volume. */
+export type SessionVolumeControl = 'full' | 'none';
 
 // ---------------------------------------------------------------------------
 // Commands and messages. Cast devices are merged into `devices`
@@ -169,7 +179,12 @@ export type SessionCommand =
   | { type: 'setRepeat'; repeat: 'off' | 'all' | 'one' }
   | { type: 'transfer'; target: SessionTarget }
   | { type: 'takeOver'; castId: string }
-  | { type: 'setCastVolume'; volume: number };
+  /**
+   * Sets the volume 0..1 of the playback target: a cast speaker, or a device
+   * target's own output (the device applies `state.volume` when it changes).
+   * Rejected with `volume-unsupported` for a device with `volumeControl: 'none'`.
+   */
+  | { type: 'setVolume'; volume: number };
 
 /** `device.id` is the clientId; `device.deviceId` is the stable install id. */
 export interface SessionHello {
@@ -190,6 +205,11 @@ export interface SessionReportMessage {
   positionSec: number;
   playing: boolean;
   durationSec?: number;
+  /**
+   * The target device's current output volume 0..1 (hardware keys, its own
+   * slider). Accepted only from the device target; see `SESSION_VOLUME_PENDING_MS`.
+   */
+  volume?: number;
 }
 
 export type SessionClientMessage =
@@ -271,6 +291,12 @@ export const REPORT_KEEPALIVE_MS = 30_000;
 export const TARGET_STALE_AFTER_MS = 90_000;
 export const WS_PING_MS = 10_000;
 export const WS_SILENCE_CLOSE_MS = 30_000;
+/**
+ * After a `setVolume` on a device target, the server ignores reported volumes
+ * that differ from the commanded one for this long (the device has not applied
+ * it yet). A report equal to the commanded volume ends the window early.
+ */
+export const SESSION_VOLUME_PENDING_MS = 3_000;
 
 /**
  * A random id for a queue entry. `crypto.randomUUID` is unavailable on

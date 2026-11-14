@@ -10,6 +10,7 @@ import type {
 } from './audio-engine';
 import { requestPlaybackNotificationPermission } from './notification-permission';
 import type { NotificationPermissionRequester } from './notification-permission';
+import { SystemVolume } from './system-volume';
 
 /*
  * Minimal local typing of `capacitor-plugin-playlist` (8.x), checked against
@@ -213,7 +214,20 @@ export class NativeAudioEngine implements AudioEngine {
     private readonly requestNotificationPermission: NotificationPermissionRequester = requestPlaybackNotificationPermission,
   ) {
     this.plugin = plugin;
+    // Android: the app's volume is the music-stream volume, so the engine can
+    // set it (and `PlayerEngine.canSetVolume` turns on). iOS: the hardware owns
+    // it, so `setVolume` stays absent and the player hides the control.
+    if (platform === 'android') {
+      this.setVolume = (volume: number) => {
+        void SystemVolume.setVolume({ volume }).catch(() => {
+          // The OS refused the change; the next volume change retries.
+        });
+      };
+    }
   }
+
+  /** Android only (assigned in the constructor); see the constructor. */
+  setVolume?(volume: number): void;
 
   static isAvailable(): boolean {
     return (

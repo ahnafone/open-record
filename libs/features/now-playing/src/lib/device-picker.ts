@@ -152,8 +152,11 @@ export class DevicePickerService {
             </div>
             <or-slider
               label="Cast volume"
-              [value]="volume()"
-              [valueText]="volume() + '%'"
+              [value]="session.remoteVolumeControllable() ? volume() : 100"
+              [valueText]="
+                (session.remoteVolumeControllable() ? volume() : 100) + '%'
+              "
+              [disabled]="!session.remoteVolumeControllable()"
               (valueChange)="onVolumeChange($event)"
               (committed)="commitVolume()"
             />
@@ -473,7 +476,7 @@ export class OrDevicePicker {
       const state = this.session.session();
       const target = state?.target;
       if (!state || target?.kind !== 'cast') return;
-      const percent = Math.round((state.castVolume ?? 0) * 100);
+      const percent = Math.round((state.volume ?? 0) * 100);
       const key = `${target.castId}|${percent}`;
       if (key === this.lastVolumeKey) return;
       this.lastVolumeKey = key;
@@ -585,7 +588,7 @@ export class OrDevicePicker {
   private async pushVolume(percent: number): Promise<void> {
     if (this.castTarget()?.kind !== 'cast') return;
     const result = await this.session.command({
-      type: 'setCastVolume',
+      type: 'setVolume',
       volume: percent / 100,
     });
     if (!result.ok) {

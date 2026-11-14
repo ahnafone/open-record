@@ -10,6 +10,7 @@ import {
   type SessionSnapshot,
   type SessionTarget,
   type SessionUnchanged,
+  type SessionVolumeControl,
   type Track,
 } from '@open-record/models';
 import type { LocalFileStore } from '@open-record/providers/local';
@@ -484,6 +485,14 @@ export class WebSession extends BaseSession {
     this.sendFrame(message);
   }
 
+  override setDeviceVolume(update: {
+    volume?: number;
+    volumeControl?: SessionVolumeControl;
+  }): void {
+    // Sent with the next `hello` (the reconnect carries the fresh value).
+    if (this.profile) this.profile = { ...this.profile, ...update };
+  }
+
   command(id: string, command: SessionCommand): Promise<CommandResult> {
     const socket = this.socket;
     if (!this.active || !socket || socket.readyState !== WS_OPEN) {
@@ -837,6 +846,14 @@ export class NativeSession extends BaseSession {
     };
   }
 
+  override setDeviceVolume(update: {
+    volume?: number;
+    volumeControl?: SessionVolumeControl;
+  }): void {
+    // Carried by the next poll query, so the server's device list stays fresh.
+    if (this.profile) this.profile = { ...this.profile, ...update };
+  }
+
   send(message: SessionClientMessage): void {
     if (message.type === 'pong') return; // The next poll refreshes presence.
     if (message.type !== 'report') return;
@@ -852,6 +869,7 @@ export class NativeSession extends BaseSession {
       playing: message.playing,
     };
     if (message.durationSec !== undefined) body['durationSec'] = message.durationSec;
+    if (message.volume !== undefined) body['volume'] = message.volume;
     void http
       .post('session/report', body, { timeoutMs: SESSION_COMMAND_TIMEOUT_MS })
       .then((response) => {
@@ -941,6 +959,10 @@ export class NativeSession extends BaseSession {
         cast: profile.capabilities.cast ? '1' : '0',
         localFiles: profile.capabilities.localFiles ? '1' : '0',
       };
+      if (profile.volume !== undefined) query['volume'] = profile.volume;
+      if (profile.volumeControl !== undefined) {
+        query['volumeControl'] = profile.volumeControl;
+      }
       if (this.revision >= 0) query['since'] = this.revision;
 
       const response = await http.get<SessionSnapshot | SessionUnchanged>(

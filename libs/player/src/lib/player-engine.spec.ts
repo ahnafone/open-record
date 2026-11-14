@@ -953,6 +953,63 @@ describe('PlayerEngine', () => {
       }
     });
 
+    it('retries 408, 5xx and generic yt-dlp 422 failures', async () => {
+      const httpError = (message: string, status: number) =>
+        Object.assign(new Error(message), { name: 'HttpError', status });
+      const cases: [string, unknown][] = [
+        ['timeout', httpError('yt-dlp timed out', 408)],
+        ['older server', httpError('yt-dlp failed', 502)],
+        ['yt-dlp 422', httpError('yt-dlp returned invalid output', 422)],
+        ['bot check', httpError("Sign in to confirm you're not a bot.", 422)],
+      ];
+      for (const [label, failure] of cases) {
+        vi.useFakeTimers();
+        try {
+          let resolves = 0;
+          const { player } = setup({
+            resolve: async () => {
+              resolves++;
+              throw failure;
+            },
+          });
+          await player.setQueue([track(label)]);
+          expect(player.retrying(), label).toBe(true);
+          await wait(10_000);
+          expect(resolves, label).toBeGreaterThan(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
+
+    it('does not retry track-level 422s (age-locked, segmented links)', async () => {
+      const httpError = (message: string) =>
+        Object.assign(new Error(message), { name: 'HttpError', status: 422 });
+      const cases: [string, unknown][] = [
+        ['age', httpError('Sign in to confirm your age. Add cookies to retry.')],
+        ['segmented', httpError('this source only offers segmented streams, which are not supported')],
+      ];
+      for (const [label, failure] of cases) {
+        vi.useFakeTimers();
+        try {
+          let resolves = 0;
+          const { player } = setup({
+            resolve: async () => {
+              resolves++;
+              throw failure;
+            },
+          });
+          await player.setQueue([track(label)]);
+          expect(resolves, label).toBe(1);
+          expect(player.retrying(), label).toBe(false);
+          await wait(10_000);
+          expect(resolves, label).toBe(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
+
     it('pausing during backoff cancels the retry and stays on the track', async () => {
       vi.useFakeTimers();
       try {

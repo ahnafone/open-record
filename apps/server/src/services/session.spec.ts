@@ -1226,7 +1226,7 @@ describe('queue commands', () => {
       error: 'invalid-command',
     });
     expect(
-      await service.command('u', 'a', { type: 'setCastVolume', volume: 0.5 }),
+      await service.command('u', 'a', { type: 'setVolume', volume: 0.5 }),
     ).toEqual({
       ok: false,
       error: 'invalid-command',
@@ -1569,10 +1569,10 @@ describe('cast target operations', () => {
     });
     hooks.controlCalls.length = 0;
 
-    await service.command('u', 'a', { type: 'setCastVolume', volume: 0.4 });
-    expect(stateOf().castVolume).toBe(0.4);
+    await service.command('u', 'a', { type: 'setVolume', volume: 0.4 });
+    expect(stateOf().volume).toBe(0.4);
     expect(hooks.controlCalls[hooks.controlCalls.length - 1]?.command).toEqual({
-      type: 'setCastVolume',
+      type: 'setVolume',
       volume: 0.4,
     });
 
@@ -2080,5 +2080,184 @@ describe('Your Stack', () => {
     await enqueue([track('s1')], { next: true, stack: true });
     const snapshot = service.touch('u', 'a', device('a'));
     expect(snapshot.session?.stack).toEqual(['s1']);
+  });
+});
+
+describe('remote volume', () => {
+  it('routes setVolume by target kind: device state, cast forwarded', async () => {
+    const hooks = castHooks();
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a', 'b'], 0);
+    await transferToDevice('a');
+    const before = stateOf().revision;
+
+    expect(
+      await service.command('u', 'b', { type: 'setVolume', volume: 0.5 }),
+    ).toMatchObject({ ok: true });
+    expect(stateOf().volume).toBe(0.5);
+    expect(stateOf().revision).toBeGreaterThan(before);
+    expect(hooks.controlCalls).toHaveLength(0);
+
+    await service.command('u', 'b', {
+      type: 'transfer',
+      target: { kind: 'cast', castId: 'cast-1' },
+    });
+    await service.command('u', 'b', { type: 'setVolume', volume: 0.2 });
+    expect(hooks.controlCalls.at(-1)?.command).toEqual({
+      type: 'setVolume',
+      volume: 0.2,
+    });
+  });
+
+  it('applies the device volume reports, ignoring stale and echoed values', async () => {
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    await service.command('u', 'b', { type: 'setVolume', volume: 0.5 });
+    const commanded = stateOf().revision;
+
+    // The device has not applied 0.5 yet: its old level must not snap the value back.
+    report('a', 'tick', { volume: 0.9 });
+    expect(stateOf().volume).toBe(0.5);
+    expect(stateOf().revision).toBe(commanded);
+
+    // Its echo of the commanded level changes nothing.
+    report('a', 'tick', { volume: 0.5 });
+    expect(stateOf().revision).toBe(commanded);
+
+    // Once the window has passed, a hardware-key change is accepted and broadcast.
+    now += 4_000;
+    const controller = socket('b');
+    service.join('u', controller.conn, device('b'));
+    report('a', 'tick', { volume: 0.3 });
+    expect(stateOf().volume).toBe(0.3);
+    expect(stateOf().revision).toBe(commanded + 1);
+    expect(
+      controller.messages.some(
+        (message) => message.type === 'state' && message.session.volume === 0.3,
+      ),
+    ).toBe(true);
+
+    // Same value again: no loop, no bump.
+    report('a', 'tick', { volume: 0.3 });
+    expect(stateOf().revision).toBe(commanded + 1);
+  });
+
+  it('rejects setVolume for a device that cannot control its volume', async () => {
+    join('u', 'a');
+    join('u', 'z', { volumeControl: 'none' });
+    await setQueue(['a'], 0);
+    await transferToDevice('z');
+
+    expect(
+      await service.command('u', 'z', { type: 'setVolume', volume: 0.5 }),
+    ).toEqual({ ok: false, error: 'volume-unsupported' });
+    expect(stateOf().volume).toBeUndefined();
+  });
+
+  it('does not carry a stale stored device volume into a transfer', async () => {
+    join('u', 'a');
+    join('u', 'b', { volume: 0.2 });
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    report('a', 'tick', { volume: 0.5 });
+    expect(stateOf().volume).toBe(0.5);
+
+    await transferToDevice('b');
+    expect(stateOf().volume).toBeUndefined();
+
+    // The new target's own first report is accepted, not held back by a pending command.
+    report('b', 'tick', { volume: 0.7 }, 'u');
+    expect(stateOf().volume).toBe(0.7);
+  });
+
+  it('accepts the applied level when the OS rounds a pending command', async () => {
+    join('u', 'a', { platform: 'android' });
+    join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    await service.command('u', 'b', { type: 'setVolume', volume: 0.5 });
+
+    // Android rounds 0.5 to a stream step; within half a step it is the applied level.
+    report('a', 'tick', { volume: 0.533 });
+    expect(stateOf().volume).toBe(0.533);
+  });
+
+  it('a web device must match a pending level closely, not within a stream step', async () => {
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    await service.command('u', 'b', { type: 'setVolume', volume: 0.5 });
+
+    // A desktop applies the level exactly: a step away is the old level.
+    report('a', 'tick', { volume: 0.533 });
+    expect(stateOf().volume).toBe(0.5);
+
+    // Within float noise of the commanded level it is the applied one.
+    report('a', 'tick', { volume: 0.503 });
+    expect(stateOf().volume).toBe(0.503);
+  });
+
+  it('a pending level expires when the device stays at its old level', async () => {
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    await service.command('u', 'b', { type: 'setVolume', volume: 0.5 });
+
+    report('a', 'tick', { volume: 0.9 });
+    expect(stateOf().volume).toBe(0.5);
+
+    // The pending window has passed: the device's level is now the truth.
+    now += 4_000;
+    report('a', 'tick', { volume: 0.9 });
+    expect(stateOf().volume).toBe(0.9);
+  });
+
+  it('ignores volume reports from a client that is not the target', async () => {
+    join('u', 'a');
+    join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    report('a', 'tick', { volume: 0.5 });
+
+    report('b', 'tick', { volume: 0.9 });
+    expect(stateOf().volume).toBe(0.5);
+  });
+
+  it('a stale device tick does not revert a sequence of commanded levels', async () => {
+    join('u', 'a');
+    const controller = join('u', 'b');
+    await setQueue(['a'], 0);
+    await transferToDevice('a');
+    // The desktop reports its own level (1) before any command reaches it.
+    report('a', 'tick', { volume: 1 });
+
+    for (const level of [0.9, 0.8, 0.7]) {
+      now += 150;
+      expect(
+        await service.command('u', 'b', { type: 'setVolume', volume: level }),
+      ).toMatchObject({ ok: true });
+      // Old-level tick sent before the device applied the command: it lands
+      // inside the pending window, so it must not revert the commanded level.
+      report('a', 'tick', { volume: 1 });
+      expect(stateOf().volume).toBe(level);
+      now += 50;
+      // The device's echo of the applied level clears the pending marker.
+      report('a', 'tick', { volume: level });
+      expect(stateOf().volume).toBe(level);
+    }
+
+    // Every volume broadcast to the controller is the desktop's first report
+    // (1, undefined before it) followed by each commanded level, in order.
+    expect(
+      controller.messages
+        .filter((message) => message.type === 'state')
+        .map((message) => message.session.volume)
+        .filter((volume) => volume !== undefined),
+    ).toEqual([1, 0.9, 0.8, 0.7]);
   });
 });

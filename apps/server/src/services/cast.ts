@@ -434,7 +434,7 @@ export class CastService {
       await this.startEntry(conn, entry, plan, Math.max(0, state.positionSec), state.playing);
       // The receiver is the authority once media is loaded.
       const reported = conn.transport.status()?.volume;
-      if (reported !== undefined) state.castVolume = reported;
+      if (reported !== undefined) state.volume = reported;
     } catch (error) {
       // A transfer that failed must not keep the speaker locked for this user.
       if (created) await this.release(conn, { stop: true });
@@ -548,9 +548,9 @@ export class CastService {
   // -------------------------------------------------------------------------
 
   private async applyVolume(conn: CastConnection, state: SessionState): Promise<void> {
-    if (state.castVolume !== undefined) await conn.transport.setVolume(state.castVolume);
+    if (state.volume !== undefined) await conn.transport.setVolume(state.volume);
     const reported = conn.transport.status()?.volume;
-    if (reported !== undefined) state.castVolume = reported;
+    if (reported !== undefined) state.volume = reported;
   }
 
   private async startEntry(
@@ -706,7 +706,7 @@ export class CastService {
                 playing: state.playing,
                 positionSec: 0,
                 ...(entry.durationSec !== undefined ? { durationSec: entry.durationSec } : {}),
-                volume: state.castVolume ?? 1,
+                volume: state.volume ?? 1,
               },
               command.positionSec,
             ),
@@ -725,7 +725,7 @@ export class CastService {
         // `SessionService` already moved the cursor; load the new entry.
         await this.reload(conn, state, entry, 0, state.playing);
         return;
-      case 'setCastVolume':
+      case 'setVolume':
         await conn.transport.setVolume(command.volume);
         return;
       default:

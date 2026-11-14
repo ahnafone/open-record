@@ -36,7 +36,10 @@ import {
 // The picker is a single shell-level instance (not a routed screen), so it is
 // intentionally eager even though the Now Playing page itself is lazy.
 // eslint-disable-next-line @nx/enforce-module-boundaries
-import { OrDevicePicker } from '@open-record/features/now-playing';
+import {
+  OrDevicePicker,
+  OrVolumePopup,
+} from '@open-record/features/now-playing';
 import { OrToast, OrToastHost, OrViewport } from '@open-record/ui';
 import type { ScreenData } from './app.routes';
 import { mediaKeyAction, pageKeyAction } from './keyboard-shortcuts';
@@ -95,6 +98,7 @@ const NARROW_SCREENS: ReadonlySet<string> = new Set(['settings', 'about', 'accou
     OrPlayerBar,
     OrDrawer,
     OrDevicePicker,
+    OrVolumePopup,
     OrSourceFixDialog,
     OrLinkStrip,
     OrWelcomeModal,

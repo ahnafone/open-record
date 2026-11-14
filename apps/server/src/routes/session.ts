@@ -12,6 +12,7 @@ import {
   type SessionSnapshot,
   type SessionState,
   type SessionUnchanged,
+  type SessionVolumeControl,
 } from '@open-record/models';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -70,6 +71,10 @@ function readDevice(value: unknown): SessionDevice | null {
   if (model !== undefined && (typeof model !== 'string' || model.length > MAX_DEVICE_NAME_LEN)) {
     return null;
   }
+  const volume = value['volume'];
+  if (volume !== undefined && !isVolume(volume)) return null;
+  const volumeControl = value['volumeControl'];
+  if (volumeControl !== undefined && !isVolumeControl(volumeControl)) return null;
   return {
     id,
     deviceId,
@@ -79,7 +84,17 @@ function readDevice(value: unknown): SessionDevice | null {
     lastSeenAt: Date.now(),
     capabilities: { cast, localFiles },
     ...(typeof model === 'string' && model ? { model } : {}),
+    ...(volume !== undefined ? { volume } : {}),
+    ...(volumeControl !== undefined ? { volumeControl } : {}),
   };
+}
+
+function isVolume(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isVolumeControl(value: unknown): value is SessionVolumeControl {
+  return value === 'full' || value === 'none';
 }
 
 function readHello(value: unknown): SessionHello | null {
@@ -173,6 +188,8 @@ interface StateQuery {
   cast: '0' | '1';
   localFiles: '0' | '1';
   since?: number;
+  volume?: number;
+  volumeControl?: SessionVolumeControl;
 }
 
 interface CommandBody {
@@ -188,6 +205,7 @@ interface ReportBody {
   positionSec: number;
   playing: boolean;
   durationSec?: number;
+  volume?: number;
 }
 
 /**
@@ -550,6 +568,8 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
             cast: { type: 'string', enum: ['0', '1'] },
             localFiles: { type: 'string', enum: ['0', '1'] },
             since: { type: 'integer', minimum: 0 },
+            volume: { type: 'number', minimum: 0, maximum: 1 },
+            volumeControl: { type: 'string', enum: ['full', 'none'] },
           },
         },
       },
@@ -573,6 +593,8 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
         online: true,
         lastSeenAt: Date.now(),
         capabilities: { cast: query.cast === '1', localFiles: query.localFiles === '1' },
+        ...(query.volume !== undefined ? { volume: query.volume } : {}),
+        ...(query.volumeControl !== undefined ? { volumeControl: query.volumeControl } : {}),
       };
       const snapshot = sessions.touch(request.userId ?? '', query.clientId, device);
       if (
@@ -636,6 +658,7 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
             positionSec: { type: 'number', minimum: 0 },
             playing: { type: 'boolean' },
             durationSec: { type: 'number', minimum: 0 },
+            volume: { type: 'number', minimum: 0, maximum: 1 },
           },
         },
       },
@@ -658,6 +681,7 @@ export const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (
         positionSec: body.positionSec,
         playing: body.playing,
         ...(body.durationSec !== undefined ? { durationSec: body.durationSec } : {}),
+        ...(body.volume !== undefined ? { volume: body.volume } : {}),
       });
       return reply.code(204).send();
     },

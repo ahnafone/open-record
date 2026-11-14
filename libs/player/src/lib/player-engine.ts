@@ -1627,18 +1627,38 @@ function resolveFailure(
 }
 
 /**
+ * yt-dlp messages about one video (removed, private, age or region locked).
+ * Kept in step with `TRACK_PROBLEM` in libs/state remote-errors.ts; the state
+ * lib imports this one, so it cannot be shared the other way.
+ */
+const TRACK_PROBLEM =
+  /video unavailable|private video|confirm your age|age[- ]restricted|not available in your country|removed|terminated|no direct audio link/i;
+
+/** The server's per-link 422s (segmented, live, invalid or playlist links). */
+const PER_TRACK_422 =
+  /segmented streams|live streams|invalid link|playlists are not supported|no direct audio link/i;
+
+/**
  * A resolve failure worth retrying: the source may come back (network,
- * timeout, busy server, 5xx, malformed reply). Auth/config/abort and other
- * 4xx failures are permanent for this track.
+ * timeout, busy server, 5xx or 408, malformed reply, a generic yt-dlp failure).
+ * Auth/config/abort, track-level 4xx (private, age-locked, segmented links)
+ * and other 4xx failures are permanent for this track.
  */
 function isRetryableResolveError(err: unknown): boolean {
   const name = err instanceof Error ? err.name : '';
   const code = (err as { code?: unknown } | null)?.code;
   if (code === 'ETIMEDOUT' || code === 'ECONNRESET') return true;
-  // Any HTTP-shaped failure: 5xx is worth another try, 4xx is not.
+  // Any HTTP-shaped failure: 5xx and 408 are worth another try. yt-dlp
+  // failures answer 422 (502 from older servers), so a 422 is retried only
+  // when it is not about the video itself.
   const status = (err as { status?: unknown } | null)?.status;
   if (typeof status === 'number' && Number.isFinite(status)) {
-    return status >= 500;
+    if (status >= 500 || status === 408) return true;
+    if (status === 422) {
+      const message = err instanceof Error ? err.message : '';
+      return !TRACK_PROBLEM.test(message) && !PER_TRACK_422.test(message);
+    }
+    return false;
   }
   switch (name) {
     case 'NetworkError':
