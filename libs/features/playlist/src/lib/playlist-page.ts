@@ -312,6 +312,14 @@ const ROW_STYLES = `
         color: var(--color-text);
       }
     }
+    /*
+     * Contains the sr-only header labels below. An absolute box with no
+     * positioned ancestor is placed against the viewport and escapes the shell's
+     * overflow: hidden, which made the whole document scrollable.
+     */
+    .head-row {
+      position: relative;
+    }
     .sr-only {
       position: absolute;
       inline-size: 1px;

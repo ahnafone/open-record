@@ -496,6 +496,7 @@ interface UpNextRow {
       margin: 6px 0 var(--spacing-lg);
     }
     .meta {
+      position: relative;
       display: grid;
       gap: var(--spacing-xxs);
       margin-bottom: 10px;

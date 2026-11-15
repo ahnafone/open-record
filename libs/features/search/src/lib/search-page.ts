@@ -435,6 +435,7 @@ const ROW_STYLES = `
     `
     :host {
       display: block;
+      position: relative;
     }
     .sr-only {
       position: absolute;
