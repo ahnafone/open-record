@@ -5,6 +5,7 @@ export * from './lib/auth.store';
 export * from './lib/settings.store';
 export * from './lib/library.store';
 export * from './lib/playlists.store';
+export * from './lib/genre-groups';
 export * from './lib/artists.store';
 export * from './lib/player.store';
 export * from './lib/session.store';

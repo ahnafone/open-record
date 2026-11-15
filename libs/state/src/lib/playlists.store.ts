@@ -3,6 +3,7 @@ import type { Playlist, Track } from '@open-record/models';
 import { StoragePort } from '@open-record/storage';
 import { LibraryStore, type LoadStatus } from './library.store';
 import { OfflineStore } from './offline.store';
+import { genreMatchKey, groupByGenre } from './genre-groups';
 
 export type PlaylistVisibility = Playlist['visibility'];
 
@@ -169,6 +170,75 @@ export class PlaylistsStore {
   }
 
   /**
+   * Keep one auto-created playlist per genre, in sync with `tracks`. Genres
+   * with at least 3 tracks (see `groupByGenre`) get a private playlist.
+   * Lookup is by the `genre` marker, matched case-insensitively. When none
+   * has the marker, an unmarked private playlist named after the genre
+   * (case-insensitive, trimmed) is adopted: it gets the marker and the missing
+   * tracks, instead of a duplicate (e.g. the same genre made on another
+   * device). A playlist with a different marker is never adopted. Existing
+   * ones only gain missing ids; tracks are never removed. Tracks are indexed
+   * as metadata only: nothing is saved or downloaded.
+   */
+  async createGenrePlaylists(
+    tracks: readonly Track[],
+  ): Promise<{ created: number; updated: number; added: number }> {
+    await this.loaded;
+    this.library.remember(tracks);
+    const result = { created: 0, updated: 0, added: 0 };
+    for (const group of groupByGenre(tracks)) {
+      const key = genreMatchKey(group.genre);
+      const all = this._playlists();
+      const target =
+        all.find((p) => genreMatchKey(p.genre) === key) ??
+        all.find(
+          (p) =>
+            !genreMatchKey(p.genre) &&
+            p.visibility === 'private' &&
+            p.name.trim().toLowerCase() === key,
+        );
+      if (!target) {
+        const now = Date.now();
+        const times: Record<string, number> = {};
+        for (const id of group.trackIds) times[id] = now;
+        await this.insert({
+          id: newId(),
+          name: validName(group.genre.slice(0, PLAYLIST_NAME_MAX)),
+          visibility: 'private',
+          trackIds: [...group.trackIds],
+          addedAt: times,
+          genre: group.genre,
+          createdAt: now,
+          updatedAt: now,
+        });
+        result.created++;
+        continue;
+      }
+      const adopting = !genreMatchKey(target.genre);
+      const have = new Set(target.trackIds);
+      const missing = group.trackIds.filter((id) => !have.has(id));
+      if (!missing.length && !adopting) continue;
+      const now = Date.now();
+      await this.mutate(
+        target.id,
+        (p) => ({
+          ...p,
+          genre: genreMatchKey(p.genre) ? p.genre : group.genre,
+          trackIds: [...p.trackIds, ...missing],
+          addedAt: {
+            ...p.addedAt,
+            ...Object.fromEntries(missing.map((id) => [id, now])),
+          },
+        }),
+        false,
+      );
+      result.updated++;
+      result.added += missing.length;
+    }
+    return result;
+  }
+
+  /**
    * Swap a track id for another in every playlist, keeping its position
    * (a repeat of `newId` is dropped). Never saves to the device.
    */
@@ -277,6 +347,8 @@ export class PlaylistsStore {
       trackIds: [...playlist.trackIds],
     });
     if (!next.autoDownload) delete next.autoDownload;
+    // The genre marker is local-only: the cloud copy never carries it.
+    if (!next.genre && before?.genre) next.genre = before.genre;
     const put = (p: Playlist | undefined) =>
       this._playlists.update((all) => {
         const rest = all.filter((x) => x.id !== playlist.id);
@@ -292,6 +364,17 @@ export class PlaylistsStore {
     }
     if (before?.trackIds.some((t) => !next.trackIds.includes(t)))
       await this.offline.reconcile();
+  }
+
+  /** Add a new playlist to the signal and storage; rolls back on a failed write. */
+  private async insert(playlist: Playlist): Promise<void> {
+    this._playlists.update((all) => [...all, playlist]);
+    try {
+      await this.storage.playlists.save(playlist);
+    } catch (err) {
+      this._playlists.update((all) => all.filter((p) => p.id !== playlist.id));
+      throw err;
+    }
   }
 
   private async mutate(

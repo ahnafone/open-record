@@ -213,6 +213,11 @@ export interface Playlist {
   autoDownload?: boolean;
   /** When each track was added (track id -> epoch ms). Absent entry = unknown. */
   addedAt?: Record<string, number>;
+  /**
+   * Set on playlists auto-created for a genre (the genre string, as on the
+   * track). Local marker only: not synced to the cloud. Absent = user playlist.
+   */
+  genre?: string;
 }
 
 export type Role = 'owner' | 'editor' | 'viewer';
