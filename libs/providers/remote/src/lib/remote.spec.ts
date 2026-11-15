@@ -138,6 +138,32 @@ describe('remote provider', () => {
       expect(sources).toEqual(['ytmusic']);
     });
 
+    it('keeps YT Music results when the YouTube fallback is busy', async () => {
+      const { sources, transport } = bySource({
+        ytmusic: ok([musicHit(ID.a, 'Song 1'), musicHit(ID.b, 'Song 2')]),
+        youtube: { status: 503, data: { error: 'busy' } },
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      const tracks = await provider.search('song');
+
+      expect(sources).toEqual(['ytmusic', 'youtube']);
+      expect(tracks.map((t) => t.title)).toEqual(['Song 1', 'Song 2']);
+    });
+
+    it('dedups the same video across watch?v= and youtu.be inside the fallback batch', async () => {
+      const youtuBe = { id: ID.c, title: 'Song 3', artist: 'A', url: `https://youtu.be/${ID.c}`, site: 'youtube' };
+      const { transport } = bySource({
+        ytmusic: ok([]),
+        youtube: ok([ytHit(ID.c, 'Song 3'), youtuBe]),
+      });
+      const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport });
+
+      const tracks = await provider.search('song');
+
+      expect(tracks.map((t) => t.title)).toEqual(['Song 3']);
+    });
+
     it('goes straight to defaultSite when it is not YT Music', async () => {
       const { sources, transport } = bySource({ youtube: ok([ytHit('y1', 'Song 1')]) });
       const provider = new RemoteProvider({ config: { baseUrl: 'https://music.example' }, transport, defaultSite: 'youtube' });
@@ -156,6 +182,7 @@ describe('remote provider', () => {
       expect(isMusicFallback(track('Song'))).toBe(true);
       expect(isMusicFallback(track('Chain Reaction'))).toBe(true);
       expect(isMusicFallback(track('24 Hours'))).toBe(true);
+      expect(isMusicFallback(track('Music for 3 Hours'))).toBe(true);
       expect(isMusicFallback(track('10 Hours of Rain Ambience'))).toBe(false);
     });
   });

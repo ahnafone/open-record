@@ -16,6 +16,7 @@ import {
   GuestHostError,
   HttpError,
   NetworkError,
+  AuthError,
   ProtocolError,
   RemoteConfigError,
   RemoteError,
@@ -92,7 +93,7 @@ const NON_MUSIC_TITLE = new RegExp(
     String.raw`\breaction\s+(to|video)\b`,
     String.raw`[([]\s*reaction\s*[)\]]`,
     // Long "N hours" only with mix-style context somewhere in the title: "1 hour mix", "10 Hours of Rain Ambience"
-    String.raw`^(?=.*\b(mix|mixes|playlist|music|loop|ambien\w*|relax\w*|sleep)\b).*\b\d+\s*hours?\b`,
+    String.raw`^(?=.*\b(mix|mixes|playlist|loop|ambien\w*|relax\w*|lofi|study)\b).*\b\d+\s*hours?\b`,
   ].join('|'),
   'i',
 );
@@ -316,8 +317,9 @@ export class RemoteProvider {
    * MusicSourceProvider search, music-first: YouTube Music's Songs shelf. Only
    * when that yields fewer than `MIN_MUSIC_RESULTS` (or fails with a server or
    * network error) does it also query plain YouTube; those extra hits pass
-   * `isMusicFallback` and are deduped by video id. Auth, guest-limit and busy
-   * errors are rethrown. Empty when no server is configured.
+   * `isMusicFallback` and are deduped by video id. YT Music auth, guest-limit
+   * and busy errors are rethrown; a failing YouTube fallback keeps the YT Music
+   * results (auth still rethrows). Empty when no server is configured.
    */
   async search(query: string, signal?: AbortSignal): Promise<Track[]> {
     if (!this._client) return [];
@@ -339,10 +341,16 @@ export class RemoteProvider {
     const seen = new Set(music.map(canonicalKey));
     let fallback: Track[];
     try {
-      fallback = await this.searchTracks(query, 'youtube', signal, (t) => isMusicFallback(t) && !seen.has(canonicalKey(t)));
+      fallback = await this.searchTracks(query, 'youtube', signal, (t) => {
+        if (!isMusicFallback(t)) return false;
+        const key = canonicalKey(t);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     } catch (err) {
-      // Keep whatever YT Music found; surface the error only when there is nothing.
-      if (signal?.aborted || !isFallbackError(err)) throw err;
+      // Keep whatever YT Music found for any failure but abort or auth; surface the error only when there is nothing.
+      if (signal?.aborted || err instanceof AuthError) throw err;
       if (music.length) return music;
       throw musicError ?? err;
     }
