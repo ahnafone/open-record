@@ -182,6 +182,75 @@ describe('offline store', () => {
     status();
     expect(runs).toBe(1);
   });
+
+  it('startup retries an interrupted save despite its cooldown, but a failed save still waits', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    // Force start() down its setTimeout(4000) path, whatever the environment provides.
+    vi.stubGlobal('requestIdleCallback', undefined);
+    try {
+      const storage = createInMemoryStorage();
+      const interrupted = remoteTrack('interrupted');
+      const cooling = remoteTrack('cooling');
+      const future = Date.now() + 60_000;
+      await storage.importedTracks.save({
+        track: interrupted,
+        filePath: '',
+        importedAt: 1,
+        status: 'saving',
+        attempts: 1,
+        retryAt: future,
+      });
+      await storage.importedTracks.save({
+        track: cooling,
+        filePath: '',
+        importedAt: 1,
+        status: 'failed',
+        error: 'boom',
+        attempts: 1,
+        retryAt: future,
+      });
+      // Both tracks sit in a playlist so startup reconcile keeps them. Seeded
+      // directly: addTracks would itself re-save them.
+      await storage.playlists.save({
+        id: 'pl-crate',
+        name: 'Crate',
+        visibility: 'private',
+        trackIds: [interrupted.id, cooling.id],
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      const saveToDevice = vi.fn<(url: string, opts: { id: string }) => Promise<never>>(
+        () => new Promise<never>(() => undefined),
+      );
+      const { library, playlists, offline } = boot(storage, { saveToDevice }, {
+        remove: async () => 0,
+      });
+      await Promise.all([library.ready(), playlists.ready()]);
+
+      await offline.start();
+      await vi.advanceTimersByTimeAsync(4_000);
+
+      await vi.waitFor(() => expect(saveToDevice).toHaveBeenCalledTimes(1));
+      // Flush any further startup work, then confirm nothing else ran.
+      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect(saveToDevice).toHaveBeenCalledTimes(1);
+      expect(saveToDevice.mock.calls[0][1]).toMatchObject({ id: interrupted.id });
+
+      // The interrupted save: one attempt counted, no cooldown written on it.
+      expect(offline.status(interrupted.id)).toBe('saving');
+      const savingRecord = await storage.importedTracks.get(interrupted.id);
+      expect(savingRecord?.attempts).toBe(2);
+      expect(savingRecord?.retryAt).toBeUndefined();
+
+      // The failed save still waits out its cooldown, untouched.
+      expect(offline.status(cooling.id)).toBe('failed');
+      expect((await storage.importedTracks.get(cooling.id))?.attempts).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('offline store stalls', () => {

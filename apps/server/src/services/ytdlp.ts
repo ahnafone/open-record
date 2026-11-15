@@ -95,11 +95,17 @@ export interface SearchResult {
   site: string;
 }
 
-/** yt-dlp failed or was misused; `status` is the HTTP status to answer with. */
+/**
+ * yt-dlp failed or was misused; `status` is the HTTP status to answer with.
+ *
+ * The default is 422, not 502: Cloudflare replaces origin 502/504 responses
+ * with its own text/plain page, which drops this JSON reason before the app can
+ * read it (and a 5xx reads as a systemic failure). Keep yt-dlp failures on 4xx.
+ */
 export class YtDlpError extends Error {
   constructor(
     message: string,
-    readonly status = 502,
+    readonly status = 422,
   ) {
     super(message);
   }
@@ -826,7 +832,8 @@ function execOnce(
                 new YtDlpError('yt-dlp is not installed on the server', 500),
               );
             if ((err as { killed?: boolean }).killed)
-              return reject(new YtDlpError('yt-dlp timed out', 504));
+              // 408, not 504: see YtDlpError (Cloudflare swaps 5xx bodies).
+              return reject(new YtDlpError('yt-dlp timed out', 408));
             return reject(
               new YtDlpError(lastError(String(stderr)) ?? 'yt-dlp failed'),
             );

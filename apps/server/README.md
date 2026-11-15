@@ -248,7 +248,13 @@ cookies), so the server bounds how many run at once:
   a time across `/search`, `/resolve` and `/stream`. Up to 16 further calls wait
   for a slot for at most 20 seconds. A call that cannot get in answers
   `503 Service Unavailable` with `Retry-After: 5`; the app shows "server busy".
-- **Timeout.** A yt-dlp run is killed after 45 seconds and answers `504`.
+- **Timeout.** A yt-dlp run killed after 45 seconds answers `408` with
+  `{"error": "yt-dlp timed out"}`.
+- **yt-dlp failures.** A generic yt-dlp failure (including a bot check) answers `422`
+  with its reason in `{"error": ...}`, not `502`. Cloudflare replaces origin 502/504
+  bodies, which would hide the reason. Links the server cannot turn into audio (for
+  example segmented streams) also answer `422`, with their own message. Each failure
+  is logged as a `resolve failed` warning, with the URL stripped of its query string.
 - **Rate limit.** `/search`, `/resolve` and `/stream` allow `RESOLVE_RATE_LIMIT_MAX`
   requests per minute per client (`429` beyond that); the client is the Supabase user when signed in, otherwise the IP, on top of the general
   `RATE_LIMIT_MAX` per client (user, or IP for the static token and public routes).

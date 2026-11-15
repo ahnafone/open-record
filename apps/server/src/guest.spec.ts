@@ -338,7 +338,7 @@ describe('guest streaming', () => {
     }
     const [g, m] = await Promise.all([guest, member]);
     await app.close();
-    expect(g.statusCode).toBe(502);
-    expect(m.statusCode).toBe(502);
+    expect(g.statusCode).toBe(422);
+    expect(m.statusCode).toBe(422);
   });
 });

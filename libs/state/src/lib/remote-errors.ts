@@ -62,9 +62,21 @@ export function busyRetryAfterSec(error: unknown): number | undefined {
 /**
  * Whether a failed save says something about the whole download path
  * (`'systemic'`: offline, server unreachable or erroring, signed out, not set
- * up) or only about that one track (`'track'`: removed or region-blocked
- * video, a 4xx for its audio, a bad file). Auto-download pauses on a run of
- * systemic failures and simply moves on after a track failure.
+ * up, yt-dlp itself failing) or only about that one track (`'track'`: removed,
+ * private or age/region-locked video, a link the server cannot turn into audio,
+ * a bad file). Auto-download pauses on a run of systemic failures and simply
+ * moves on after a track failure.
+ *
+ * HTTP errors are classified in this order:
+ * 1. A message naming the video's own problem (`TRACK_PROBLEM`) is `'track'`,
+ *    whatever the status.
+ * 2. A bot check or a generic yt-dlp failure (`YT_DLP_FAILURE`, e.g. "yt-dlp
+ *    failed", "yt-dlp timed out") is `'systemic'`, even as a 4xx: the server
+ *    answers those 422, and older servers answered 502.
+ * 3. Any 5xx, 408 or status-less error is `'systemic'`.
+ * 4. A 422 is `'track'` only for the server's own per-link verdicts
+ *    (`PER_TRACK_422`); any other 422 is a yt-dlp failure and `'systemic'`.
+ * 5. Remaining 4xx are `'track'`.
  */
 export function failureKind(error: unknown): 'systemic' | 'track' {
   const name = error instanceof Error ? error.name : '';
@@ -76,12 +88,13 @@ export function failureKind(error: unknown): 'systemic' | 'track' {
     case 'busy':
       return 'systemic';
     case 'HttpError': {
-      // yt-dlp failures come back as 502 but often name the video's own problem.
-      if (TRACK_PROBLEM.test((error as Error).message)) return 'track';
+      const message = (error as Error).message;
+      if (TRACK_PROBLEM.test(message)) return 'track';
+      if (YT_DLP_FAILURE.test(message)) return 'systemic';
       const status = Number((error as { status?: unknown }).status);
-      return !Number.isFinite(status) || status >= 500 || status === 408
-        ? 'systemic'
-        : 'track';
+      if (!Number.isFinite(status) || status >= 500 || status === 408) return 'systemic';
+      if (status === 422) return PER_TRACK_422.test(message) ? 'track' : 'systemic';
+      return 'track';
     }
     default:
       return 'track';
@@ -91,6 +104,16 @@ export function failureKind(error: unknown): 'systemic' | 'track' {
 /** yt-dlp messages about one video (removed, private, age or region locked). */
 const TRACK_PROBLEM =
   /video unavailable|private video|confirm your age|age[- ]restricted|not available in your country|removed|terminated|no direct audio link/i;
+
+/** yt-dlp failures that name no video problem: a bot check or yt-dlp itself failing. */
+const YT_DLP_FAILURE = /not a bot|yt-dlp (failed|timed out|returned)/i;
+
+/**
+ * The server's own per-link 422s (not a yt-dlp run failing): the link is
+ * segmented, live, invalid or a playlist.
+ */
+const PER_TRACK_422 =
+  /segmented streams|live streams|invalid link|playlists are not supported|no direct audio link/i;
 
 /** True when the server said it is busy or rate limited (retry later). */
 export function isBusy(error: unknown): boolean {

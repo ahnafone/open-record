@@ -39,4 +39,55 @@ describe('remote error classification', () => {
       failureKind(Object.assign(new Error('yt-dlp failed'), { name: 'HttpError', status: 502 })),
     ).toBe('systemic');
   });
+
+  it('treats a generic yt-dlp 422 as systemic, not a per-track failure', () => {
+    expect(
+      failureKind(Object.assign(new Error('yt-dlp failed'), { name: 'HttpError', status: 422 })),
+    ).toBe('systemic');
+    expect(
+      failureKind(Object.assign(new Error('yt-dlp timed out'), { name: 'HttpError', status: 408 })),
+    ).toBe('systemic');
+  });
+
+  it('keeps age-locked 422s per-track', () => {
+    expect(
+      failureKind(
+        Object.assign(new Error('Sign in to confirm your age. Add cookies to retry.'), {
+          name: 'HttpError',
+          status: 422,
+        }),
+      ),
+    ).toBe('track');
+  });
+
+  it('treats a bot check as systemic even though it is a 4xx', () => {
+    expect(
+      failureKind(
+        Object.assign(new Error("Sign in to confirm you're not a bot."), {
+          name: 'HttpError',
+          status: 422,
+        }),
+      ),
+    ).toBe('systemic');
+  });
+
+  it('keeps the server\'s segmented-link 422 per-track', () => {
+    expect(
+      failureKind(
+        Object.assign(
+          new Error('this source only offers segmented streams, which are not supported'),
+          { name: 'HttpError', status: 422 },
+        ),
+      ),
+    ).toBe('track');
+  });
+
+  it('keeps a plain 404 per-track and a 5xx systemic', () => {
+    expect(
+      failureKind(Object.assign(new Error('missing'), { name: 'HttpError', status: 404 })),
+    ).toBe('track');
+    expect(
+      failureKind(Object.assign(new Error('boom'), { name: 'HttpError', status: 500 })),
+    ).toBe('systemic');
+  });
 });

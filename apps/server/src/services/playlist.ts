@@ -139,7 +139,7 @@ export function toPlaylistEntry(e: YtDlpInfo, site: YoutubeTarget['site']): Remo
 
 /** Clear, client-safe messages for the usual playlist or song failures. */
 function linkError(err: unknown, noun: 'playlist' | 'song'): unknown {
-  if (!(err instanceof YtDlpError) || err.status !== 502) return err;
+  if (!(err instanceof YtDlpError) || err.status !== 422) return err;
   // Age gate first: its message also says "Sign in", which the private branch
   // would otherwise turn into "This song is private".
   if (AGE_GATE.test(err.message)) {

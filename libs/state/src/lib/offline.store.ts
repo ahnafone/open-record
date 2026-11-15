@@ -215,13 +215,11 @@ export class OfflineStore {
   }
 
   /**
-   * `ensureSaved`, optionally storing `interrupted` attempts/cooldown on the
-   * `saving` record (an interrupted save resumed at launch).
+   * `ensureSaved`, optionally storing the `interrupted` attempt count on the
+   * `saving` record (an interrupted save resumed at launch). Never defers: the
+   * save is queued immediately.
    */
-  private async save(
-    track: Track,
-    interrupted?: { attempts: number; retryAt: number },
-  ): Promise<void> {
+  private async save(track: Track, interrupted?: { attempts: number }): Promise<void> {
     if (!isSavable(track)) return;
     await this.library.ready();
     const existing = this.library.storedRecord(track.id);
@@ -322,8 +320,9 @@ export class OfflineStore {
 
   /**
    * Startup: reconcile, then (off the boot path, once the app is idle) resume
-   * saves left `saving` or `failed`. A failed save waits out its `retryAt`
-   * cooldown; cancel or unbookmark to stop it.
+   * saves left `saving` or `failed`. An interrupted (`saving`) save is always
+   * retried at launch, ignoring any cooldown: no attempt survives a restart. A
+   * failed save waits out its `retryAt` cooldown; cancel or unbookmark to stop it.
    */
   async start(): Promise<void> {
     await this.reconcile();
@@ -342,14 +341,12 @@ export class OfflineStore {
       const status = record.status ?? 'saved';
       if (status !== 'saving' && status !== 'failed') continue;
       if (status === 'failed' && record.error === WAITING_FOR_WIFI) continue;
-      // Failed saves and interrupted saves share the cooldown.
-      if ((record.retryAt ?? 0) > now) continue;
-      // An interrupted save counts as an attempt, like a real failure in `fail()`.
+      // Only failed saves wait out `retryAt`. An interrupted ('saving') save is
+      // always retried at launch, ignoring any cooldown.
+      if (status === 'failed' && (record.retryAt ?? 0) > now) continue;
+      // Each launch counts one attempt for an interrupted save, like a real failure in `fail()`.
       const attempts = (record.attempts ?? 0) + 1;
-      const interrupted =
-        status === 'saving'
-          ? { attempts, retryAt: now + retryDelayMs(attempts) }
-          : undefined;
+      const interrupted = status === 'saving' ? { attempts } : undefined;
       try {
         await this.save(record.track, interrupted);
       } catch {

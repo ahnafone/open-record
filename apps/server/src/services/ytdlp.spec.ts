@@ -511,7 +511,7 @@ describe('yt-dlp cookies', () => {
       const err = await search('x', 'youtube').catch((e: unknown) => e);
       expect(err).toMatchObject({
         message: expect.stringMatching(/Private video/),
-        status: 502,
+        status: 422,
       });
       expect((err as Error).message).not.toMatch(/confirm your age/i);
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(2);
@@ -548,7 +548,7 @@ describe('yt-dlp cookies', () => {
         stderr: 'ERROR: Unsupported URL: https://example.com/login\n',
       });
       const err = await search('x', 'youtube').catch((e: unknown) => e);
-      expect(err).toMatchObject({ status: 502 });
+      expect(err).toMatchObject({ status: 422 });
       expect((err as Error).message).toMatch(/Unsupported URL/);
       // The "/login" path is not a sign-in refusal, so no age-gate guidance.
       expect((err as Error).message).not.toMatch(/confirm your age/i);
@@ -584,7 +584,7 @@ describe('yt-dlp cookies', () => {
     mockRuns({ error: true, stderr: AGE_STDERR });
     await expect(search('x', 'youtube')).rejects.toMatchObject({
       message: expect.stringMatching(/confirm your age.*cookies/i),
-      status: 502,
+      status: 422,
     });
     expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
   });
@@ -598,7 +598,7 @@ describe('yt-dlp cookies', () => {
     });
     mockRuns({ error: true, stderr: AGE_STDERR });
     const err = await search('x', 'youtube').catch((e: unknown) => e);
-    expect(err).toMatchObject({ status: 502 });
+    expect(err).toMatchObject({ status: 422 });
     const message = (err as Error).message;
     expect(message).toMatch(/confirm your age/i);
     expect(message).toMatch(/cookies file cannot be read/i);
@@ -628,7 +628,7 @@ describe('yt-dlp cookies', () => {
       const err = await search('x', 'youtube').catch((e: unknown) => e);
       expect(err).toMatchObject({
         message: expect.stringMatching(/confirm your age.*may be stale/),
-        status: 502,
+        status: 422,
       });
       // Names both causes: an expired jar and an account that cannot pass the gate.
       expect((err as Error).message).toMatch(/not age-verified/);
@@ -652,7 +652,7 @@ describe('yt-dlp cookies', () => {
 
       await expect(search('x', 'youtube')).rejects.toMatchObject({
         message: expect.stringMatching(/confirm your age.*temporary copy/i),
-        status: 502,
+        status: 422,
       });
       // The retry never starts: the run could not get its own copy of the jar.
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
@@ -711,14 +711,14 @@ describe('yt-dlp cookies', () => {
     }
   });
 
-  it('does not retry a timeout, and keeps the 504', async () => {
+  it('does not retry a timeout, and keeps the 408', async () => {
     const { path, cleanup } = cookiesFile();
     try {
       configureCookies(path);
       expect(cookieState()).toBe('ok');
       mockFailure(Object.assign(new Error('yt-dlp killed'), { killed: true }));
       await expect(search('x', 'youtube')).rejects.toMatchObject({
-        status: 504,
+        status: 408,
       });
       expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
       expect(callArgs(0)).not.toContain('--cookies');
