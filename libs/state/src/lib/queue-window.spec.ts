@@ -371,4 +371,53 @@ describe('queue window', () => {
       expect(isRecentlyQueued({ far: now + twelveH }, 'far', now)).toBe(false);
     });
   });
+
+  describe('planDraw and resetPool', () => {
+    it('draws a uniform fill from the whole pool and leaves the rest as the pool', () => {
+      const window = new QueueWindow([], {
+        limit: 50,
+        shuffle: true,
+        random: seeded(),
+      });
+      const { drawn, rest } = window.planDraw(context);
+
+      expect(drawn).toHaveLength(50);
+      expect(new Set(ids(drawn)).size).toBe(50);
+      // A uniform draw reaches the far end of the list, not only its front.
+      expect(drawn.some((t) => Number(t.id.slice(1)) >= 250)).toBe(true);
+      const drawnIds = new Set(ids(drawn));
+      expect(rest).toHaveLength(250);
+      expect(ids(rest).some((id) => drawnIds.has(id))).toBe(false);
+
+      window.resetPool(rest);
+      expect(window.remaining).toBe(250);
+    });
+
+    it('draws only eligible tracks and stops short when fewer are eligible', () => {
+      const window = new QueueWindow([], {
+        limit: 50,
+        shuffle: true,
+        random: seeded(7),
+      });
+      const eligible = (t: Track) => Number(t.id.slice(1)) >= 290;
+      const { drawn, rest } = window.planDraw(context, eligible);
+
+      expect(ids(drawn).sort()).toEqual(ids(context.slice(290)).sort());
+      expect(rest).toHaveLength(290);
+      expect(rest.some(eligible)).toBe(false);
+    });
+
+    it('restores the rest in source order when shuffle is turned off', () => {
+      const window = new QueueWindow([], {
+        limit: 2,
+        shuffle: true,
+        random: seeded(3),
+      });
+      const { rest } = window.planDraw(pool);
+      window.resetPool(rest);
+      window.setShuffle(false);
+
+      expect(ids(window.take(100))).toEqual(ids(rest));
+    });
+  });
 });

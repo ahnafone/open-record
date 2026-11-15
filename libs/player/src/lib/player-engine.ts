@@ -490,6 +490,23 @@ export class PlayerEngine {
   }
 
   /**
+   * Replace the Keep Spinning window with `tracks`, in the given order, placed
+   * after Your Stack. Stack entries, the current track and history stay. The
+   * removed entries are not reported as exclusions (the caller stamps them if
+   * it means to); the new ones are not played, so they are not reported either.
+   */
+  replaceKeepSpinning(tracks: readonly Track[]): void {
+    if (this._cursor() < 0) return;
+    this.clearKeepSpinning();
+    if (!tracks.length) return;
+    const base = this._queue().length;
+    const added = tracks.map((_, i) => base + i);
+    this._queue.update((q) => [...q, ...tracks]);
+    this._order.update((o) => [...o, ...added]);
+    this.preloadNeighbours();
+  }
+
+  /**
    * Remove every entry whose track id is in `ids`, except the current track
    * (which the caller must move off first). Returns whether anything was removed.
    */

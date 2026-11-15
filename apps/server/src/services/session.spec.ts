@@ -1947,6 +1947,106 @@ describe('Your Stack', () => {
     expect(stackOf()).toEqual(['s1']);
   });
 
+  it('replaceAutofill replaces the autofill and keeps history, current and stack', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd'], 1);
+    await enqueue([track('s1')], { next: false, stack: true });
+    expect(entryIds()).toEqual(['a', 'b', 's1', 'c', 'd']);
+    const result = await service.command('u', 'a', {
+      type: 'replaceAutofill',
+      tracks: [track('x'), track('y')],
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(entryIds()).toEqual(['a', 'b', 's1', 'x', 'y']);
+    expect(stateOf().cursor).toBe(1);
+    expect(stateOf().order[1]?.entryId).toBe('b');
+    expect(stackOf()).toEqual(['s1']);
+  });
+
+  it('replaceAutofill rejects too many tracks, duplicate and kept ids, and the entry cap', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c'], 0);
+    await enqueue([track('s1')], { next: false, stack: true });
+    const replace = (tracks: SessionTrack[]) =>
+      service.command('u', 'a', { type: 'replaceAutofill', tracks });
+    const many = Array.from({ length: 101 }, (_, i) => track(`m${i}`));
+    expect(await replace(many)).toEqual({ ok: false, error: 'queue-too-large' });
+    expect(await replace([track('x'), track('x')])).toEqual({
+      ok: false,
+      error: 'duplicate-entry-id',
+    });
+    // Ids of kept entries: current (a), stack (s1). Autofill ids may be reused.
+    expect(await replace([track('a')])).toEqual({ ok: false, error: 'duplicate-entry-id' });
+    expect(await replace([track('s1')])).toEqual({ ok: false, error: 'duplicate-entry-id' });
+    expect(entryIds()).toEqual(['a', 's1', 'b', 'c']);
+
+    // Kept history/current/stack plus the new tracks must fit the entry cap.
+    const big = Array.from({ length: 1000 }, (_, i) => track(`big${i}`));
+    await setQueue(
+      big.map((entry) => entry.entryId),
+      999,
+    );
+    expect(await replace([track('over')])).toEqual({ ok: false, error: 'queue-too-large' });
+    expect(entryIds()).toHaveLength(1000);
+  });
+
+  it('replaceAutofill with no autofill and no tracks is a no-op', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], 1);
+    const before = stateOf();
+    const revision = before.revision;
+    const updatedAt = before.updatedAt;
+    const ids = entryIds();
+    expect(
+      await service.command('u', 'a', { type: 'replaceAutofill', tracks: [] }),
+    ).toMatchObject({ ok: true });
+    expect(stateOf().revision).toBe(revision);
+    expect(stateOf().updatedAt).toBe(updatedAt);
+    expect(entryIds()).toEqual(ids);
+    expect(stateOf().cursor).toBe(1);
+  });
+
+  it('replaceAutofill with nothing loaded (cursor -1) replaces the whole list', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b'], -1);
+    expect(stateOf().cursor).toBe(-1);
+    expect(
+      await service.command('u', 'a', { type: 'replaceAutofill', tracks: [track('x')] }),
+    ).toMatchObject({ ok: true });
+    expect(entryIds()).toEqual(['x']);
+    expect(stateOf().cursor).toBe(-1);
+    expect(stateOf().playing).toBe(false);
+  });
+
+  it('replaceAutofill keeps the shuffle restore list consistent with the new autofill', async () => {
+    join('u', 'a');
+    await setQueue(['a', 'b', 'c', 'd', 'e'], 0);
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: true });
+    // Copy values out: stateOf() may hand back the live state object.
+    const cursor = stateOf().cursor;
+    const keptIds = stateOf().order.slice(0, cursor + 1).map((entry) => entry.entryId);
+    const restoreBefore = [...(stateOf().baseOrderIds ?? [])];
+    const currentId = stateOf().order[cursor]?.entryId;
+
+    await service.command('u', 'a', {
+      type: 'replaceAutofill',
+      tracks: [track('x'), track('y')],
+    });
+    expect(stateOf().cursor).toBe(cursor);
+    expect(entryIds().slice(0, cursor + 1)).toEqual(keptIds);
+    // Dropped autofill ids leave the restore list; new ids are appended in the order given.
+    const expectedRestore = [
+      ...restoreBefore.filter((id) => keptIds.includes(id)),
+      'x',
+      'y',
+    ];
+    expect(stateOf().baseOrderIds).toEqual(expectedRestore);
+
+    await service.command('u', 'a', { type: 'setShuffle', shuffle: false });
+    expect(entryIds()).toEqual(expectedRestore);
+    expect(stateOf().order[stateOf().cursor]?.entryId).toBe(currentId);
+  });
+
   it('setStack replaces the pending stack and keeps the current entry', async () => {
     join('u', 'a');
     await setQueue(['a', 'b'], 0);

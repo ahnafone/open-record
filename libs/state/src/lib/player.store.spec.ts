@@ -181,6 +181,15 @@ function fakeEngine() {
         .filter((i) => i > currentIndex() && !stacked.has(i));
       removeIndices(new Set(drop));
     }),
+    replaceKeepSpinning: vi.fn((tracks: readonly Track[]) => {
+      if (currentIndex() < 0) return;
+      const stacked = new Set(stackIndexes());
+      const drop = queue()
+        .map((_, i) => i)
+        .filter((i) => i > currentIndex() && !stacked.has(i));
+      removeIndices(new Set(drop));
+      queue.update((q) => [...q, ...tracks]);
+    }),
     setStack: vi.fn((entries: readonly StackEntry[]) => {
       removeIndices(new Set(stackIndexes()));
       if (entries.length) insertStack(stackTail(), entries);
@@ -1799,6 +1808,359 @@ describe('PlayerStore', () => {
         engine.emitExclusion({ kind: 'played', trackId: 'fake:new' });
         expect(Object.keys(player.recentExclusions())).toEqual(['fake:new']);
       });
+    });
+  });
+
+  describe('Keep Spinning shuffle', () => {
+    const numeric = (id: string) => Number(id.slice('fake:'.length));
+
+    it('turning shuffle on mid-queue draws Keep Spinning from beyond the queued chunk', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(400), 0); // queued 0..50, pool 51..399
+
+      engine.toggleShuffle.mockImplementationOnce(() => engine.shuffle.set(true));
+      await player.toggleShuffle();
+
+      const fill = player.keepSpinningEntries().map((e) => e.track.id);
+      expect(fill).toHaveLength(50);
+      expect(fill.some((id) => numeric(id) > 50)).toBe(true);
+    });
+
+    it('canReshuffle needs shuffle on and a source list', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      expect(player.canReshuffle()).toBe(false);
+
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(60), 0);
+      expect(player.canReshuffle()).toBe(true);
+
+      // Clearing Keep Spinning drops the source: nothing left to redraw from.
+      await player.clearKeepSpinning();
+      expect(player.canReshuffle()).toBe(false);
+    });
+
+    it('reshuffleKeepSpinning stamps the current window and draws a new one without it', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+      const before = player.keepSpinningEntries().map((e) => e.track.id);
+      expect(before).toHaveLength(50);
+
+      await player.reshuffleKeepSpinning();
+
+      const after = player.keepSpinningEntries().map((e) => e.track.id);
+      expect(after).toHaveLength(50);
+      expect(after.some((id) => before.includes(id))).toBe(false);
+      expect(Object.keys(player.recentExclusions()).sort()).toEqual(
+        expect.arrayContaining(before),
+      );
+      expect(player.current()?.id).toBe('fake:0');
+    });
+
+    it('session: shuffle on sends setShuffle, then replaceAutofill drawn from the whole list', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(120), 0);
+
+      session.available.set(true);
+      session.ownsPlayback.set(true);
+      session.remoteShuffle.set(false);
+      session.remoteEntries.set([{ entryId: 'e0', track: manyTracks(1)[0] }]);
+      session.remoteCursor.set(0);
+
+      await player.toggleShuffle();
+
+      const types = session.command.mock.calls.map(([c]) => c.type);
+      expect(types).toEqual(['setShuffle', 'replaceAutofill']);
+      const sent = session.command.mock.calls[1][0];
+      if (sent.type !== 'replaceAutofill') throw new Error('expected replaceAutofill');
+      const sentIds = sent.tracks.map((t) => t.id);
+      expect(sentIds).toHaveLength(50);
+      // The current track is kept out of the new fill.
+      expect(sentIds).not.toContain('fake:0');
+      expect(sentIds.some((id) => numeric(id) > 50)).toBe(true);
+    });
+
+    it('session: reshuffle stamps the replaced entries and leaves them out of the new fill', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+
+      const t = manyTracks(120);
+      session.available.set(true);
+      session.ownsPlayback.set(true);
+      session.remoteShuffle.set(true);
+      session.remoteEntries.set([
+        { entryId: 'e0', track: t[0] },
+        { entryId: 'e1', track: t[1] },
+        { entryId: 'e2', track: t[2] },
+        { entryId: 'e3', track: t[3] },
+      ]);
+      session.remoteCursor.set(0);
+
+      await player.reshuffleKeepSpinning();
+
+      const sent = session.command.mock.calls.at(-1)?.[0];
+      if (sent?.type !== 'replaceAutofill') throw new Error('expected replaceAutofill');
+      const sentIds = sent.tracks.map((x) => x.id);
+      expect(sentIds).toHaveLength(50);
+      expect(sentIds.some((id) => ['fake:1', 'fake:2', 'fake:3'].includes(id))).toBe(false);
+      expect(Object.keys(player.recentExclusions()).sort()).toEqual([
+        'fake:1',
+        'fake:2',
+        'fake:3',
+      ]);
+    });
+
+    it('a removed or replaced track is not drawn by a later reshuffle', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(60), 0); // current + 50 queued, 9 in the pool
+      const [gone, swapped] = player['queueSource']()?.window.ids() ?? [];
+
+      await player.removeTracks([gone]);
+      await player.replaceTrack(swapped, {
+        id: 'fake:900',
+        providerId: 'fake',
+        title: 'New',
+        artist: 'Artist',
+      });
+      await player.reshuffleKeepSpinning();
+
+      // The pool is smaller than the window, so every remaining pool track is drawn.
+      const drawn = player.keepSpinningEntries().map((e) => e.track.id);
+      expect(drawn).not.toContain(gone);
+      expect(drawn).not.toContain(swapped);
+      expect(drawn).toContain('fake:900');
+      expect(drawn).toHaveLength(8);
+    });
+
+    it('reshuffle with nothing left to draw returns false and changes nothing', async () => {
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(30), 0); // the whole list is queued
+      const before = engine.queue().map((t) => t.id);
+
+      await expect(player.reshuffleKeepSpinning()).resolves.toBe(false);
+
+      expect(engine.queue().map((t) => t.id)).toEqual(before);
+      expect(engine.replaceKeepSpinning).not.toHaveBeenCalled();
+      expect(player.recentExclusions()).toEqual({});
+    });
+
+    it('session: a refused reshuffle stamps nothing and leaves the window and created ids alone', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+      const t = manyTracks(120);
+      session.available.set(true);
+      session.ownsPlayback.set(true);
+      session.remoteShuffle.set(true);
+      session.remoteEntries.set([
+        { entryId: 'e0', track: t[0] },
+        { entryId: 'e1', track: t[1] },
+        { entryId: 'e2', track: t[2] },
+        { entryId: 'e3', track: t[3] },
+      ]);
+      session.remoteCursor.set(0);
+      session.command.mockResolvedValueOnce({ ok: false, error: 'refused' });
+      const source = player['queueSource']();
+      if (!source) throw new Error('expected a queue source');
+      const poolBefore = source.window.ids();
+
+      await expect(player.reshuffleKeepSpinning()).rejects.toThrow();
+
+      expect(player.recentExclusions()).toEqual({});
+      expect(source.window.ids()).toEqual(poolBefore);
+      expect(source.createdIds.size).toBe(0);
+    });
+
+    it('session: a reshuffle drops the replaced entry ids from createdIds', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+      const t = manyTracks(120);
+      session.available.set(true);
+      session.ownsPlayback.set(true);
+      session.remoteShuffle.set(true);
+      session.remoteEntries.set([
+        { entryId: 'e0', track: t[0] },
+        { entryId: 'e1', track: t[1] },
+        { entryId: 'e2', track: t[2] },
+        { entryId: 'e3', track: t[3] },
+      ]);
+      session.remoteCursor.set(0);
+      const source = player['queueSource']();
+      if (!source) throw new Error('expected a queue source');
+      for (const id of ['e0', 'e1', 'e2', 'e3']) source.createdIds.add(id);
+
+      await player.reshuffleKeepSpinning();
+
+      expect(source.createdIds.has('e0')).toBe(true);
+      expect(source.createdIds.has('e1')).toBe(false);
+      expect(source.createdIds.has('e2')).toBe(false);
+      expect(source.createdIds.has('e3')).toBe(false);
+      const sent = session.command.mock.calls
+        .map(([c]) => c)
+        .find((c) => c.type === 'replaceAutofill');
+      if (sent?.type !== 'replaceAutofill') throw new Error('expected replaceAutofill');
+      for (const entry of sent.tracks) expect(source.createdIds.has(entry.entryId)).toBe(true);
+    });
+
+    it('a restored queue has no source list: shuffle on does not redraw and canReshuffle is false', async () => {
+      const all = manyTracks(120);
+      const head = all.slice(0, 51);
+      const storage = createInMemoryStorage();
+      await storage.queueState.save({
+        trackIds: head.map((t) => t.id),
+        index: 0,
+        positionSec: 0,
+        shuffle: false,
+        repeat: 'off',
+        sourceIds: all.slice(51).map((t) => t.id),
+      });
+      const engine = fakeEngine();
+      configure(engine, fakeSession(), storage, {
+        resolveIds: () => head,
+        trackMap: signal(new Map(all.map((t) => [t.id, t]))),
+      });
+      const player = TestBed.inject(PlayerStore);
+      await player.restore();
+      expect(player.canReshuffle()).toBe(false);
+
+      engine.toggleShuffle.mockImplementationOnce(() => engine.shuffle.set(true));
+      const before = engine.queue().map((t) => t.id);
+      await player.toggleShuffle();
+
+      expect(engine.replaceKeepSpinning).not.toHaveBeenCalled();
+      expect(engine.queue().map((t) => t.id)).toEqual(before);
+    });
+
+    it('repeat all: the 12h rule is off, but the replaced songs are still left out', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const engine = fakeEngine();
+      configure(engine, fakeSession());
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      engine.repeat.set('all');
+      await player.playTracks(manyTracks(52), 0); // current + 50 queued, 1 in the pool
+      const [leftover] = player['queueSource']()?.window.ids() ?? [];
+      // Stamped, so only the repeat-all rule lets it through.
+      player.mergeRemoteExclusions({ [leftover]: Date.now() });
+
+      await expect(player.reshuffleKeepSpinning()).resolves.toBe(true);
+
+      // The 50 replaced songs are excluded; only the pool track is left to draw.
+      expect(player.keepSpinningEntries().map((e) => e.track.id)).toEqual([leftover]);
+    });
+
+    /** A session that owns playback, with four entries and the current one at the cursor. */
+    function ownSession(session: ReturnType<typeof fakeSession>) {
+      const t = manyTracks(120);
+      session.available.set(true);
+      session.ownsPlayback.set(true);
+      session.remoteShuffle.set(true);
+      session.remoteEntries.set([
+        { entryId: 'e0', track: t[0] },
+        { entryId: 'e1', track: t[1] },
+        { entryId: 'e2', track: t[2] },
+        { entryId: 'e3', track: t[3] },
+      ]);
+      session.remoteCursor.set(0);
+    }
+
+    it('session: an ambiguous reshuffle failure counts as applied and is not thrown', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+      ownSession(session);
+      session.command.mockResolvedValueOnce({ ok: false, error: 'timeout' });
+      const source = player['queueSource']();
+      if (!source) throw new Error('expected a queue source');
+
+      await expect(player.reshuffleKeepSpinning()).resolves.toBe(true);
+
+      const sent = session.command.mock.calls
+        .map(([c]) => c)
+        .find((c) => c.type === 'replaceAutofill');
+      if (sent?.type !== 'replaceAutofill') throw new Error('expected replaceAutofill');
+      for (const entry of sent.tracks) expect(source.createdIds.has(entry.entryId)).toBe(true);
+      expect(Object.keys(player.recentExclusions()).sort()).toEqual([
+        'fake:1',
+        'fake:2',
+        'fake:3',
+      ]);
+    });
+
+    it('session: a refused reshuffle releases the queue lock, so a later top-up still runs', async () => {
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      engine.shuffle.set(true);
+      await player.playTracks(manyTracks(120), 0);
+      ownSession(session);
+      // The top-up needs an id this client wrote, or it stops the queue.
+      player['queueSource']()?.createdIds.add('e0');
+      session.command.mockResolvedValueOnce({ ok: false, error: 'refused' });
+
+      await expect(player.reshuffleKeepSpinning()).rejects.toThrow();
+
+      // The redraw retries the skipped top-up after it releases the lock.
+      expect(session.command.mock.calls.map(([c]) => c.type)).toEqual([
+        'replaceAutofill',
+        'enqueue',
+      ]);
+    });
+
+    it('session: a refused redraw on shuffle on does not reject toggleShuffle', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const engine = fakeEngine();
+      const session = fakeSession();
+      configure(engine, session);
+      const player = TestBed.inject(PlayerStore);
+      await player.playTracks(manyTracks(120), 0);
+      ownSession(session);
+      session.remoteShuffle.set(false);
+      session.command
+        .mockResolvedValueOnce({ ok: true }) // setShuffle
+        .mockResolvedValueOnce({ ok: false, error: 'refused' }); // replaceAutofill
+
+      await expect(player.toggleShuffle()).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
     });
   });
 });

@@ -2213,4 +2213,23 @@ describe('PlayerEngine', () => {
       }
     });
   });
+
+  describe('replaceKeepSpinning', () => {
+    it('keeps the current track, history and Your Stack, and reports no exclusions', async () => {
+      const { player } = setup();
+      const events: string[] = [];
+      player.setExclusionListener((e) => events.push(`${e.kind}:${e.trackId}`));
+      await player.setQueue(tracks, { startIndex: 1 }); // current b, Keep Spinning c d e
+      player.addToStack(track('x'));
+      events.splice(0);
+
+      player.replaceKeepSpinning([track('p'), track('q')]);
+
+      expect(events).toEqual([]);
+      expect(player.current()?.id).toBe('b');
+      expect(player.stackEntries().map((e) => e.track.id)).toEqual(['x']);
+      expect(player.keepSpinningEntries().map((e) => e.track.id)).toEqual(['p', 'q']);
+      expect(player.upcoming().map((t) => t.id)).toEqual(['x', 'p', 'q']);
+    });
+  });
 });

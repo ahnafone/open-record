@@ -469,6 +469,8 @@ function isSessionCommand(value: unknown): value is SessionCommand {
       return isSessionTrackArray(value['tracks']);
     case 'clearQueue':
       return value['which'] === 'stack' || value['which'] === 'autofill';
+    case 'replaceAutofill':
+      return isSessionTrackArray(value['tracks']);
     case 'remove':
       return isId(value['entryId']);
     case 'move':
@@ -1186,6 +1188,43 @@ export class SessionService {
           state.positionSec = 0;
           state.playing = false;
         }
+        mutated = true;
+        break;
+      }
+      case 'replaceAutofill': {
+        // Autofill = everything after the current entry and the pending stack. With
+        // nothing loaded (cursor -1) the whole list is autofill, as in clearQueue.
+        const incoming = command.tracks.map((entry) => ({ ...entry }));
+        if (incoming.length > MAX_ENQUEUE_TRACKS)
+          return { ok: false, error: 'queue-too-large' };
+        const keep = state.cursor < 0 ? 0 : state.cursor + stackIdsOf(state).length + 1;
+        // Empty `tracks` is accepted on purpose (it clears the autofill), unlike
+        // `enqueue`. With no autofill to clear it is a no-op: no revision, no anchor move.
+        if (keep >= state.order.length && incoming.length === 0) break;
+        const kept = state.order.slice(0, keep);
+        // Kept entries (history, current, stack) keep their ids; new ids must be fresh.
+        if (hasDuplicateIds([...kept, ...incoming]))
+          return { ok: false, error: 'duplicate-entry-id' };
+        if (
+          kept.length + incoming.length > SESSION_MAX_ENTRIES ||
+          orderByteLength([...kept, ...incoming]) > SESSION_MAX_ORDER_BYTES
+        ) {
+          return { ok: false, error: 'queue-too-large' };
+        }
+        this.freezePosition(state, now);
+        const dropped = new Set(
+          state.order.slice(keep).map((entry) => entry.entryId),
+        );
+        // Keep the shuffle restore list in step: dropped autofill leaves it, the new
+        // tracks go to its end in the order given (the client already shuffled them).
+        if (state.shuffle && state.baseOrderIds) {
+          state.baseOrderIds = [
+            ...state.baseOrderIds.filter((entryId) => !dropped.has(entryId)),
+            ...incoming.map((entry) => entry.entryId),
+          ];
+        }
+        state.order = [...kept, ...incoming];
+        pruneToOrder(state);
         mutated = true;
         break;
       }

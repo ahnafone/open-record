@@ -340,7 +340,15 @@ interface UpNextRow {
 
       @if (keepRows().length) {
         <or-section-head heading="Keep Spinning">
-          <or-button size="sm" ariaLabel="Clear Keep Spinning" (click)="clearKeepSpinning()">Clear</or-button>
+          @if (player.shuffle() && player.canReshuffle()) {
+            <or-button
+              size="sm"
+              ariaLabel="Reshuffle Keep Spinning"
+              (click)="reshuffleKeepSpinning()"
+            >Reshuffle</or-button>
+          } @else {
+            <or-button size="sm" ariaLabel="Clear Keep Spinning" (click)="clearKeepSpinning()">Clear</or-button>
+          }
         </or-section-head>
         <ol class="queue" aria-label="Keep Spinning">
           @for (row of keepWindow.items(); track row.queueIndex) {
@@ -1048,6 +1056,20 @@ export class NowPlayingPage {
         err instanceof SessionRefusedError
           ? err.message
           : 'Could not clear Keep Spinning. Try again.',
+      );
+    }
+  }
+
+  /** Keep Spinning (shuffle on): draw a fresh window from the whole list. */
+  protected async reshuffleKeepSpinning(): Promise<void> {
+    try {
+      const changed = await this.player.reshuffleKeepSpinning();
+      this.toast.show(changed ? 'Keep Spinning reshuffled' : 'Nothing else to reshuffle to');
+    } catch (err) {
+      this.toast.show(
+        err instanceof SessionRefusedError
+          ? err.message
+          : 'Could not reshuffle Keep Spinning. Try again.',
       );
     }
   }

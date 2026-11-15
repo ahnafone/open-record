@@ -144,6 +144,21 @@ export interface PlayOptions {
   queue?: 'auto' | 'playlist';
 }
 
+/** A Keep Spinning redraw, decided before it is applied. */
+interface KeepSpinningPlan {
+  /** The tracks Keep Spinning gets, in play order. */
+  drawn: Track[];
+  /** Track ids the redraw replaces (reshuffle only): stamped once applied. */
+  replaced: string[];
+  /** Track ids the redraw must not draw, now or from the window's pool. */
+  excluded: ReadonlySet<string>;
+}
+
+/** Thrown when the queue was replaced while a Keep Spinning redraw was in flight. */
+function supersededError(): Error {
+  return new Error('The queue changed while Keep Spinning was redrawn. Try again.');
+}
+
 /**
  * The bounded queue this client started: the unplayed pool to draw from as
  * the queue drains, its ahead size kind, and the entry ids this client wrote
@@ -155,6 +170,11 @@ interface QueueSource {
   window: QueueWindow;
   kind: QueueKind;
   createdIds: Set<string>;
+  /**
+   * The whole list the queue was started from, so Keep Spinning can be drawn
+   * again from all of it. Not persisted: absent after a restore.
+   */
+  context?: readonly Track[];
 }
 
 /**
@@ -283,6 +303,13 @@ export class PlayerStore {
       ? this.session.remoteShuffle()
       : this.engine.shuffle(),
   );
+  /**
+   * Whether Keep Spinning can be reshuffled: shuffle is on and the queue's
+   * source list is known (a restored queue has none).
+   */
+  readonly canReshuffle = computed(
+    () => this.shuffle() && !!this.queueSource()?.context,
+  );
   readonly repeat = computed(() =>
     this.session.ownsPlayback()
       ? this.session.remoteRepeat()
@@ -361,8 +388,11 @@ export class PlayerStore {
    * superseded play cannot leave its window behind.
    */
   private queueGeneration = 0;
-  /** A top-up is in flight: concurrent effect runs must not enqueue twice. */
-  private toppingUp = false;
+  /**
+   * Held while a top-up or a Keep Spinning redraw runs, so concurrent effect
+   * runs never enqueue twice and a redraw never races a top-up (see withQueueLock).
+   */
+  private queueLock: Promise<void> | null = null;
   /** `loadSeq` of the last load considered for Recently Played. */
   private lastRecordedSeq = 0;
 
@@ -377,7 +407,9 @@ export class PlayerStore {
 
   constructor() {
     // Keep Spinning dedupe: the engine reports what happened to each song.
-    // A session that owns playback (Cast or another device) writes no stamps.
+    // Engine-reported exclusions are not stamped while a session owns playback
+    // (Cast or another device). Reshuffles stamp in both modes; see
+    // reshuffleKeepSpinning.
     this.engine.setExclusionListener((event: ExclusionEvent) => {
       if (this.session.ownsPlayback()) return;
       this.stampExclusion(event.trackId, Date.now());
@@ -523,6 +555,7 @@ export class PlayerStore {
       shuffle,
       eligible: this.autoplayEligible(now, shuffle),
     });
+    const context = [...tracks];
     this.library.remember(tracks);
     const autoplay = opts.autoplay ?? true;
 
@@ -548,7 +581,12 @@ export class PlayerStore {
       // or write the engine over the newer queue.
       if (generation !== this.queueGeneration) return;
       if (ids) {
-        this.queueSource.set({ window: built.window, kind, createdIds: new Set(ids) });
+        this.queueSource.set({
+          window: built.window,
+          kind,
+          createdIds: new Set(ids),
+          context,
+        });
         this.fallbackNotice.set(null);
         return;
       }
@@ -567,7 +605,12 @@ export class PlayerStore {
       history: 'before-start',
     });
     if (generation === this.queueGeneration) {
-      this.queueSource.set({ window: built.window, kind, createdIds: new Set() });
+      this.queueSource.set({
+        window: built.window,
+        kind,
+        createdIds: new Set(),
+        context,
+      });
     }
   }
 
@@ -989,11 +1032,219 @@ export class PlayerStore {
         type: 'setShuffle',
         shuffle: next,
       });
-      if (result.ok) this.queueSource()?.window.setShuffle(next);
+      if (!result.ok) return;
+      const source = this.queueSource();
+      source?.window.setShuffle(next);
+      if (next) await this.redrawOnShuffleOn(source);
       return;
     }
     this.engine.toggleShuffle();
-    this.queueSource()?.window.setShuffle(this.engine.shuffle());
+    const source = this.queueSource();
+    // Shuffle off restores the window's source order, also after a redraw (intended).
+    source?.window.setShuffle(this.engine.shuffle());
+    if (this.engine.shuffle()) await this.redrawOnShuffleOn(source);
+  }
+
+  /**
+   * Turning shuffle on mid-queue draws Keep Spinning from the whole source,
+   * not only the queued chunk. A refused session change leaves the queue as it
+   * was (shuffle stays on); the failure is logged, as nothing awaits this.
+   */
+  private async redrawOnShuffleOn(source: QueueSource | null | undefined): Promise<void> {
+    if (!source?.context) return;
+    try {
+      await this.redrawKeepSpinning(source, 'Could not shuffle Keep Spinning', false);
+    } catch (err) {
+      console.warn('Could not redraw Keep Spinning when shuffle was turned on.', err);
+    }
+  }
+
+  /**
+   * Redraw Keep Spinning from the whole source list, as a fresh shuffle. The
+   * current track, history and Your Stack are left out. With `reshuffle`, the
+   * songs Keep Spinning holds now are left out too and stamped once the redraw
+   * is applied. Resolves false, changing nothing, when there is nothing to draw.
+   * Throws `SessionRefusedError` when the session refuses the change.
+   */
+  private async redrawKeepSpinning(
+    source: QueueSource,
+    action: string,
+    reshuffle: boolean,
+  ): Promise<boolean> {
+    const owned = this.session.ownsPlayback();
+    try {
+      // Queued behind any running top-up, and it blocks top-ups until applied.
+      return await this.withQueueLock(async () => {
+        // Ownership or the queue may have changed while waiting for the lock.
+        if (this.session.ownsPlayback() !== owned || this.queueSource() !== source) {
+          throw supersededError();
+        }
+        if (owned) return this.redrawSession(source, action, reshuffle);
+        const plan = this.planKeepSpinningRedraw(source, reshuffle);
+        if (!plan) return false;
+        this.library.remember(plan.drawn);
+        this.engine.replaceKeepSpinning(plan.drawn);
+        this.applyRedraw(source, plan);
+        return true;
+      });
+    } finally {
+      // A top-up skipped while the lock was held is retried now it is free.
+      void this.topUp();
+    }
+  }
+
+  /**
+   * The session side of `redrawKeepSpinning`; runs under the queue lock. An
+   * ambiguous failure (timeout, unavailable) may still have been applied by the
+   * server, so it counts as applied, as in `topUpSession`. Only an explicit
+   * refusal throws.
+   */
+  private async redrawSession(
+    source: QueueSource,
+    action: string,
+    reshuffle: boolean,
+  ): Promise<boolean> {
+    const generation = this.queueGeneration;
+    const superseded = () =>
+      generation !== this.queueGeneration || this.queueSource() !== source;
+    const plan = this.planKeepSpinningRedraw(source, reshuffle);
+    if (!plan) return false;
+
+    const entries = plan.drawn.map((track) => toSessionTrack(track, newEntryId()));
+    const replacedEntryIds = this.sessionKeepSpinningEntryIds();
+    const result = await this.session.command({
+      type: 'replaceAutofill',
+      tracks: entries,
+    });
+    // A newer play or clear replaced the queue while this awaited. The
+    // entries went to a queue that is gone: leave this window untouched.
+    if (superseded()) throw supersededError();
+    const applied = result.ok || isAmbiguousCommandFailure(result.error);
+    if (!applied) throw sessionChangeError(action, result.error);
+
+    for (const id of replacedEntryIds) source.createdIds.delete(id);
+    for (const entry of entries) source.createdIds.add(entry.entryId);
+    this.library.remember(plan.drawn);
+    this.applyRedraw(source, plan);
+    return true;
+  }
+
+  /**
+   * What a redraw draws from, decided now. Null when there is no current
+   * track or nothing eligible to draw. Throws while a draw is open on the
+   * window: a reset would drop it.
+   */
+  private planKeepSpinningRedraw(
+    source: QueueSource,
+    reshuffle: boolean,
+  ): KeepSpinningPlan | null {
+    const context = source.context;
+    if (!context) return null;
+    if (source.window.hasOpenDraw) {
+      throw new Error('Keep Spinning is busy. Try again.');
+    }
+    const hasCurrent = this.session.ownsPlayback()
+      ? this.session.remoteCursor() >= 0
+      : this.engine.currentIndex() >= 0;
+    if (!hasCurrent) return null;
+
+    const replaced = reshuffle
+      ? this.keepSpinningEntries().map((entry) => entry.track.id)
+      : [];
+    const excluded = new Set([...this.keptTrackIds(), ...replaced]);
+    const pool = context.filter((track) => !excluded.has(track.id));
+    // Repeat-all and shuffle-off fills are not filtered by the 12h rule.
+    const { drawn } = source.window.planDraw(
+      pool,
+      this.autoplayEligible(Date.now(), true),
+    );
+    if (!drawn.length) return null;
+    return { drawn, replaced, excluded };
+  }
+
+  /**
+   * Reset the window to what is left of the source list after `plan.drawn`,
+   * read at apply time so removals and replacements made meanwhile hold. Then
+   * stamp the replaced songs (a reshuffle only).
+   */
+  private applyRedraw(source: QueueSource, plan: KeepSpinningPlan): void {
+    const drawn = new Set(plan.drawn.map((track) => track.id));
+    const rest = (source.context ?? []).filter(
+      (track) => !drawn.has(track.id) && !plan.excluded.has(track.id),
+    );
+    source.window.resetPool(rest);
+    const now = Date.now();
+    for (const id of plan.replaced) this.stampExclusion(id, now);
+  }
+
+  /** Session entry ids of the Keep Spinning (autofill) entries: after the cursor, not in Your Stack. */
+  private sessionKeepSpinningEntryIds(): string[] {
+    const cursor = this.session.remoteCursor();
+    const stack = this.session.remoteStackIds();
+    return this.session
+      .remoteEntries()
+      .filter((entry, i) => i > cursor && !stack.has(entry.entryId))
+      .map((entry) => entry.entryId);
+  }
+
+  /**
+   * Run `work` holding the queue lock, so top-ups and session Keep Spinning
+   * redraws never overlap. A redraw waits for a running top-up; a top-up that
+   * finds the lock held is skipped, and redrawKeepSpinning retries it once the
+   * lock is released.
+   */
+  private async withQueueLock<T>(work: () => Promise<T>): Promise<T> {
+    while (this.queueLock) await this.queueLock;
+    let release!: () => void;
+    this.queueLock = new Promise<void>((resolve) => (release = resolve));
+    try {
+      return await work();
+    } finally {
+      this.queueLock = null;
+      release();
+    }
+  }
+
+  /**
+   * Track ids Keep Spinning must not redraw: the current track, the played
+   * history before it, and Your Stack. Keep Spinning entries are not included.
+   */
+  private keptTrackIds(): Set<string> {
+    if (this.session.ownsPlayback()) {
+      const stack = this.session.remoteStackIds();
+      const cursor = this.session.remoteCursor();
+      return new Set(
+        this.session
+          .remoteEntries()
+          .filter((entry, i) => i <= cursor || stack.has(entry.entryId))
+          .map((entry) => entry.track.id),
+      );
+    }
+    const keepSpinning = new Set(
+      this.engine.keepSpinningEntries().map((entry) => entry.queueIndex),
+    );
+    return new Set(
+      this.engine
+        .queue()
+        .filter((_, i) => !keepSpinning.has(i))
+        .map((track) => track.id),
+    );
+  }
+
+  /**
+   * Reshuffle Keep Spinning (shuffle on): the window is redrawn from the whole
+   * list the queue came from. The songs it holds now are left out and, once
+   * the redraw is applied, stamped as recently queued (the 12h rule). Your
+   * Stack and history are kept. Resolves false, changing nothing, when no
+   * other song is left to draw. Throws `SessionRefusedError` when the session
+   * refuses the change. Only this method stamps exclusions for a reshuffle.
+   */
+  async reshuffleKeepSpinning(): Promise<boolean> {
+    const source = this.queueSource();
+    if (!source?.context || !this.shuffle()) {
+      throw new Error('Keep Spinning can only be reshuffled from a shuffled queue.');
+    }
+    return this.redrawKeepSpinning(source, 'Could not reshuffle Keep Spinning', true);
   }
 
   async setRepeat(mode: RepeatMode): Promise<void> {
@@ -1038,8 +1289,10 @@ export class PlayerStore {
    */
   async removeTracks(trackIds: Iterable<string>): Promise<void> {
     const gone = new Set(trackIds);
-    // Unplayed pool entries too, or topUp would enqueue them again.
-    this.queueSource()?.window.remove(gone);
+    // Unplayed pool entries and the source list too, or a redraw would bring them back.
+    const source = this.queueSource();
+    source?.window.remove(gone);
+    if (source?.context) source.context = source.context.filter((t) => !gone.has(t.id));
     if (this.session.ownsPlayback()) {
       const entries = this.session
         .remoteEntries()
@@ -1088,8 +1341,20 @@ export class PlayerStore {
     opts: { playCurrent?: boolean } = {},
   ): Promise<boolean> {
     if (oldId === next.id) return false;
-    // Unplayed pool entries too, or topUp would enqueue the old record again.
-    this.queueSource()?.window.replace(oldId, next);
+    // Unplayed pool entries and the source list too, or a redraw would bring the old record back.
+    const source = this.queueSource();
+    source?.window.replace(oldId, next);
+    if (source?.context) {
+      // Dedupe by id: `next` may already be in the list.
+      const seen = new Set<string>();
+      const replaced: Track[] = [];
+      for (const t of source.context.map((c) => (c.id === oldId ? next : c))) {
+        if (seen.has(t.id)) continue;
+        seen.add(t.id);
+        replaced.push(t);
+      }
+      source.context = replaced;
+    }
     const playCurrent = opts.playCurrent === true;
     if (this.session.ownsPlayback()) {
       const entries = this.session.remoteEntries();
@@ -1185,23 +1450,20 @@ export class PlayerStore {
    */
   private async topUp(): Promise<void> {
     const source = this.queueSource();
-    if (!source || this.toppingUp) return;
+    if (!source || this.queueLock) return;
     const generation = this.queueGeneration;
     const now = Date.now();
     this.pruneRecent(now);
     // The window's shuffle state is the one its draws use; toggling shuffle
     // keeps it in step, so the dedupe follows the mode at top-up time.
     const eligible = this.autoplayEligible(now, source.window.shuffle);
-    this.toppingUp = true;
-    try {
+    await this.withQueueLock(async () => {
       if (this.session.ownsPlayback()) {
         await this.topUpSession(source, generation, eligible);
       } else {
         this.topUpLocal(source, eligible);
       }
-    } finally {
-      this.toppingUp = false;
-    }
+    });
   }
 
   private async topUpSession(
@@ -1260,7 +1522,7 @@ export class PlayerStore {
       // The enqueue landed on a queue that was replaced meanwhile. Take the
       // tracks back out of it, best effort. Removing an absent id is a no-op.
       // Not awaited: the removes address entry ids (not positions) and nothing
-      // else waits on them, so `toppingUp` is not held for up to 50 round trips.
+      // else waits on them, so the queue lock is not held for up to 50 round trips.
       if (applied) {
         void Promise.allSettled(
           tracks.map((track) =>

@@ -172,6 +172,12 @@ export type SessionCommand =
   | { type: 'setStack'; tracks: SessionTrack[] }
   /** Empty the pending Your Stack, or the autofill part (everything after the stack). */
   | { type: 'clearQueue'; which: 'stack' | 'autofill' }
+  /**
+   * Replaces the autofill part (everything after the cursor and the pending Your
+   * Stack) with `tracks`. The current entry, history and Your Stack are kept. The
+   * autofill order is kept as given (the client already shuffled it).
+   */
+  | { type: 'replaceAutofill'; tracks: SessionTrack[] }
   | { type: 'remove'; entryId: string }
   | { type: 'move'; from: number; to: number }
   | { type: 'replace'; entryId: string; track: SessionTrack }

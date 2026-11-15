@@ -159,6 +159,11 @@ export class QueueWindow {
     return this.entries.length;
   }
 
+  /** Whether a draw is held open (reserved, neither committed nor released). */
+  get hasOpenDraw(): boolean {
+    return this.open.size > 0;
+  }
+
   /**
    * Remove and return up to `count` tracks: from the front in the source
    * order, or random picks while shuffled. Never more than `remaining`, and
@@ -215,6 +220,41 @@ export class QueueWindow {
         }
       },
     };
+  }
+
+  /**
+   * Plan a fresh fill from `pool` (the whole source minus what must not come
+   * back, in source order) without touching the window. A uniform shuffle,
+   * then the first `limit` eligible picks; `rest` is what is left, in source
+   * order. Apply it with `resetPool` once the change it feeds is committed.
+   */
+  planDraw(
+    pool: readonly Track[],
+    eligible?: EligibleFn,
+  ): { drawn: Track[]; rest: Track[] } {
+    const deck = shuffled(
+      pool.map((track, origin) => ({ track, origin })),
+      this.random,
+    );
+    const drawn = deck
+      .filter((entry) => !eligible || eligible(entry.track))
+      .slice(0, this.limit);
+    const picked = new Set(drawn);
+    const rest = deck
+      .filter((entry) => !picked.has(entry))
+      .sort((a, b) => a.origin - b.origin)
+      .map((entry) => entry.track);
+    return { drawn: drawn.map((entry) => entry.track), rest };
+  }
+
+  /**
+   * Replace the pool with `pool`, in source order (origins follow it, so
+   * turning shuffle off restores it). Draws held open are dropped: their
+   * release or commit then does nothing.
+   */
+  resetPool(pool: readonly Track[]): void {
+    this.entries = pool.map((track, origin) => ({ track, origin }));
+    this.open.clear();
   }
 
   /** Drop every pool entry whose track id is in `ids` (e.g. a deleted track). */
