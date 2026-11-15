@@ -1,7 +1,12 @@
-# Open Record v0.0.7 (beta)
+# Open Record v0.0.8 (beta)
 
 Open Record is a vinyl record-shop listening room: browse the crates, build playlists, import your
-own music and play it on a virtual turntable. This is the seventh beta.
+own music and play it on a virtual turntable. This is the eighth beta.
+
+## What's new in v0.0.8
+
+- **Shuffle picks from your whole list:** turning shuffle on mid-queue now draws Keep Spinning from your entire library or playlist, not just the songs nearest the start.
+- **Reshuffle:** with shuffle on, the Keep Spinning header has a Reshuffle button instead of Clear. It redraws the whole queue from the list you are playing and keeps the songs it replaced out of shuffle for 12 hours. With shuffle off, Clear works as before.
 
 ## What's new in v0.0.7
 
