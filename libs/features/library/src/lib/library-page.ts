@@ -5,6 +5,7 @@ import {
   Injector,
   afterNextRender,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -22,6 +23,7 @@ import {
   SyncStore,
   ariaSortFor,
   filterTracks,
+  groupByGenre,
   nextSort,
   sortArrowFor,
   sortByColumn,
@@ -49,12 +51,25 @@ import {
   lazyWindow,
 } from '@open-record/ui';
 import { AddFromPlaylistDialog } from './add-from-playlist-dialog';
+import {
+  describeGenres,
+  filterByGenre,
+  genreChips,
+  genreControlVisible,
+  genreSuggestions,
+  resolveGenreFilter,
+  uniqueTracks,
+} from './genre-filter';
+import { OrGenreFilter } from './genre-filter-control';
 import { OrLibraryRow } from './library-row';
 import { NewPlaylistDialog } from './new-playlist-dialog';
 import { injectTrackArt } from './track-art';
 
 /** Which record list a sort header or row belongs to. */
 type ListId = 'saved' | 'imported';
+
+/** A genre playlist needs at least this many tracks (matches `groupByGenre`). */
+const GENRE_MIN_TRACKS = 3;
 
 /** Saved / imported record list styles; the row body lives in `OrLibraryRow`. */
 const ROW_STYLES = `
@@ -183,6 +198,7 @@ const ROW_STYLES = `
     OrButton,
     OrEmptyState,
     OrFilterField,
+    OrGenreFilter,
     OrIcon,
     OrLibraryRow,
     OrLoadMore,
@@ -209,8 +225,16 @@ const ROW_STYLES = `
         [(value)]="query"
         (settledValue)="listQuery.set($event)"
       />
+      @if (genreControlShown()) {
+        <or-genre-filter
+          class="genres"
+          [options]="genreChipList()"
+          [suggestions]="genreSuggestionList()"
+          [(selected)]="genreFilter"
+        />
+      }
       <p id="or-library-filter-status" class="filter-status" role="status">
-        @if (filtering()) {
+        @if (narrowed()) {
           {{ matchLabel() }}
         }
       </p>
@@ -294,8 +318,8 @@ const ROW_STYLES = `
               (loadMore)="savedWindow.grow()"
             ></div>
           }
-        } @else if (filtering() && library.savedRecords().length) {
-          <or-empty-state>No saved records match “{{ query().trim() }}”.</or-empty-state>
+        } @else if (narrowed() && library.savedRecords().length) {
+          <or-empty-state>{{ emptyCopy('saved') }}</or-empty-state>
         } @else {
           <or-empty-state>
             Nothing saved yet. Tap the bookmark on any record to keep it here.
@@ -338,20 +362,30 @@ const ROW_STYLES = `
           ></div>
         }
       } @else {
-        <or-empty-state>No imported records match “{{ query().trim() }}”.</or-empty-state>
+        <or-empty-state>{{ emptyCopy('imported') }}</or-empty-state>
       }
     }
 
     <or-section-head heading="Playlists">
-      <or-button
-        class="new-btn"
-        size="sm"
-        ariaLabel="New playlist"
-        (click)="dialogOpen.set(true)"
-      >
-        <or-icon name="plus" [size]="18" />
-        New
-      </or-button>
+      <div class="pl-actions">
+        <or-button
+          size="sm"
+          ariaLabel="Create genre playlists from your library"
+          [disabled]="genrePlan().playlists === 0 || creatingGenres()"
+          (click)="createGenrePlaylists()"
+        >
+          Genre playlists
+        </or-button>
+        <or-button
+          class="new-btn"
+          size="sm"
+          ariaLabel="New playlist"
+          (click)="dialogOpen.set(true)"
+        >
+          <or-icon name="plus" [size]="18" />
+          New
+        </or-button>
+      </div>
     </or-section-head>
     @switch (playlists.status()) {
       @case ('loading') {
@@ -478,7 +512,7 @@ const ROW_STYLES = `
       color: var(--color-muted);
     }
     .filter {
-      margin-block-end: var(--spacing-xxs);
+      margin-block-end: var(--spacing-sm);
     }
     /* Reserved so the list does not jump when the count appears. */
     .filter-status {
@@ -488,6 +522,15 @@ const ROW_STYLES = `
       line-height: 1.5;
       color: var(--color-muted);
       font-variant-numeric: tabular-nums;
+    }
+    .genres {
+      margin-block-end: var(--spacing-xs);
+    }
+    .pl-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: var(--spacing-xs);
     }
     .sentinel {
       block-size: 1px;
@@ -627,6 +670,52 @@ export class LibraryPage {
    */
   protected readonly listQuery = signal('');
   protected readonly filtering = computed(() => this.listQuery().trim().length > 0);
+  /**
+   * Genres selected in the genre filter: normalised keys (see `genreChips`),
+   * '' is "No genre". Empty is no filter. Matches any selected key (OR).
+   * Applies at once, not debounced.
+   */
+  protected readonly genreFilter = signal<readonly string[]>([]);
+  /** Any text or genre narrowing: drives the status line and empty copy. */
+  protected readonly narrowed = computed(
+    () => this.filtering() || this.genreFilter().length > 0,
+  );
+  /** Every record in the library, each once (saved and imported). */
+  private readonly allTracks = computed(() =>
+    uniqueTracks(this.library.savedRecords(), this.library.importedTracks()),
+  );
+  protected readonly genreChipList = computed(() => genreChips(this.allTracks()));
+  /** The genre control is hidden until some record carries a genre (kept while a filter is active). */
+  protected readonly genreControlShown = computed(() =>
+    genreControlVisible(this.genreChipList(), this.genreFilter()),
+  );
+  protected readonly genreSuggestionList = computed(() =>
+    genreSuggestions(this.genreChipList()),
+  );
+  /**
+   * A selected genre no longer offered (its records left the library, or none
+   * are tagged any more) is dropped, so the list is never stuck empty.
+   * Pruning is skipped while the library is empty: that is usually transient
+   * (loading or a sync in flight), and it would wipe a valid filter. The
+   * tradeoff: a stale selection can persist while the library is empty. That is
+   * safe because the control stays visible while anything is selected, so the
+   * pills can always be cleared, and the next non-empty library prunes it.
+   */
+  private readonly genreFilterReset = effect(() => {
+    const selected = this.genreFilter();
+    if (!this.allTracks().length) return;
+    const next = resolveGenreFilter(selected, this.genreChipList());
+    if (next !== selected) this.genreFilter.set(next);
+  });
+  /** Preview of "Create genre playlists": how many playlists and tracks. */
+  protected readonly genrePlan = computed(() => {
+    const groups = groupByGenre(this.allTracks(), GENRE_MIN_TRACKS);
+    return {
+      playlists: groups.length,
+      tracks: groups.reduce((n, g) => n + g.trackIds.length, 0),
+    };
+  });
+  protected readonly creatingGenres = signal(false);
   protected readonly hasRecords = computed(
     () =>
       this.library.savedRecords().length > 0 ||
@@ -651,14 +740,20 @@ export class LibraryPage {
   /** Filtered, sorted lists: what rows render and what a row tap queues. */
   protected readonly savedShown = computed(() =>
     sortByColumn(
-      filterTracks(this.library.savedRecords(), this.listQuery()),
+      filterByGenre(
+        filterTracks(this.library.savedRecords(), this.listQuery()),
+        this.genreFilter(),
+      ),
       this.savedSort(),
       (t, key) => this.sortValue(t, key, 'saved'),
     ),
   );
   protected readonly importedShown = computed(() =>
     sortByColumn(
-      filterTracks(this.library.importedTracks(), this.listQuery()),
+      filterByGenre(
+        filterTracks(this.library.importedTracks(), this.listQuery()),
+        this.genreFilter(),
+      ),
       this.importedSort(),
       (t, key) => this.sortValue(t, key, 'imported'),
     ),
@@ -666,18 +761,67 @@ export class LibraryPage {
   /** Rendered slices; reset to the first page when the filter or sort changes. */
   protected readonly savedWindow = lazyWindow(
     this.savedShown,
-    () => `${this.listQuery()}|${this.savedSort()?.key}|${this.savedSort()?.dir}`,
+    () =>
+      `${this.listQuery()}|${JSON.stringify(this.genreFilter())}|${this.savedSort()?.key}|${this.savedSort()?.dir}`,
   );
   protected readonly importedWindow = lazyWindow(
     this.importedShown,
-    () => `${this.listQuery()}|${this.importedSort()?.key}|${this.importedSort()?.dir}`,
+    () =>
+      `${this.listQuery()}|${JSON.stringify(this.genreFilter())}|${this.importedSort()?.key}|${this.importedSort()?.dir}`,
   );
   protected readonly matchLabel = computed(() => {
     const n = this.savedShown().length + this.importedShown().length;
     const total =
       this.library.savedRecords().length + this.library.importedTracks().length;
-    return `${n} of ${total} record${total === 1 ? '' : 's'} match`;
+    const s = total === 1 ? '' : 's';
+    const genres = this.genreFilter();
+    if (genres.length) {
+      return `${n} of ${total} record${s} in ${describeGenres(genres, this.genreChipList())}`;
+    }
+    return `${n} of ${total} record${s} match`;
   });
+
+  /** Empty-list copy that names whichever filters are active. */
+  protected emptyCopy(list: ListId): string {
+    const records = list === 'saved' ? 'saved records' : 'imported records';
+    const text = this.listQuery().trim();
+    const genres = this.genreFilter();
+    const where = genres.length
+      ? ` in ${describeGenres(genres, this.genreChipList())}`
+      : '';
+    if (!text) return `No ${records}${where}.`;
+    return `No ${records} match “${text}”${where}.`;
+  }
+
+  /** Confirm, then create the private genre playlists (tops up existing ones). */
+  protected async createGenrePlaylists(): Promise<void> {
+    const { playlists, tracks } = this.genrePlan();
+    if (playlists === 0 || this.creatingGenres()) return;
+    const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const ok = await this.dialog.confirm({
+      title: 'Create genre playlists?',
+      message:
+        `${plural(playlists, 'playlist')}, ${plural(tracks, 'track')}. ` +
+        `Genres with fewer than ${GENRE_MIN_TRACKS} tracks are skipped. ` +
+        'Tracks are added as metadata only; playlists with auto-download on will fetch them. ' +
+        'Existing genre playlists, and your private playlists named after a genre, get the missing tracks added. Nothing is removed.',
+      confirmLabel: 'Create playlists',
+    });
+    if (!ok) return;
+    this.creatingGenres.set(true);
+    try {
+      const r = await this.playlists.createGenrePlaylists(this.allTracks());
+      this.toast.show(
+        r.created === 0 && r.updated === 0
+          ? 'Genre playlists are already up to date'
+          : `Genre playlists: ${r.created} created, ${r.updated} updated`,
+      );
+    } catch {
+      this.toast.show('Could not create genre playlists. Try again.');
+    } finally {
+      this.creatingGenres.set(false);
+    }
+  }
 
   private sortValue(
     t: Track,
